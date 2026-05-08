@@ -420,6 +420,24 @@ def get_profile_dir(name: str) -> Path:
     return _get_profiles_root() / canon
 
 
+def _find_profile_dir_case_insensitive(canon: str) -> Optional[Path]:
+    """Find an existing profile directory for *canon*, including legacy case."""
+    profiles_root = _get_profiles_root()
+    if not profiles_root.is_dir():
+        return None
+    try:
+        entries = [entry for entry in profiles_root.iterdir() if entry.is_dir()]
+        for entry in entries:
+            if entry.name == canon:
+                return entry
+        for entry in entries:
+            if entry.name.casefold() == canon.casefold():
+                return entry
+    except OSError:
+        return None
+    return None
+
+
 def profile_exists(name: str) -> bool:
     """Check whether a live (non-tombstoned) profile directory exists."""
     canon = normalize_profile_name(name)
@@ -473,8 +491,11 @@ def list_profile_names() -> List[str]:
     try:
         if profiles_root.is_dir():
             for entry in sorted(profiles_root.iterdir()):
-                if entry.is_dir() and entry.name != "default" and _PROFILE_ID_RE.match(entry.name):
-                    names.append(entry.name)
+                if not entry.is_dir():
+                    continue
+                name = normalize_profile_name(entry.name)
+                if name != "default" and _PROFILE_ID_RE.match(name) and name not in names:
+                    names.append(name)
     except OSError:
         pass
     return names
