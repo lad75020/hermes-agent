@@ -429,6 +429,33 @@ def _existing_profile_dir(name: str) -> tuple[str, Path]:
     return canon, profile_dir
 
 
+def _find_profile_dir_case_insensitive(canon: str) -> Optional[Path]:
+    """Return an existing profile directory for *canon*, tolerating legacy case.
+
+    Profile creation now normalizes names to lowercase, but older/manual profile
+    directories may exist as ``profiles/Ollama``. API and CLI ingress normalize
+    user input to lowercase, so resolve those legacy folders case-insensitively
+    when there is no exact lowercase directory.
+    """
+    profiles_root = _get_profiles_root()
+    if not profiles_root.is_dir():
+        return None
+    try:
+        # Prefer exact canonical directory names, but on case-insensitive
+        # filesystems return the directory entry's real casing instead of the
+        # synthetic lowercase path.
+        entries = [entry for entry in profiles_root.iterdir() if entry.is_dir()]
+        for entry in entries:
+            if entry.name == canon:
+                return entry
+        for entry in entries:
+            if entry.name.casefold() == canon.casefold():
+                return entry
+    except OSError:
+        return None
+    return None
+
+
 def get_profile_dir(name: str) -> Path:
     """Resolve a profile name to its HERMES_HOME directory."""
     canon = normalize_profile_name(name)
@@ -441,7 +468,8 @@ def get_profile_dir(name: str) -> Path:
     # profiles/hermes may still exist and must keep resolving.
     if not _PROFILE_ID_RE.match(canon):
         raise _invalid_profile_name_error(canon)
-    return _get_profiles_root() / canon
+    existing = _find_profile_dir_case_insensitive(canon)
+    return existing if existing is not None else _get_profiles_root() / canon
 
 
 def profile_exists(name: str) -> bool:
@@ -485,8 +513,8 @@ def _iter_named_profile_dirs(*, live_only: bool = True) -> list[Path]:
     return [
         entry for entry in sorted(profiles_root.iterdir())
         if entry.is_dir()
-        and entry.name != "default"
-        and _PROFILE_ID_RE.match(entry.name)
+        and normalize_profile_name(entry.name) != "default"
+        and _PROFILE_ID_RE.match(normalize_profile_name(entry.name))
         and named_profile_has_identity(entry)
         and not (live_only and named_profile_is_deleted(entry))
     ]
@@ -1037,7 +1065,7 @@ def _profile_info(name: str, path: Path, *, is_default: bool, alias_name: Option
         gateway_running = gateway_running or _served_by_running_multiplexer(name)
     skill_count = _cached_skill_count(path) if lazy_skill_count else _count_skills(path)
     return ProfileInfo(
-        name=name, path=path, is_default=is_default, gateway_running=gateway_running, model=model,
+        name=normalize_profile_name(name), path=path, is_default=is_default, gateway_running=gateway_running, model=model,
         provider=provider, has_env=(path / ".env").exists(), skill_count=skill_count,
         alias_path=alias_path, alias_name=alias_name, distribution_name=dist_name,
         distribution_version=dist_version, distribution_source=dist_source,

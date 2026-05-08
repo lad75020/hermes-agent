@@ -71,6 +71,7 @@ _STATIC_FEATURE_FLAGS = {
     "session_resources": True, "model_options": True, "session_chat": True,
     "session_chat_streaming": True, "session_fork": True, "session_model_lock": True,
     "reasoning_streaming": True,
+    "chat_completions_tool_output_events": True, "chat_completions_reasoning_summary_events": True,
     "admin_config_rw": False, "jobs_admin": False, "memory_write_api": False,
     "skills_api": True, "audio_api": False, "realtime_voice": False,
     "session_continuity_header": "X-Hermes-Session-Id",
@@ -78,6 +79,7 @@ _STATIC_FEATURE_FLAGS = {
 # /v1/capabilities "endpoints" table: name -> (method, path).
 _CAPABILITY_ENDPOINTS = (
     ("health", ("GET", "/health")), ("health_detailed", ("GET", "/health/detailed")),
+    ("profiles", ("GET", "/v1/profiles")),
     ("models", ("GET", "/v1/models")), ("model_options", ("GET", "/api/model/options")),
     ("chat_completions", ("POST", "/v1/chat/completions")),
     ("responses", ("POST", "/v1/responses")), ("runs", ("POST", "/v1/runs")),
@@ -1649,6 +1651,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         off and the prefix names this gateway's own profile), the served profile name, or
         ``_PROFILE_REJECTED`` (-> 404). Fail closed: a foreign prefix must never be ignored."""
         profile = (request.match_info.get("profile") or "").strip()
+        header_profile = request.headers.get("X-Hermes-Profile", "").strip()
+        if header_profile:
+            selected, error = self._parse_profile_header(request)
+            if error is not None or (profile and profile != selected):
+                return _PROFILE_REJECTED
+            profile = selected
         if not profile:
             return None
         cfg = getattr(self.gateway_runner, "config", None)
@@ -1723,6 +1731,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("GET", "/health/detailed", self._handle_health_detailed),
             ("GET", "/v1/health", self._handle_health),
             ("GET", "/v1/models", self._handle_models),
+            ("GET", "/v1/profiles", self._handle_profiles),
             ("GET", "/api/model/options", self._handle_model_options),
             ("GET", "/v1/capabilities", self._handle_capabilities),
             # Browser-control (gated on browser.extension_control.enabled + API key): POST
@@ -4293,6 +4302,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     result, usage = self._finish_turn_result(
                         agent, result, session_id, route=route, requested_runtime=requested_runtime,
                         route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
+                    if isinstance(result, dict) and not muted:
+                        self._maybe_auto_title_api_session(
+                            result.get("session_id", session_id), result.get("final_response") or "",
+                            result.get("messages") or conversation_history)
                     if muted and isinstance(result, dict):
                         # Project presentation only after finishing the source outcome. Keep
                         # the agent's result, transcript, failure flags and usage intact.

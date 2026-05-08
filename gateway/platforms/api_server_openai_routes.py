@@ -595,6 +595,130 @@ class OpenAICompatRoutesMixin:
             self._release_run_owner_if_forgotten(completion_id)
         return _approval_notify, _on_done
 
+    @staticmethod
+    def _chat_completion_debug_payload(value: Any, *, max_chars: int = 65_536) -> Dict[str, Any]:
+        """Return a JSON-safe payload for custom chat-completions debug SSE events."""
+        truncated = False
+        structured: Any = None
+        text: str
+        if isinstance(value, str):
+            text = value
+            try:
+                structured = json.loads(value)
+            except Exception:
+                structured = None
+        else:
+            try:
+                text = json.dumps(value, default=str, ensure_ascii=False)
+                structured = value
+            except Exception:
+                text = str(value)
+                structured = None
+        if len(text) > max_chars:
+            text = text[:max_chars]
+            truncated = True
+        payload: Dict[str, Any] = {"output": text, "truncated": truncated}
+        if structured is not None:
+            try:
+                json.dumps(structured, default=str)
+                payload["structured"] = structured
+            except Exception:
+                pass
+        return payload
+
+    def _parse_profile_header(
+        self, request: "web.Request"
+    ) -> tuple[str, Optional["web.Response"]]:
+        """Extract and validate X-Hermes-Profile, defaulting to the base profile."""
+        from gateway.platforms.api_server import _openai_error
+        raw = request.headers.get("X-Hermes-Profile", "").strip() or "default"
+        if re.search(r'[\r\n\x00]', raw):
+            return "default", web.json_response(
+                {"error": {"message": "Invalid profile", "type": "invalid_request_error"}},
+                status=400,
+            )
+
+        try:
+            from hermes_cli.profiles import normalize_profile_name, validate_profile_name, profile_exists
+            profile = normalize_profile_name(raw)
+            validate_profile_name(profile)
+            if not profile_exists(profile):
+                return "default", web.json_response(
+                    _openai_error(f"Unknown Hermes profile: {raw}", code="profile_not_found"),
+                    status=404,
+                )
+            return profile, None
+        except ValueError as e:
+            return "default", web.json_response(
+                _openai_error(str(e), code="invalid_profile"),
+                status=400,
+            )
+        except Exception as e:
+            logger.warning("Failed to resolve Hermes profile %r: %s", raw, e)
+            return "default", web.json_response(
+                _openai_error("Unable to resolve Hermes profile", err_type="server_error"),
+                status=500,
+            )
+
+    def _maybe_auto_title_api_session(
+        self,
+        session_id: Optional[str],
+        assistant_response: str,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Name an API-created session from its first assistant response.
+
+        Runs in a fire-and-forget background thread via title_generator so the
+        API response path is never delayed.  The title is stored in the
+        existing SessionDB ``title`` column; no schema changes are needed.
+        """
+        if not session_id or not assistant_response:
+            return
+        try:
+            from agent.title_generator import maybe_auto_title_from_response
+            maybe_auto_title_from_response(
+                self._ensure_session_db(),
+                session_id,
+                assistant_response,
+                conversation_history or [],
+            )
+        except Exception:
+            logger.debug("Failed to schedule API session auto-title", exc_info=True)
+
+    async def _handle_profiles(self, request: "web.Request") -> "web.Response":
+        """GET /v1/profiles — return Hermes profiles available to X-Hermes-Profile."""
+        from gateway.platforms.api_server import _openai_error
+        auth_err = self._check_auth(request)
+        if auth_err is not None:
+            return auth_err
+
+        try:
+            from hermes_cli.profiles import list_profiles
+            profiles = list_profiles()
+        except Exception as e:
+            logger.error("Error listing Hermes profiles: %s", e, exc_info=True)
+            return web.json_response(
+                _openai_error(f"Unable to list Hermes profiles: {e}", err_type="server_error"),
+                status=500,
+            )
+
+        return web.json_response({
+            "object": "list",
+            "data": [
+                {
+                    "id": profile.name,
+                    "object": "hermes.profile",
+                    "name": profile.name,
+                    "is_default": profile.is_default,
+                    "model": profile.model,
+                    "provider": profile.provider,
+                    "gateway_running": profile.gateway_running,
+                    "skill_count": profile.skill_count,
+                }
+                for profile in profiles
+            ],
+        })
+
     def _spawn_stream_agent(self, stream_q, *, on_done=None, **run_kwargs) -> tuple:
         """Start ``_run_agent`` for an SSE writer -> ``(agent_task, agent_ref)``. ``agent_ref[0]``
         lets the writer interrupt on disconnect; the EOS sentinel is enqueued from the task's done
@@ -765,6 +889,9 @@ class OpenAICompatRoutesMixin:
                 _started_tool_call_ids.discard(tool_call_id)
                 _stream_q.put_threadsafe(("__tool_progress__", {
                     "tool": function_name, "toolCallId": tool_call_id, "status": "completed"}))
+                payload = self._chat_completion_debug_payload(function_result)
+                payload.update({"tool": function_name, "toolCallId": tool_call_id, "status": "completed"})
+                _stream_q.put_threadsafe(("__tool_output__", payload))
 
             # tool_progress_callback deliberately NOT wired: it would duplicate the structured
             # start/complete callbacks (which carry the tool_call id).
@@ -897,6 +1024,7 @@ class OpenAICompatRoutesMixin:
             return {"id": completion_id, "object": "chat.completion.chunk", "created": created,
                     "model": model,
                     "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}], **extra}
+        reasoning_summary = ""
         content_sent = False
         try:
             await response.write(_sse_frame(_chunk({"role": "assistant"})))
@@ -908,9 +1036,16 @@ class OpenAICompatRoutesMixin:
                     if not self._tool_progress_events:
                         continue  # opted out for strict OpenAI clients (#12020)
                     await response.write(_sse_frame(delta[1], event="hermes.tool.progress"))
+                elif isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__tool_output__":
+                    if self._tool_progress_events:
+                        await response.write(_sse_frame(delta[1], event="Hermes.tool.output"))
                 elif isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__reasoning__":
                     # DeepSeek-style ``delta.reasoning_content`` (#99552), the field Open WebUI,
                     # opencode and the Vercel AI SDK render as a thinking block.
+                    reasoning_summary += str(delta[1])
+                    if self._tool_progress_events:
+                        await response.write(_sse_frame({"delta": delta[1], "summary": reasoning_summary},
+                                                        event="Hermes.reasoning.summary"))
                     await response.write(_sse_frame(_chunk({"reasoning_content": delta[1]})))
                 elif isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__status__":
                     await response.write(_sse_frame(delta[1], event="hermes.status"))

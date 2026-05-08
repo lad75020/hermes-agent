@@ -798,3 +798,136 @@ def maybe_auto_title(
         return upgrade
     start_title_upgrade(upgrade)
     return upgrade
+
+
+_RESPONSE_TITLE_PREFIX = "Provide a title of less than 50 characters for the following text : "
+
+def _clean_title(title: str, *, max_chars: int = 80) -> Optional[str]:
+    """Normalize LLM title output and enforce a hard character limit."""
+    title = ((title or "").strip().splitlines() or [""])[0].strip()
+    title = title.strip('"\'')
+    if title.lower().startswith("title:"):
+        title = title[6:].strip()
+    title = title.rstrip(".。")
+    if not title:
+        return None
+    if len(title) > max_chars:
+        ellipsis = "..."
+        title = title[: max(1, max_chars - len(ellipsis))].rstrip() + ellipsis
+    return title if title else None
+
+
+def generate_title_from_response_text(
+    assistant_response: str,
+    timeout: float = 30.0,
+    failure_callback: Optional[FailureCallback] = None,
+    main_runtime: dict = None,
+) -> Optional[str]:
+    """Generate a title from the first assistant response only.
+
+    Used by the OpenAI-compatible API adapter for API-created chats/sessions,
+    where frontend history/resume surfaces otherwise display technical ids.
+    The prompt intentionally matches the API-client requirement verbatim.
+    """
+    assistant_snippet = (assistant_response or "")[:2000]
+    if not assistant_snippet:
+        return None
+
+    messages = [
+        {"role": "user", "content": f"{_RESPONSE_TITLE_PREFIX}{assistant_snippet}"},
+    ]
+
+    try:
+        response = call_llm(
+            task="title_generation",
+            messages=messages,
+            max_tokens=64,
+            temperature=0.2,
+            timeout=timeout,
+            main_runtime=main_runtime,
+        )
+        # "less than 50 characters" => cap at 49 characters.
+        return _clean_title(response.choices[0].message.content or "", max_chars=49)
+    except Exception as e:
+        logger.warning("Response title generation failed: %s", e)
+        logger.debug("Response title generation traceback", exc_info=True)
+        if failure_callback is not None:
+            try:
+                failure_callback("title generation", e)
+            except Exception:
+                logger.debug("Response title generation failure_callback raised", exc_info=True)
+        return None
+
+
+def auto_title_session_from_response(
+    session_db,
+    session_id: str,
+    assistant_response: str,
+    failure_callback: Optional[FailureCallback] = None,
+    main_runtime: dict = None,
+    title_callback: Optional[TitleCallback] = None,
+) -> None:
+    """Generate and persist an API session title if the row is untitled."""
+    if not session_db or not session_id or not assistant_response:
+        return
+    try:
+        if hasattr(session_db, "get_session") and session_db.get_session(session_id) is None:
+            return
+        if session_db.get_session_title(session_id):
+            return
+    except Exception:
+        return
+
+    title = generate_title_from_response_text(
+        assistant_response,
+        failure_callback=failure_callback,
+        main_runtime=main_runtime,
+    )
+    if not title:
+        return
+
+    try:
+        title = _persist_session_title(session_db, session_id, title, source="llm")
+        if not title:
+            return
+        logger.debug("Auto-generated API session title: %s", title)
+        if title_callback is not None:
+            try:
+                title_callback(title, "llm")
+            except Exception:
+                logger.debug("API auto-title callback failed", exc_info=True)
+    except Exception as e:
+        logger.debug("Failed to set auto-generated API title: %s", e)
+
+
+def maybe_auto_title_from_response(
+    session_db,
+    session_id: str,
+    assistant_response: str,
+    conversation_history: list,
+    failure_callback: Optional[FailureCallback] = None,
+    main_runtime: dict = None,
+    title_callback: Optional[TitleCallback] = None,
+) -> None:
+    """Fire-and-forget title generation for API-created first responses."""
+    if not session_db or not session_id or not assistant_response:
+        return
+
+    user_msg_count = sum(1 for m in (conversation_history or []) if m.get("role") == "user")
+    if user_msg_count > 2:
+        return
+
+    if not _auto_title_enabled() or not _model_title_upgrade_enabled():
+        return
+    from agent.memory_provider import spawn_context_thread
+    thread = spawn_context_thread(
+        auto_title_session_from_response,
+        args=(session_db, session_id, assistant_response),
+        kwargs={
+            "failure_callback": failure_callback,
+            "main_runtime": main_runtime,
+            "title_callback": title_callback,
+        },
+        name="api-auto-title",
+    )
+    start_title_upgrade(thread)

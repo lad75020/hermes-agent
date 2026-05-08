@@ -321,6 +321,40 @@ def _is_compression_edge(child: dict, parent: dict) -> bool:
         and started_at >= parent_ended_at)
 
 
+@search_router.get("/api/sessions/search/conversations")
+async def search_session_conversations(
+    q: str = "", limit: int = 20, offset: int = 0,
+    source: Optional[str] = None, role: Optional[str] = None, profile: Optional[str] = None,
+):
+    """Search message content and return complete conversations for matching sessions."""
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+    if not q or not q.strip():
+        return {"results": [], "limit": limit, "offset": offset,
+                "matched_messages": 0, "matched_sessions": 0}
+
+    def _search(db):
+        matches = db.search_messages(query=q, source_filter=_csv(source) or None,
+                                     role_filter=_csv(role) or None, limit=limit, offset=offset)
+        sessions = {}
+        for match in matches:
+            sid = match.get("session_id")
+            if not sid:
+                continue
+            if sid not in sessions:
+                session = db.get_session(sid)
+                if not session:
+                    continue
+                sessions[sid] = {"session_id": sid, "session": session,
+                                 "matches": [], "messages": db.get_messages(sid)}
+            sessions[sid]["matches"].append(match)
+        return {"results": list(sessions.values()), "limit": limit, "offset": offset,
+                "matched_messages": len(matches), "matched_sessions": len(sessions)}
+
+    with http_failure("GET /api/sessions/search/conversations failed", 500, detail="Conversation search failed"):
+        return await asyncio.to_thread(_with_db, profile, _search, read_only=True)
+
+
 @search_router.get("/api/sessions/search")
 async def search_sessions(
     q: str = "", limit: int = 20, profile: Optional[str] = None, source: str | None = None,
