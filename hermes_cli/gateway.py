@@ -635,6 +635,66 @@ def _probe_systemd_service_running(system: bool = False) -> tuple[bool, bool]:
     return selected_system, result.stdout.strip() == "active"
 
 
+def _read_systemd_unit_environment(system: bool = False) -> dict[str, str]:
+    """Parse the gateway unit's ``Environment=`` directives.
+
+    ``systemctl show -p Environment`` returns a single line of
+    space-separated ``KEY=VALUE`` pairs; values are not quoted in the output
+    even when the unit file quoted them. We split on whitespace and ``=``.
+    """
+    selected_system = _select_systemd_scope(system)
+    try:
+        result = _run_systemctl(
+            [
+                "show",
+                get_service_name(),
+                "--no-pager",
+                "--property",
+                "Environment",
+            ],
+            system=selected_system,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (RuntimeError, subprocess.TimeoutExpired, OSError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    parsed: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if not line.startswith("Environment="):
+            continue
+        body = line[len("Environment="):].strip()
+        for token in body.split():
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            parsed[key] = value
+    return parsed
+
+
+def _sync_hermes_home_from_systemd_unit(system: bool) -> None:
+    """When acting on a system-scope unit, adopt its ``HERMES_HOME``.
+
+    Under ``sudo``, ``HERMES_HOME`` is stripped and ``HOME=/root``, so
+    :func:`get_hermes_home` falls back to ``/root/.hermes`` — the wrong
+    profile. The unit file pins ``HERMES_HOME`` for the actual gateway
+    process, so we mirror that into our own environment to make
+    ``read_runtime_status`` / ``get_running_pid`` read the correct files.
+    """
+    if not system:
+        return
+    env = _read_systemd_unit_environment(system=True)
+    unit_home = env.get("HERMES_HOME", "").strip()
+    if not unit_home:
+        return
+    current = os.environ.get("HERMES_HOME", "").strip()
+    if current == unit_home:
+        return
+    os.environ["HERMES_HOME"] = unit_home
+
+
 def _read_systemd_unit_properties(
     system: bool = False,
     properties: tuple[str, ...] = (
@@ -1139,6 +1199,27 @@ def is_macos() -> bool:
 
 def is_windows() -> bool:
     return sys.platform == 'win32'
+
+
+def _windows_gateway_should_absorb_console_controls() -> bool:
+    """Return True for detached Windows gateway runs that should ignore Ctrl+C.
+
+    Foreground ``hermes gateway run`` must remain interruptible from
+    PowerShell/CMD. Detached service-style launches opt in via
+    ``HERMES_GATEWAY_DETACHED=1``; older wrappers without the env marker are
+    treated as detached when no interactive stdin is attached.
+    """
+    if not is_windows():
+        return False
+
+    detached = os.getenv("HERMES_GATEWAY_DETACHED", "").strip().lower()
+    if detached in {"1", "true", "yes", "on"}:
+        return True
+
+    try:
+        return not bool(sys.stdin and sys.stdin.isatty())
+    except (ValueError, OSError):
+        return True
 
 
 # =============================================================================
@@ -2380,6 +2461,7 @@ def systemd_stop(system: bool = False):
     if system:
         _require_root_for_system_service("stop")
     _require_service_installed("stop", system=system)
+    _sync_hermes_home_from_systemd_unit(system=system)
     try:
         from gateway.status import get_running_pid, write_planned_stop_marker
         pid = get_running_pid(cleanup_stale=False)
@@ -2387,7 +2469,15 @@ def systemd_stop(system: bool = False):
             write_planned_stop_marker(pid)
     except Exception:
         pass
-    _run_systemctl(["stop", get_service_name()], system=system, check=True, timeout=90)
+    try:
+        _run_systemctl(["stop", get_service_name()], system=system, check=True, timeout=90)
+    except subprocess.TimeoutExpired:
+        label = _service_scope_label(system)
+        print(
+            f"Gateway {label} service is still stopping after 90s; "
+            "check `hermes gateway status` or logs for final shutdown state."
+        )
+        return
     print(f"✓ {_service_scope_label(system).capitalize()} service stopped")
 
 
@@ -2400,6 +2490,7 @@ def systemd_restart(system: bool = False):
         _preflight_user_systemd()
     _require_service_installed("restart", system=system)
     refresh_systemd_unit_if_needed(system=system)
+    _sync_hermes_home_from_systemd_unit(system=system)
     from gateway.status import get_running_pid
 
     pid = get_running_pid() or _systemd_main_pid(system=system)
@@ -2448,6 +2539,13 @@ def systemd_restart(system: bool = False):
                 _print_systemd_start_limit_wait(system=system)
                 return
             raise
+        except subprocess.TimeoutExpired:
+            label = _service_scope_label(system)
+            print(
+                f"Gateway {label} service is still restarting after 90s; "
+                "check `hermes gateway status` or logs for final state."
+            )
+            return
         _wait_for_systemd_service_restart(system=system, previous_pid=pid)
         return
 
@@ -2467,6 +2565,13 @@ def systemd_restart(system: bool = False):
             _print_systemd_start_limit_wait(system=system)
             return
         raise
+    except subprocess.TimeoutExpired:
+        label = _service_scope_label(system)
+        print(
+            f"Gateway {label} service is still restarting after 90s; "
+            "check `hermes gateway status` or logs for final state."
+        )
+        return
     _wait_for_systemd_service_restart(system=system, previous_pid=pid)
 
 
@@ -2480,6 +2585,8 @@ def systemd_status(deep: bool = False, system: bool = False, full: bool = False)
         print("✗ Gateway service is not installed")
         print(f"  Run: {'sudo ' if system else ''}hermes gateway install{scope_flag}")
         return
+
+    _sync_hermes_home_from_systemd_unit(system=system)
 
     if has_conflicting_systemd_units():
         print_systemd_scope_conflict_warning()
@@ -2956,34 +3063,17 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
     _guard_official_docker_root_gateway()
     sys.path.insert(0, str(PROJECT_ROOT))
 
-    # On Windows, when the gateway is launched as a detached background
-    # process (via ``hermes gateway install`` → Scheduled Task / Startup
-    # folder / direct pythonw.exe spawn) there is no console attached. In
-    # that case Windows can still deliver CTRL_C_EVENT / CTRL_BREAK_EVENT
-    # to the process group under some circumstances (e.g. when *another*
-    # process in the same group sends one), which Python 3.11 translates
-    # into KeyboardInterrupt inside asyncio.run(). The outer handler below
-    # catches that and exits cleanly — silently killing the gateway. On
-    # detached boots we must absorb those spurious signals so the gateway
-    # stays alive; real user Ctrl+C still comes through prompt_toolkit /
-    # the asyncio signal handler when running in a real console.
-    #
-    # IMPORTANT lesson (May 2026): we originally gated this on "stdin is
-    # NOT a TTY" assuming only detached pythonw runs would be vulnerable.
-    # Wrong. When the user runs `hermes gateway start` from a PowerShell
-    # console, the gateway inherits that console and stdin IS a TTY —
-    # but it's STILL vulnerable to CTRL_C_EVENT broadcast by any sibling
-    # `hermes` invocation (like `hermes gateway status` 30 seconds later)
-    # because Windows routes console events to all processes sharing the
-    # console. Every hermes CLI process after that sibling fires is a
-    # potential drive-by killer. So on Windows, for `gateway run`
-    # specifically (never interactive by design), always install the
-    # SIGINT absorber regardless of TTY state.
+    # Detached Windows gateway runs must ignore console-control broadcasts
+    # from sibling CLI processes, but foreground `hermes gateway run` still
+    # needs to obey the banner's "Press Ctrl+C to stop" contract.
+    # Service-style launchers set HERMES_GATEWAY_DETACHED=1; older wrappers
+    # without the marker are handled by the non-TTY fallback.
     try:
         _stdin_is_tty = bool(sys.stdin and sys.stdin.isatty())
     except (ValueError, OSError):
         _stdin_is_tty = False
-    if is_windows():
+    _absorb_windows_console_controls = _windows_gateway_should_absorb_console_controls()
+    if _absorb_windows_console_controls:
         try:
             signal.signal(signal.SIGINT, signal.SIG_IGN)
             if hasattr(signal, "SIGBREAK"):
@@ -3081,6 +3171,7 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
         replace=replace,
         argv=sys.argv,
         stdin_is_tty=_stdin_is_tty,
+        absorb_windows_console_controls=_absorb_windows_console_controls,
     )
 
     def _atexit_hook() -> None:
