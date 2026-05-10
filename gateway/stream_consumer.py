@@ -970,4 +970,5 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
     # text.
     def _clean_for_display(text: str) -> str:
         """Hide MEDIA:<path> / [[audio_as_voice]] directives; media is delivered post-stream."""
-        return _BasePlatformAdapter.strip_media_directives_for_display(text)
+        from gateway.platforms.response_images import redact_base64_images
+        return _BasePlatformAdapter.strip_media_directives_for_display(redact_base64_images(text))

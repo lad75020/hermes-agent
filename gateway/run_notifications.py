@@ -220,7 +220,7 @@ class GatewayNotificationsMixin(GatewayNotificationOwnershipMixin):
         files the model never asked for. MEDIA tags are NOT deduped against prior turns (a final-reply
         directive is a deliberate attach); stale auto-appended tags are deduped upstream.
 
-        Only ``MEDIA:`` directives — the explicit attachment contract — trigger post-stream uploads. See
+        Explicit ``MEDIA:`` directives and embedded image payloads trigger post-stream uploads. See
         #20834.
         """
         from urllib.parse import quote as _quote
@@ -229,6 +229,9 @@ class GatewayNotificationsMixin(GatewayNotificationOwnershipMixin):
             force_document_attachments = "[[as_document]]" in response
             from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
             media_files, cleaned = adapter.extract_media(response)
+            with self._media_delivery_scope_for_source(event.source):
+                embedded_images, cleaned = BasePlatformAdapter.extract_base64_images(cleaned)
+            media_files.extend((path, False) for path in embedded_images)
             media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
             # Strip image URLs (parity with the non-streaming chain); no extract_local_files here.
             # Do NOT deduplicate explicit MEDIA tags against prior turns here (#73771). This rescan is
