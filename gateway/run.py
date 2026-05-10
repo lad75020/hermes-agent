@@ -25269,6 +25269,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             media_files, media_cleaned = adapter.extract_media(response)
             media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+            base64_image_files, cleaned = adapter.extract_base64_images(cleaned)
             # Do NOT deduplicate explicit MEDIA tags against prior turns here
             # (#73771). This rescan is already EXPLICIT-ONLY (see docstring):
             # a MEDIA: directive in the final streamed reply is the model
@@ -25321,6 +25322,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     image_paths.append(media_path)
                 else:
                     non_image_media.append((media_path, is_voice))
+            for file_path in base64_image_files:
+                if not force_document_attachments:
+                    image_paths.append(file_path)
+                else:
+                    non_image_media.append((file_path, False))
 
             non_image_local: list = []
             for file_path in base64_image_files:

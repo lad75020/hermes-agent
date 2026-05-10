@@ -48,6 +48,71 @@ def _consume_detached_handler_exception(task: "asyncio.Task") -> None:
         )
 
 
+_BASE64_IMAGE_MAX_BYTES = 100 * 1024 * 1024
+_IMAGE_B64_FIELD_RE = re.compile(
+    r'(?P<prefix>"image_base64"\s*:\s*")(?P<data>[A-Za-z0-9+/=\r\n]+)(?P<suffix>")',
+    re.DOTALL,
+)
+_DATA_IMAGE_RE = re.compile(
+    r'data:(?P<mime>image/[A-Za-z0-9.+-]+);base64,(?P<data>[A-Za-z0-9+/=\r\n]+)',
+    re.DOTALL,
+)
+
+
+def _image_ext_for_mime(mime_type: str) -> str:
+    mime = (mime_type or "").split(";", 1)[0].strip().lower()
+    if mime == "image/jpeg":
+        return ".jpg"
+    return mimetypes.guess_extension(mime) or ".png"
+
+
+def _mime_from_image_bytes(raw: bytes, fallback: str = "image/png") -> str:
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return fallback or "image/png"
+
+
+def _save_response_base64_image(
+    b64_data: str, *, mime_type: str = "image/png", filename: str | None = None
+) -> str | None:
+    """Decode a response-embedded base64 image into Hermes' image cache."""
+    normalized = re.sub(r"\s+", "", b64_data or "")
+    if not normalized or (len(normalized) * 3) // 4 > _BASE64_IMAGE_MAX_BYTES:
+        return None
+    try:
+        raw = base64.b64decode(normalized, validate=True)
+    except Exception:
+        logger.warning("Could not decode embedded base64 image", exc_info=True)
+        return None
+    if not raw or len(raw) > _BASE64_IMAGE_MAX_BYTES:
+        return None
+
+    detected_mime = _mime_from_image_bytes(raw, mime_type)
+    try:
+        from hermes_constants import get_hermes_home
+
+        cache_dir = Path(get_hermes_home()) / "cache" / "images"
+    except Exception:
+        cache_dir = Path.home() / ".hermes" / "cache" / "images"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = Path(str(filename)).name if filename else ""
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", safe_name).strip("._")
+    if not safe_name:
+        safe_name = f"embedded_image_{uuid.uuid4().hex[:12]}{_image_ext_for_mime(detected_mime)}"
+    path = cache_dir / safe_name
+    if path.exists():
+        path = cache_dir / f"{path.stem}_{uuid.uuid4().hex[:8]}{path.suffix}"
+    path.write_bytes(raw)
+    return str(path)
+
+
 # Audio file extensions Hermes recognizes for native audio delivery.
 # Keep Telegram's narrower attachment/voice sets below separate: formats such
 # as MPEG-2 Layer II are audio to Hermes but unsupported by sendAudio/sendVoice.
@@ -4847,70 +4912,44 @@ class BasePlatformAdapter(ABC):
 
     @staticmethod
     def extract_base64_images(content: str) -> Tuple[List[str], str]:
-        """Extract embedded base64 image payloads into local cache files.
-
-        Handles Hermes API image JSON such as ``image_base64`` + ``mime_type``
-        and data URLs such as ``data:image/png;base64,...``.  The returned
-        cleaned text redacts the heavy payload so messaging platforms don't try
-        to send megabytes of base64 as a chat message.
-        """
+        """Persist embedded image payloads and redact them from response text."""
         if not content or ("image_base64" not in content and "data:image/" not in content):
             return [], content
 
-        paths: list[str] = []
-        cleaned = content
+        paths: List[str] = []
+        try:
+            parsed = json.loads(content)
+            candidates = parsed if isinstance(parsed, list) else [parsed]
+            item = next(
+                (candidate for candidate in candidates
+                 if isinstance(candidate, dict) and "image_base64" in candidate),
+                {},
+            )
+            default_mime = str(item.get("mime_type") or item.get("original_mime_type") or "image/png")
+            default_filename = item.get("filename")
+        except Exception:
+            mime_match = re.search(r'"mime_type"\s*:\s*"([^"]+)"', content)
+            name_match = re.search(r'"filename"\s*:\s*"([^"]+)"', content)
+            default_mime = mime_match.group(1) if mime_match else "image/png"
+            default_filename = name_match.group(1) if name_match else None
 
-        def _json_defaults() -> tuple[str, str | None]:
-            mime_type = "image/png"
-            filename = None
-            try:
-                parsed = json.loads(content)
-                candidates = parsed if isinstance(parsed, list) else [parsed]
-                for item in candidates:
-                    if not isinstance(item, dict) or "image_base64" not in item:
-                        continue
-                    mime_type = str(
-                        item.get("mime_type")
-                        or item.get("original_mime_type")
-                        or mime_type
-                    )
-                    filename = item.get("filename") or filename
-                    break
-            except Exception:
-                m = re.search(r'"mime_type"\s*:\s*"([^"]+)"', content)
-                if m:
-                    mime_type = m.group(1)
-                f = re.search(r'"filename"\s*:\s*"([^"]+)"', content)
-                if f:
-                    filename = f.group(1)
-            return mime_type, str(filename) if filename else None
-
-        default_mime, default_filename = _json_defaults()
-
-        def _replace_image_field(match: re.Match) -> str:
+        def replace_image_field(match: re.Match) -> str:
             path = _save_response_base64_image(
-                match.group("data"),
-                mime_type=default_mime,
-                filename=default_filename,
+                match.group("data"), mime_type=default_mime, filename=default_filename
             )
             if path:
                 paths.append(path)
             return f'{match.group("prefix")}[omitted; sent as image attachment]{match.group("suffix")}'
 
-        cleaned = _IMAGE_B64_FIELD_RE.sub(_replace_image_field, cleaned)
-
-        def _replace_data_url(match: re.Match) -> str:
-            path = _save_response_base64_image(
-                match.group("data"),
-                mime_type=match.group("mime"),
-            )
+        def replace_data_url(match: re.Match) -> str:
+            path = _save_response_base64_image(match.group("data"), mime_type=match.group("mime"))
             if path:
                 paths.append(path)
             return f'data:{match.group("mime")};base64,[omitted; sent as image attachment]'
 
-        cleaned = _DATA_IMAGE_RE.sub(_replace_data_url, cleaned)
-        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
-        return paths, cleaned
+        cleaned = _IMAGE_B64_FIELD_RE.sub(replace_image_field, content)
+        cleaned = _DATA_IMAGE_RE.sub(replace_data_url, cleaned)
+        return paths, re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
     @staticmethod
     def extract_images(content: str) -> Tuple[List[Tuple[str, str]], str]:
@@ -5483,13 +5522,19 @@ class BasePlatformAdapter(ABC):
         ``validate_media_delivery_path`` accepts the path so undeliverable
         paths stay visible for debugging.
         """
-        if (
-            "MEDIA:" not in text
-            and "[[audio_as_voice]]" not in text
-            and "[[as_document]]" not in text
-        ):
+        if not any(marker in text for marker in (
+            "MEDIA:", "[[audio_as_voice]]", "[[as_document]]", "image_base64", "data:image/"
+        )):
             return text
         cleaned = _strip_media_tag_directives(text)
+        cleaned = _IMAGE_B64_FIELD_RE.sub(
+            lambda match: f'{match.group("prefix")}[omitted; sent as image attachment]{match.group("suffix")}',
+            cleaned,
+        )
+        cleaned = _DATA_IMAGE_RE.sub(
+            lambda match: f'data:{match.group("mime")};base64,[omitted; sent as image attachment]',
+            cleaned,
+        )
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         return cleaned.rstrip()
 
@@ -6798,6 +6843,7 @@ class BasePlatformAdapter(ABC):
                 # Extract MEDIA:<path> tags (from TTS tool) before other processing
                 media_files, response = self.extract_media(response)
                 media_files = self.filter_media_delivery_paths(media_files, session_key=session_key)
+                base64_image_files, response = self.extract_base64_images(response)
 
                 # Extract response-embedded base64 images before text delivery.
                 # Otherwise platforms see multi-megabyte image_base64/data URLs
@@ -6854,7 +6900,7 @@ class BasePlatformAdapter(ABC):
                 # empty text with no attachment, and the `if text_content` guard
                 # below then drops it silently. Recover on every platform (#33842
                 # was Discord-only); the guard avoids duplicating an attachment.
-                if not (text_content or images or local_files or media_files):
+                if not (text_content or images or local_files or media_files or base64_image_files):
                     # Recover from the post-extract_media `response`, not the raw
                     # snapshot: extract_media already stripped MEDIA (incl. spaced
                     # paths) with its full grammar, so no fragment can leak.
@@ -7152,6 +7198,11 @@ class BasePlatformAdapter(ABC):
                         _image_paths.append(file_path)
                     else:
                         _non_image_local.append(file_path)
+                for file_path in base64_image_files:
+                    if not force_document_attachments:
+                        _image_paths.append(file_path)
+                    else:
+                        _non_image_local.append(file_path)
 
                 if _image_paths:
                     try:
@@ -7250,7 +7301,7 @@ class BasePlatformAdapter(ABC):
                 # deliverable, fail loudly rather than dropping it in silence.
                 _anything_delivered = (
                     delivery_attempted or _tts_caption_delivered
-                    or images or local_files or media_files
+                    or images or local_files or media_files or base64_image_files
                 )
                 if not _anything_delivered and _response_pre_extract.strip():
                     logger.error(
