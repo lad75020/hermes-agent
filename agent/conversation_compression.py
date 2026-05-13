@@ -4340,22 +4340,12 @@ def compress_context(
             compression_made_progress=commit.made_progress, compression_used_fallback=_compression_used_fallback,
             compression_feasibility_skip=_compression_feasibility_skip, task_id=task_id,
         )
-        if getattr(agent, "reasoning_callback", None):
-            try:
-                agent.reasoning_callback(json.dumps({
-                    "type": "context_compression",
-                    "status": "completed",
-                    "message": "Context compression completed",
-                    "session_id": getattr(agent, "session_id", None),
-                    "parent_session_id": commit.old_session_id,
-                    "messages_before": _pre_msg_count,
-                    "messages_after": len(compressed),
-                    "tokens_before": approx_tokens,
-                    "tokens_after": _compressed_est,
-                    "compression_count": agent.context_compressor.compression_count,
-                }))
-            except Exception as exc:
-                logger.debug("Failed to emit compression reasoning event: %s", exc)
+        from agent.conversation_compression_reasoning import emit_compression_reasoning
+        emit_compression_reasoning(
+            agent, old_session_id=commit.old_session_id,
+            messages_before=_pre_msg_count, messages_after=len(compressed),
+            tokens_before=approx_tokens, tokens_after=_compressed_est,
+        )
         logger.info(
             "context compression done: session=%s messages=%d->%d rough_tokens=~%s awaiting_real_usage=true",
             agent.session_id or "none", _pre_msg_count, len(compressed), f"{_compressed_est:,}",

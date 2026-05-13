@@ -719,6 +719,18 @@ class OpenAICompatRoutesMixin:
             ],
         })
 
+    @staticmethod
+    def _reasoning_summary_payload(delta: str, summary: str) -> dict[str, Any]:
+        """Keep compression metadata structured beside the original reasoning delta."""
+        payload: dict[str, Any] = {"delta": delta, "summary": summary}
+        try:
+            parsed_message = json.loads(delta)
+        except (TypeError, ValueError):
+            parsed_message = None
+        if isinstance(parsed_message, dict) and parsed_message.get("type") == "context_compression":
+            payload["message"] = parsed_message
+        return payload
+
     def _spawn_stream_agent(self, stream_q, *, on_done=None, **run_kwargs) -> tuple:
         """Start ``_run_agent`` for an SSE writer -> ``(agent_task, agent_ref)``. ``agent_ref[0]``
         lets the writer interrupt on disconnect; the EOS sentinel is enqueued from the task's done
@@ -1044,8 +1056,9 @@ class OpenAICompatRoutesMixin:
                     # opencode and the Vercel AI SDK render as a thinking block.
                     reasoning_summary += str(delta[1])
                     if self._tool_progress_events:
-                        await response.write(_sse_frame({"delta": delta[1], "summary": reasoning_summary},
-                                                        event="Hermes.reasoning.summary"))
+                        await response.write(_sse_frame(
+                            self._reasoning_summary_payload(delta[1], reasoning_summary),
+                            event="Hermes.reasoning.summary"))
                     await response.write(_sse_frame(_chunk({"reasoning_content": delta[1]})))
                 elif isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__status__":
                     await response.write(_sse_frame(delta[1], event="hermes.status"))
