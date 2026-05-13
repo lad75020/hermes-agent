@@ -362,6 +362,7 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
     app.router.add_delete("/v1/responses/{response_id}", adapter._handle_delete_response)
+    app.router.add_post("/v1/requests/{request_id}/cancel", adapter._handle_cancel_request)
     return app
 
 
@@ -381,6 +382,36 @@ def auth_adapter():
 
 
 class TestAgentExecution:
+    @pytest.mark.asyncio
+    async def test_cancel_request_interrupts_active_agent_and_task(self, adapter):
+        request_id = "req-test-cancel"
+        mock_agent = MagicMock()
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        mock_task.cancel = MagicMock()
+        adapter._active_api_agents[request_id] = mock_agent
+        adapter._active_api_tasks[request_id] = mock_task
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(f"/v1/requests/{request_id}/cancel")
+            assert resp.status == 200
+            data = await resp.json()
+
+        assert data == {"request_id": request_id, "status": "cancelling"}
+        mock_agent.interrupt.assert_called_once_with("Cancel requested via API")
+        mock_task.cancel.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_cancel_request_returns_404_for_unknown_request(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/v1/requests/not-running/cancel")
+            assert resp.status == 404
+            data = await resp.json()
+
+        assert data["error"]["code"] == "request_not_found"
+
     @pytest.mark.asyncio
     async def test_run_agent_uses_session_id_as_task_id(self, adapter):
         mock_agent = MagicMock()

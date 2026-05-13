@@ -611,6 +611,12 @@ class APIServerAdapter(BasePlatformAdapter):
         # Active run agent/task references for stop support
         self._active_run_agents: Dict[str, Any] = {}
         self._active_run_tasks: Dict[str, "asyncio.Task"] = {}
+        # Active OpenAI-compatible request references for explicit cancel support.
+        # Clients pass X-Hermes-Request-Id on /v1/chat/completions or /v1/responses,
+        # then POST /v1/requests/{request_id}/cancel to interrupt the agent.
+        self._active_api_agents: Dict[str, Any] = {}
+        self._active_api_agent_refs: Dict[str, list] = {}
+        self._active_api_tasks: Dict[str, "asyncio.Task"] = {}
         # Pollable run status for dashboards and external control-plane UIs.
         self._run_statuses: Dict[str, Dict[str, Any]] = {}
         # Active approval session key for each run_id.  The approval core
@@ -633,6 +639,37 @@ class APIServerAdapter(BasePlatformAdapter):
             items = [str(value)]
 
         return tuple(str(item).strip() for item in items if str(item).strip())
+
+    @staticmethod
+    def _normalize_api_request_id(value: Any) -> str:
+        """Return a safe client-supplied cancellation id or an empty string."""
+        request_id = str(value or "").strip()
+        if not request_id or len(request_id) > 128:
+            return ""
+        if re.search(r"[\r\n\x00]", request_id):
+            return ""
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]+", request_id):
+            return ""
+        return request_id
+
+    def _track_api_request(self, request_id: str, agent_ref: list, task: "asyncio.Task") -> None:
+        """Track an active chat/responses request for explicit cancellation."""
+        request_id = self._normalize_api_request_id(request_id)
+        if not request_id:
+            return
+        self._active_api_agent_refs[request_id] = agent_ref
+        self._active_api_tasks[request_id] = task
+
+        def _cleanup(done_task):
+            if self._active_api_tasks.get(request_id) is done_task:
+                self._active_api_tasks.pop(request_id, None)
+                self._active_api_agents.pop(request_id, None)
+                self._active_api_agent_refs.pop(request_id, None)
+
+        try:
+            task.add_done_callback(_cleanup)
+        except Exception:
+            pass
 
     @staticmethod
     def _resolve_model_name(explicit: str) -> str:
@@ -1103,6 +1140,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "run_events": {"method": "GET", "path": "/v1/runs/{run_id}/events"},
                 "run_approval": {"method": "POST", "path": "/v1/runs/{run_id}/approval"},
                 "run_stop": {"method": "POST", "path": "/v1/runs/{run_id}/stop"},
+                "request_cancel": {"method": "POST", "path": "/v1/requests/{request_id}/cancel"},
             },
         })
 
@@ -1226,6 +1264,10 @@ class APIServerAdapter(BasePlatformAdapter):
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
+        raw_api_request_id = request.headers.get("X-Hermes-Request-Id", "")
+        api_request_id = self._normalize_api_request_id(raw_api_request_id)
+        if raw_api_request_id and not api_request_id:
+            return web.json_response(_openai_error("Invalid X-Hermes-Request-Id", code="invalid_request_id"), status=400)
 
         if stream:
             import queue as _q
@@ -1333,6 +1375,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 gateway_session_key=gateway_session_key,
                 profile_name=profile_name,
             ))
+            self._track_api_request(api_request_id, agent_ref, agent_task)
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
             agent_task.add_done_callback(lambda _fut: _stream_q.put(None))
@@ -1344,6 +1387,8 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         # Non-streaming: run the agent (with optional Idempotency-Key)
+        agent_ref = [None]
+
         async def _compute_completion():
             return await self._run_agent(
                 user_message=user_message,
@@ -1352,6 +1397,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
                 profile_name=profile_name,
+                agent_ref=agent_ref,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -1367,7 +1413,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
         else:
             try:
-                result, usage = await _compute_completion()
+                task = asyncio.ensure_future(_compute_completion())
+                self._track_api_request(api_request_id, agent_ref, task)
+                result, usage = await task
+            except asyncio.CancelledError:
+                return web.json_response(
+                    _openai_error("Request cancelled", code="request_cancelled"),
+                    status=499,
+                )
             except Exception as e:
                 logger.error("Error running agent for chat completions: %s", e, exc_info=True)
                 return web.json_response(
@@ -2344,6 +2397,11 @@ class APIServerAdapter(BasePlatformAdapter):
         session_id = stored_session_id or str(uuid.uuid4())
 
         stream = bool(body.get("stream", False))
+        raw_api_request_id = request.headers.get("X-Hermes-Request-Id", "")
+        api_request_id = self._normalize_api_request_id(raw_api_request_id)
+        if raw_api_request_id and not api_request_id:
+            return web.json_response(_openai_error("Invalid X-Hermes-Request-Id", code="invalid_request_id"), status=400)
+
         if stream:
             # Streaming branch — emit OpenAI Responses SSE events as the
             # agent runs so frontends can render text deltas and tool
@@ -2398,6 +2456,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 gateway_session_key=gateway_session_key,
                 profile_name=profile_name,
             ))
+            self._track_api_request(api_request_id, agent_ref, agent_task)
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
             agent_task.add_done_callback(lambda _fut: _stream_q.put(None))
@@ -2423,6 +2482,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 gateway_session_key=gateway_session_key,
             )
 
+        agent_ref = [None]
+
         async def _compute_response():
             return await self._run_agent(
                 user_message=user_message,
@@ -2430,6 +2491,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=instructions,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                agent_ref=agent_ref,
+                profile_name=profile_name,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -2448,7 +2511,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
         else:
             try:
-                result, usage = await _compute_response()
+                task = asyncio.ensure_future(_compute_response())
+                self._track_api_request(api_request_id, agent_ref, task)
+                result, usage = await task
+            except asyncio.CancelledError:
+                return web.json_response(
+                    _openai_error("Request cancelled", code="request_cancelled"),
+                    status=499,
+                )
             except Exception as e:
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
                 return web.json_response(
@@ -2553,6 +2623,42 @@ class APIServerAdapter(BasePlatformAdapter):
             "object": "response",
             "deleted": True,
         })
+
+    async def _handle_cancel_request(self, request: "web.Request") -> "web.Response":
+        """POST /v1/requests/{request_id}/cancel — interrupt active chat/responses request."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        request_id = self._normalize_api_request_id(request.match_info.get("request_id", ""))
+        if not request_id:
+            return web.json_response(_openai_error("Invalid request id", code="invalid_request_id"), status=400)
+
+        agent = self._active_api_agents.get(request_id)
+        agent_ref = self._active_api_agent_refs.get(request_id)
+        if agent is None and agent_ref:
+            try:
+                agent = agent_ref[0]
+            except Exception:
+                agent = None
+        task = self._active_api_tasks.get(request_id)
+
+        if agent is None and task is None:
+            return web.json_response(
+                _openai_error(f"Request not found: {request_id}", code="request_not_found"),
+                status=404,
+            )
+
+        if agent is not None:
+            try:
+                agent.interrupt("Cancel requested via API")
+            except Exception:
+                pass
+
+        if task is not None and not task.done():
+            task.cancel()
+
+        return web.json_response({"request_id": request_id, "status": "cancelling"})
 
     # ------------------------------------------------------------------
     # Cron jobs API
@@ -3571,6 +3677,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
             self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)
+            self._app.router.add_post("/v1/requests/{request_id}/cancel", self._handle_cancel_request)
             # Cron jobs management API
             self._app.router.add_get("/api/jobs", self._handle_list_jobs)
             self._app.router.add_post("/api/jobs", self._handle_create_job)
