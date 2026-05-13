@@ -16,6 +16,7 @@ from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
 from agent.i18n import t
+from gateway.platforms.api_server_request_cancel import APIRequestCancellationMixin
 
 try:
     from aiohttp import web
@@ -548,7 +549,7 @@ class _ResponsesStream:
         await self.write_event("response.failed", {"type": "response.failed", "response": env})
 
 
-class OpenAICompatRoutesMixin:
+class OpenAICompatRoutesMixin(APIRequestCancellationMixin):
     """/v1/chat/completions and /v1/responses handlers + SSE writers."""
 
     def _select_request_route(
@@ -780,6 +781,9 @@ class OpenAICompatRoutesMixin:
         limited = self._concurrency_limited_response()
         if limited is not None:
             return limited
+        api_request_id, request_id_error = self._api_request_id(request)
+        if request_id_error is not None:
+            return request_id_error
         try:
             body = await request.json()
         except Exception:
@@ -915,6 +919,8 @@ class OpenAICompatRoutesMixin:
                 _stream_q, on_done=end_stream_run, tool_start_callback=_on_tool_start,
                 tool_complete_callback=_on_tool_complete, approval_notify_callback=approval_notify,
                 approval_session_key=completion_id, **run_kwargs)
+            self._track_api_request(api_request_id, agent_ref, agent_task,
+                                    scope=self._run_idempotency_scope(request))
             # #13437 identity contract: an explicit-header client keeps addressing the id it
             # sent; the response echoes that stable id while reads/writes adopt the live tip,
             # so a rotation mid-turn (after these headers are prepared) never changes what the
@@ -926,12 +932,12 @@ class OpenAICompatRoutesMixin:
                 gateway_session_key=gateway_session_key)
 
         async def _compute_completion():
-            return await self._run_agent(**run_kwargs)
+            return await self._run_cancellable_agent(request, api_request_id, **run_kwargs)
         outcome, err = await self._run_idempotent(
             request, body, _compute_completion, log_label="chat completions",
             fingerprint_keys=["model", "provider", "model_options", "messages", "tools", "tool_choice", "stream",
                               "hermes_notification_category"],
-            route="chat_completions",
+            route="chat_completions", api_request_id=api_request_id,
         )
         if err is not None:
             return err
@@ -981,7 +987,7 @@ class OpenAICompatRoutesMixin:
 
     async def _run_idempotent(
         self, request: web.Request, body: dict[str, Any], compute, *,
-        log_label: str, fingerprint_keys: list[str], route: str) -> tuple:
+        log_label: str, fingerprint_keys: list[str], route: str, api_request_id: str = "") -> tuple:
         """Run ``compute()`` once per (principal scope, logical route, Idempotency-Key) + body fingerprint
         -> ``((result, usage), None)`` or ``(None, 500 response)``.
 
@@ -1003,6 +1009,10 @@ class OpenAICompatRoutesMixin:
             else:
                 result, usage = await compute()
             return (result, usage), None
+        except asyncio.CancelledError:
+            if not api_request_id:
+                raise
+            return None, _error_response("Request cancelled", 499, code="request_cancelled")
         except Exception as e:
             logger.error("Error running agent for %s: %s", log_label, e, exc_info=True)
             message = "" if getattr(e, "_notification_presentation_suppressed", False) is True else f"Internal server error: {e}"
@@ -1190,6 +1200,9 @@ class OpenAICompatRoutesMixin:
         limited = self._concurrency_limited_response()
         if limited is not None:
             return limited
+        api_request_id, request_id_error = self._api_request_id(request)
+        if request_id_error is not None:
+            return request_id_error
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
@@ -1309,6 +1322,8 @@ class OpenAICompatRoutesMixin:
                 _stream_q, tool_progress_callback=_on_tool_progress,
                 tool_start_callback=_on_tool_start, tool_complete_callback=_on_tool_complete,
                 interim_assistant_callback=_on_commentary, **run_kwargs)
+            self._track_api_request(api_request_id, agent_ref, agent_task,
+                                    scope=self._run_idempotency_scope(request))
             return await self._write_sse_responses(
                 request=request, response_id=f"resp_{uuid.uuid4().hex[:28]}",
                 model=body.get("model", self._model_name), created_at=int(time.time()),
@@ -1318,11 +1333,11 @@ class OpenAICompatRoutesMixin:
                 session_id=session_id, gateway_session_key=gateway_session_key)
 
         async def _compute_response():
-            return await self._run_agent(**run_kwargs)
+            return await self._run_cancellable_agent(request, api_request_id, **run_kwargs)
         outcome, err = await self._run_idempotent(
             request, body, _compute_response, log_label="responses",
             fingerprint_keys=["input", "instructions", "previous_response_id", "conversation", "model", "provider", "model_options", "tools"],
-            route="responses",
+            route="responses", api_request_id=api_request_id,
         )
         if err is not None:
             return err
