@@ -686,6 +686,72 @@ class OpenAICompatRoutesMixin(APIRequestCancellationMixin):
         except Exception:
             logger.debug("Failed to schedule API session auto-title", exc_info=True)
 
+    @staticmethod
+    def _profile_reasoning_supported(model: Optional[str], provider: Optional[str]) -> bool:
+        """Return whether a profile's selected model appears to support reasoning.
+
+        The primary signal is models.dev metadata.  Some provider catalogs lag
+        behind newly released reasoning models, so keep a conservative name
+        heuristic as a fallback for clients that need to decide whether to show
+        a reasoning-effort control before sending a request.
+        """
+        raw_model = (model or "").strip()
+        if not raw_model:
+            return False
+
+        try:
+            from agent.models_dev import get_model_capabilities
+            caps = get_model_capabilities((provider or "").strip(), raw_model)
+            if caps is not None and bool(getattr(caps, "supports_reasoning", False)):
+                return True
+        except Exception as exc:
+            logger.debug(
+                "Unable to resolve reasoning capabilities for profile model %s/%s: %s",
+                provider,
+                model,
+                exc,
+            )
+
+        value = raw_model.lower()
+        exact = {
+            "o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini",
+            "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5.1", "gpt-5.1-codex",
+            "gpt-5.5", "gpt-5.5-pro",
+        }
+        if value in exact:
+            return True
+        prefixes = (
+            "openai/o", "openai/gpt-5", "gpt-5",
+            "anthropic/claude-3.7", "anthropic/claude-sonnet-4", "anthropic/claude-opus-4", "anthropic/claude-haiku-4",
+            "google/gemini-2.5", "google/gemini-3", "gemini-2.5", "gemini-3",
+            "x-ai/grok-3", "x-ai/grok-4", "grok-3", "grok-4",
+            "deepseek/deepseek-r1", "deepseek/deepseek-v3.1", "deepseek/deepseek-v4",
+            "qwen/qwq", "qwen/qwen3", "qwen/qwen-plus", "qwen/qwen-max",
+            "moonshotai/kimi", "z-ai/glm-4.5", "z-ai/glm-5",
+            "minimax/minimax-m2", "mistralai/mistral-medium",
+            "nvidia/nemotron", "arcee-ai/trinity", "perceptron/",
+        )
+        if any(value.startswith(prefix) for prefix in prefixes):
+            return True
+        markers = (
+            "-thinking", ":thinking", "thinking",
+            "reasoning", "deepseek-r1", "qwq", "qwen3", "gemini-2.5", "gemini-3",
+            "claude-3.7", "claude-sonnet-4", "claude-opus-4", "grok-3", "grok-4",
+        )
+        provider_value = (provider or "").lower()
+        return any(marker in value for marker in markers) or (
+            "openai" in provider_value and value.startswith("o")
+        )
+
+    @classmethod
+    def _profile_supported_parameters(cls, model: Optional[str], provider: Optional[str]) -> list[str]:
+        """Build OpenAI/OpenRouter-style supported parameter hints for a profile."""
+        params: list[str] = []
+        if cls._profile_reasoning_supported(model, provider):
+            params.extend(["reasoning", "reasoning_effort"])
+        # Preserve insertion order while removing duplicates.
+        return list(dict.fromkeys(params))
+
     async def _handle_profiles(self, request: "web.Request") -> "web.Response":
         """GET /v1/profiles — return Hermes profiles available to X-Hermes-Profile."""
         from gateway.platforms.api_server import _openai_error
@@ -703,21 +769,33 @@ class OpenAICompatRoutesMixin(APIRequestCancellationMixin):
                 status=500,
             )
 
+        data = []
+        for profile in profiles:
+            supported_parameters = self._profile_supported_parameters(profile.model, profile.provider)
+            supports_reasoning = any(
+                parameter in {"reasoning", "reasoning_effort"}
+                for parameter in supported_parameters
+            )
+            data.append({
+                "id": profile.name,
+                "object": "hermes.profile",
+                "name": profile.name,
+                "is_default": profile.is_default,
+                "model": profile.model,
+                "provider": profile.provider,
+                "gateway_running": profile.gateway_running,
+                "skill_count": profile.skill_count,
+                "supported_parameters": supported_parameters,
+                "supports_reasoning": supports_reasoning,
+                "reasoning": {
+                    "supported": supports_reasoning,
+                    "effort_levels": ["low", "medium", "high"] if supports_reasoning else [],
+                },
+            })
+
         return web.json_response({
             "object": "list",
-            "data": [
-                {
-                    "id": profile.name,
-                    "object": "hermes.profile",
-                    "name": profile.name,
-                    "is_default": profile.is_default,
-                    "model": profile.model,
-                    "provider": profile.provider,
-                    "gateway_running": profile.gateway_running,
-                    "skill_count": profile.skill_count,
-                }
-                for profile in profiles
-            ],
+            "data": data,
         })
 
     @staticmethod

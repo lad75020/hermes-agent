@@ -21,7 +21,10 @@ class TestAPIDebugEvents:
         fake_profile.gateway_running = False
         fake_profile.skill_count = 12
         app = _create_app(adapter)
-        with patch("hermes_cli.profiles.list_profiles", return_value=[fake_profile]):
+        with (
+            patch("hermes_cli.profiles.list_profiles", return_value=[fake_profile]),
+            patch("agent.models_dev.get_model_capabilities", return_value=None),
+        ):
             async with TestClient(TestServer(app)) as cli:
                 resp = await cli.get("/v1/profiles")
                 assert resp.status == 200
@@ -30,6 +33,12 @@ class TestAPIDebugEvents:
                 assert data["data"][0]["id"] == "coder"
                 assert data["data"][0]["object"] == "hermes.profile"
                 assert data["data"][0]["model"] == "anthropic/claude-sonnet-4"
+                assert data["data"][0]["supported_parameters"] == ["reasoning", "reasoning_effort"]
+                assert data["data"][0]["supports_reasoning"] is True
+                assert data["data"][0]["reasoning"] == {
+                    "supported": True,
+                    "effort_levels": ["low", "medium", "high"],
+                }
 
     def test_parse_profile_header_validates_known_profile(self, adapter):
         request = MagicMock()
@@ -161,3 +170,28 @@ class TestAPIDebugEvents:
         assert reasoning_payloads
         assert reasoning_payloads[0]["message"] == compression_message
         assert reasoning_payloads[0]["delta"] == json.dumps(compression_message)
+
+    @pytest.mark.asyncio
+    async def test_profiles_returns_empty_reasoning_properties_for_non_reasoning_model(self, adapter):
+        fake_profile = MagicMock()
+        fake_profile.name = "plain"
+        fake_profile.is_default = False
+        fake_profile.model = "gpt-4.1"
+        fake_profile.provider = "openai"
+        fake_profile.gateway_running = False
+        fake_profile.skill_count = 0
+        app = _create_app(adapter)
+        with (
+            patch("hermes_cli.profiles.list_profiles", return_value=[fake_profile]),
+            patch("agent.models_dev.get_model_capabilities", return_value=None),
+        ):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.get("/v1/profiles")
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["data"][0]["supported_parameters"] == []
+                assert data["data"][0]["supports_reasoning"] is False
+                assert data["data"][0]["reasoning"] == {
+                    "supported": False,
+                    "effort_levels": [],
+                }
