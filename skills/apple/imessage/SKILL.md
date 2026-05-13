@@ -38,6 +38,17 @@ Use `imsg` to read and send iMessage/SMS via macOS Messages.app.
 
 ## Quick Reference
 
+### Important: do not generate Messages.app AppleScript for sends
+
+Use `imsg send` instead of hand-written AppleScript when sending messages.
+Messages.app AppleScript snippets are fragile because recipient/message values
+must be valid AppleScript source literals. Raw interpolation such as
+`send Hello world to targetBuddy` or `send "He said "hello"" to targetBuddy`
+fails before sending with AppleScript error `Expected end of line, etc. but
+found identifier (-2741)` (localized as “fin de ligne, etc. prévu(s) mais
+identificateur trouvé(s)”). `imsg` avoids this quoting/syntax problem and uses
+the maintained bridge.
+
 ### List Chats
 
 ```bash
