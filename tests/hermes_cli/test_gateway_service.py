@@ -382,7 +382,33 @@ class TestGatewayStopCleanup:
 class TestLaunchdServiceRecovery:
     @pytest.fixture(autouse=True)
     def _default_to_unloaded_launchd_domain(self, monkeypatch):
-        monkeypatch.setattr(gateway_cli, "_launchd_loaded_domain", lambda label=None: None)
+        monkeypatch.setattr(gateway_cli, "_resolved_launchd_domain", None)
+
+    def test_generate_launchd_plist_uses_local_bootstrap_paths_for_external_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        external_home = tmp_path / "Volumes" / "Drive" / ".hermes"
+        local_venv = home / "Library" / "Application Support" / "HermesGateway" / "venv"
+        (local_venv / "bin").mkdir(parents=True)
+        (local_venv / "bin" / "python").write_text("", encoding="utf-8")
+        external_home.mkdir(parents=True)
+
+        monkeypatch.setattr(gateway_cli, "is_macos", lambda: True)
+        monkeypatch.setattr(gateway_cli, "_launchd_user_home", lambda: home)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_launchd_log_dir",
+            lambda: home / "Library" / "Logs" / "Hermes",
+        )
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: external_home)
+
+        program_args = plistlib.loads(
+            gateway_cli.generate_launchd_plist().encode("utf-8")
+        )["ProgramArguments"]
+
+        assert program_args[0] == str(local_venv / "bin" / "python")
+        assert program_args[6] == str(local_venv / "bin" / "python")
+        assert str(home / "Library" / "Logs" / "Hermes" / "gateway.error.log") in program_args
+        assert str(external_home) in gateway_cli.generate_launchd_plist()
 
     def test_wait_for_pid_exit_returns_when_process_gone(self, monkeypatch):
         alive = [True, True, False]
@@ -900,8 +926,8 @@ class TestLaunchdServiceRecovery:
         # supervised service instead of falling back to detached.
         monkeypatch.setattr(
             gateway_cli,
-            "_launchd_loaded_domain",
-            lambda label=None: f"gui/{os.getuid()}",
+            "_probe_launchd_domain_for_label",
+            lambda label: f"gui/{os.getuid()}",
         )
 
         assert gateway_cli._launchd_domain() == f"gui/{os.getuid()}"
