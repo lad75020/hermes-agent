@@ -3,11 +3,14 @@ import type { StatusResponse } from "@/lib/api";
 import { useSidebarStatus } from "@/hooks/useSidebarStatus";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
+import { useTheme } from "@/themes";
+import { withThemeQuery } from "@/lib/theme-query";
 
 /** Gateway + session summary for the System sidebar block (no separate strip chrome). */
 export function SidebarStatusStrip() {
   const status = useSidebarStatus();
   const { t } = useI18n();
+  const { themeName } = useTheme();
 
   if (status === null) {
     return (
@@ -22,7 +25,7 @@ export function SidebarStatusStrip() {
 
   return (
     <Link
-      to="/sessions"
+      to={withThemeQuery("/sessions", themeName)}
       title={t.app.statusOverview}
       className={cn(
         "block text-left",

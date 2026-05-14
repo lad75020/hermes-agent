@@ -7,6 +7,9 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { api } from "@/lib/api";
+import { readThemeQuery, withThemeQuery } from "@/lib/theme-query";
 import { BUILTIN_THEMES, defaultTheme } from "./presets";
 import type {
   DashboardTheme,
@@ -20,11 +23,23 @@ import type {
   ThemePalette,
   ThemeTypography,
 } from "./types";
-import { api } from "@/lib/api";
 
 /** LocalStorage key — pre-applied before the React tree mounts to avoid
  *  a visible flash of the default palette on theme-overridden installs. */
 const STORAGE_KEY = "hermes-dashboard-theme";
+
+function canonicalThemeName(
+  name: string | null | undefined,
+  knownNames: Iterable<string> = Object.keys(BUILTIN_THEMES),
+): string | null {
+  const trimmed = name?.trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  for (const known of knownNames) {
+    if (known === trimmed || known.toLowerCase() === lower) return known;
+  }
+  return trimmed;
+}
 
 /** Tracks fontUrls we've already injected so multiple theme switches don't
  *  pile up <link> tags. Keyed by URL. */
@@ -303,9 +318,14 @@ function applyTheme(theme: DashboardTheme) {
 // ---------------------------------------------------------------------------
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
+  const location = useLocation();
+  const navigate = useNavigate();
+
   /** Name of the currently active theme (built-in id or user YAML name). */
   const [themeName, setThemeName] = useState<string>(() => {
     if (typeof window === "undefined") return "default";
+    const queryTheme = canonicalThemeName(readThemeQuery(window.location.search));
+    if (queryTheme) return queryTheme;
     return window.localStorage.getItem(STORAGE_KEY) ?? "default";
   });
 
@@ -327,16 +347,52 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   // Resolve a theme name to a full DashboardTheme, falling back to default
   // only when neither a built-in nor a user theme is found.
+  const knownThemeNames = useMemo(
+    () => [
+      ...Object.keys(BUILTIN_THEMES),
+      ...availableThemes.map((t) => t.name),
+      ...Object.keys(userThemeDefs),
+    ],
+    [availableThemes, userThemeDefs],
+  );
+
   const resolveTheme = useCallback(
     (name: string): DashboardTheme => {
+      const canonical = canonicalThemeName(name, knownThemeNames) ?? name;
       return (
-        BUILTIN_THEMES[name] ??
-        userThemeDefs[name] ??
+        BUILTIN_THEMES[canonical] ??
+        userThemeDefs[canonical] ??
         defaultTheme
       );
     },
-    [userThemeDefs],
+    [knownThemeNames, userThemeDefs],
   );
+
+  // Keep direct links such as /plugins?theme=MONO authoritative, including
+  // browser back/forward changes. The comparison is case-insensitive for the
+  // built-in theme ids, so user-friendly URLs like ?theme=CYBERPUNK work.
+  useEffect(() => {
+    const queryTheme = canonicalThemeName(
+      readThemeQuery(location.search),
+      knownThemeNames,
+    );
+    if (queryTheme && queryTheme !== themeName) {
+      setThemeName(queryTheme);
+      window.localStorage.setItem(STORAGE_KEY, queryTheme);
+      api.setTheme(queryTheme).catch(() => {});
+    }
+  }, [knownThemeNames, location.search, themeName]);
+
+  // Once a theme is active, make every current dashboard URL carry it so page
+  // refreshes, copies, redirects, and navigation all preserve the selection.
+  useEffect(() => {
+    if (!themeName) return;
+    const current = `${location.pathname}${location.search}${location.hash}`;
+    const next = withThemeQuery(current, themeName);
+    if (next !== current) {
+      navigate(next, { replace: true });
+    }
+  }, [location.hash, location.pathname, location.search, navigate, themeName]);
 
   // Re-apply on every themeName change, or when user themes arrive from
   // the API (since the active theme might be a user theme whose definition
@@ -370,7 +426,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
           }
           if (Object.keys(defs).length > 0) setUserThemeDefs(defs);
         }
-        if (resp.active && resp.active !== themeName) {
+        const queryTheme = readThemeQuery(window.location.search);
+        if (!queryTheme && resp.active && resp.active !== themeName) {
           setThemeName(resp.active);
           window.localStorage.setItem(STORAGE_KEY, resp.active);
         }
@@ -385,19 +442,15 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const setTheme = useCallback(
     (name: string) => {
       // Accept any name the server told us exists OR any built-in.
-      const knownNames = new Set<string>([
-        ...Object.keys(BUILTIN_THEMES),
-        ...availableThemes.map((t) => t.name),
-        ...Object.keys(userThemeDefs),
-      ]);
-      const next = knownNames.has(name) ? name : "default";
+      const canonical = canonicalThemeName(name, knownThemeNames);
+      const next = canonical && knownThemeNames.includes(canonical) ? canonical : "default";
       setThemeName(next);
       if (typeof window !== "undefined") {
         window.localStorage.setItem(STORAGE_KEY, next);
       }
       api.setTheme(next).catch(() => {});
     },
-    [availableThemes, userThemeDefs],
+    [knownThemeNames],
   );
 
   const value = useMemo<ThemeContextValue>(

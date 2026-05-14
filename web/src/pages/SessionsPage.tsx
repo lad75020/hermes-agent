@@ -49,6 +49,8 @@ import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
+import { useTheme } from "@/themes";
+import { withThemeQuery } from "@/lib/theme-query";
 
 const SOURCE_CONFIG: Record<string, { icon: typeof Terminal; color: string }> =
   {
@@ -276,6 +278,7 @@ function SessionRow({
   const [error, setError] = useState<string | null>(null);
   const { t } = useI18n();
   const navigate = useNavigate();
+  const { themeName } = useTheme();
 
   useEffect(() => {
     if (isExpanded && messages === null && !loading) {
@@ -364,7 +367,12 @@ function SessionRow({
               title={t.sessions.resumeInChat}
               onClick={(e) => {
                 e.stopPropagation();
-                navigate(`/chat?resume=${encodeURIComponent(session.id)}`);
+                navigate(
+                  withThemeQuery(
+                    `/chat?resume=${encodeURIComponent(session.id)}`,
+                    themeName,
+                  ),
+                );
               }}
             >
               <Play />

@@ -20,6 +20,8 @@ import { useI18n } from "@/i18n";
 import { PluginSlot } from "@/plugins";
 import { cn } from "@/lib/utils";
 import { usePageHeader } from "@/contexts/usePageHeader";
+import { useTheme } from "@/themes";
+import { withThemeQuery } from "@/lib/theme-query";
 
 /** Select value for built-in memory (`config` uses empty string). Never use `""` — UI Select maps empty value to an empty label. */
 const MEMORY_PROVIDER_BUILTIN = "__hermes_memory_builtin__";
@@ -40,6 +42,7 @@ export default function PluginsPage() {
   const { toast, showToast } = useToast();
   const { t } = useI18n();
   const { setEnd } = usePageHeader();
+  const { themeName } = useTheme();
 
   const loadHub = useCallback(() => {
     return api
@@ -346,7 +349,7 @@ export default function PluginsPage() {
                   {!m.tab?.hidden ? (
 
 
-                    <Link className="ml-3 inline-flex items-center gap-1 underline" to={m.tab.path}>
+                    <Link className="ml-3 inline-flex items-center gap-1 underline" to={withThemeQuery(m.tab.path, themeName)}>
 
 
                       <ExternalLink className="h-3 w-3 opacity-65" />
@@ -390,6 +393,7 @@ function PluginRowCard(props: PluginRowCardProps) {
   } = props;
 
   const dm = row.dashboard_manifest;
+  const { themeName } = useTheme();
 
   const tabPath = dm?.tab && !dm.tab.hidden ? dm.tab.override ?? dm.tab.path : null;
 
@@ -482,7 +486,7 @@ function PluginRowCard(props: PluginRowCardProps) {
                   "border border-current/25 hover:bg-current/10",
                   "font-mondwest text-[0.65rem] tracking-[0.1em] uppercase",
                 )}
-                to={tabPath}
+                to={withThemeQuery(tabPath, themeName)}
               >
                 {t.pluginsPage.openTab}
               </Link>

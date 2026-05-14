@@ -75,17 +75,20 @@ import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
 import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
+import { withThemeQuery } from "@/lib/theme-query";
 
 function RootRedirect() {
-  return <Navigate to="/sessions" replace />;
+  const { themeName } = useTheme();
+  return <Navigate to={withThemeQuery("/sessions", themeName)} replace />;
 }
 
 function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
+  const { themeName } = useTheme();
   if (pluginsLoading) {
     // Render nothing during the plugin-load window — a spinner here would just flash.
     return null;
   }
-  return <Navigate to="/sessions" replace />;
+  return <Navigate to={withThemeQuery("/sessions", themeName)} replace />;
 }
 
 const CHAT_NAV_ITEM: NavItem = {
@@ -637,6 +640,8 @@ export default function App() {
 
 function SidebarNavLink({ closeMobile, item, t }: SidebarNavLinkProps) {
   const { path, label, labelKey, icon: Icon } = item;
+  const { themeName } = useTheme();
+  const themedPath = withThemeQuery(path, themeName);
 
   const navLabel = labelKey
     ? ((t.app.nav as Record<string, string>)[labelKey] ?? label)
@@ -645,7 +650,7 @@ function SidebarNavLink({ closeMobile, item, t }: SidebarNavLinkProps) {
   return (
     <li>
       <NavLink
-        to={path}
+        to={themedPath}
         end={path === "/sessions"}
         onClick={closeMobile}
         className={({ isActive }) =>
@@ -689,6 +694,7 @@ function SidebarNavLink({ closeMobile, item, t }: SidebarNavLinkProps) {
 function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
   const { t } = useI18n();
   const navigate = useNavigate();
+  const { themeName } = useTheme();
   const { activeAction, isBusy, isRunning, pendingAction, runAction } =
     useSystemActions();
 
@@ -712,7 +718,7 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
   const handleClick = (action: SystemAction) => {
     if (isBusy) return;
     void runAction(action);
-    navigate("/sessions");
+    navigate(withThemeQuery("/sessions", themeName));
     onNavigate();
   };
 
