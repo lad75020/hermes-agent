@@ -22,7 +22,6 @@ import {
   Code,
   Cpu,
   Database,
-  Download,
   Eye,
   FileText,
   Globe,
@@ -699,13 +698,6 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
       label: t.status.restartGateway,
       runningLabel: t.status.restartingGateway,
       spin: true,
-    },
-    {
-      action: "update",
-      icon: Download,
-      label: t.status.updateHermes,
-      runningLabel: t.status.updatingHermes,
-      spin: false,
     },
   ];
 
