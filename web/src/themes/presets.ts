@@ -9,7 +9,7 @@ import type { DashboardTheme, ThemePalette, ThemeTypography, ThemeLayout } from 
  * corner-radius all shift to match the theme's personality.
  *
  * Theme names must stay in sync with the backend's
- * `_BUILTIN_DASHBOARD_THEMES` list in `hermes_cli/web_server.py`.
+ * `_BUILTIN_DASHBOARD_THEMES` list in `hermes_cli/web_server_dashboard.py`.
  *
  * Presets that also ship on the desktop (midnight, ember, mono, cyberpunk)
  * take their colours from `@hermes/shared` `THEME_PRESET_PALETTES` so both
@@ -199,6 +199,65 @@ export const roseTheme: DashboardTheme = {
   },
 };
 
+export const solarizedLightTheme: DashboardTheme = {
+  name: "solarized-light",
+  label: "Solarized Light",
+  description: "Warm paper canvas with Solarized blue and amber accents",
+  palette: {
+    background: { hex: "#fffdf7", alpha: 1 },
+    midground: { hex: "#073642", alpha: 1 },
+    foreground: { hex: "#006ca6", alpha: 0.22 },
+    warmGlow: "rgba(181, 137, 0, 0.18)",
+    noiseOpacity: 0.25,
+  },
+  typography: {
+    ...DEFAULT_TYPOGRAPHY,
+    fontSans: `"IBM Plex Sans", ${SYSTEM_SANS}`,
+    fontMono: `"IBM Plex Mono", ${SYSTEM_MONO}`,
+    fontUrl:
+      "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap",
+    letterSpacing: "-0.003em",
+  },
+  layout: {
+    ...DEFAULT_LAYOUT,
+    radius: "0.625rem",
+  },
+  colorOverrides: {
+    card: "#ffffff",
+    cardForeground: "#073642",
+    popover: "#ffffff",
+    popoverForeground: "#073642",
+    primary: "#006ca6",
+    primaryForeground: "#fffdf7",
+    secondary: "#f7f4ea",
+    secondaryForeground: "#073642",
+    muted: "#f7f4ea",
+    mutedForeground: "#586e75",
+    accent: "#f7f4ea",
+    accentForeground: "#006ca6",
+    destructive: "#b9201d",
+    destructiveForeground: "#fffdf7",
+    success: "#667300",
+    warning: "#8a6500",
+    border: "#cbbf9f",
+    input: "#cbbf9f",
+    ring: "#007f78",
+  },
+  componentStyles: {
+    backdrop: {
+      background:
+        "radial-gradient(circle at 12% 8%, rgba(0, 108, 166, 0.08), transparent 32%), radial-gradient(circle at 88% 14%, rgba(138, 101, 0, 0.06), transparent 30%), #fffdf7",
+    },
+    card: {
+      boxShadow: "0 18px 50px rgba(88, 110, 117, 0.12)",
+    },
+    header: {
+      background: "rgba(255, 253, 247, 0.9)",
+      backdropFilter: "blur(18px)",
+    },
+  },
+};
+
 /** Light mode — vivid Nous-blue accents on a cream canvas. */
 export const nousBlueTheme: DashboardTheme = {
   name: "nous-blue",
@@ -252,4 +311,5 @@ export const BUILTIN_THEMES: Record<string, DashboardTheme> = {
   mono: monoTheme,
   cyberpunk: cyberpunkTheme,
   rose: roseTheme,
+  "solarized-light": solarizedLightTheme,
 };
