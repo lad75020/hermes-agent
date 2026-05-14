@@ -2740,11 +2740,38 @@ def _launchd_domain() -> str:
     return f"gui/{os.getuid()}"  # windows-footgun: ok — POSIX launchd (macOS) helper, never invoked on Windows
 
 
+def _macos_launchd_local_gateway_venv() -> Path | None:
+    """Return Laurent-style local launchd venv when Hermes home is external.
+
+    macOS launchd/BackgroundTaskManagement can reject LaunchAgents whose
+    executable, working directory, or stdio log paths traverse a symlinked
+    ~/.hermes into /Volumes.  Keep the code/config under HERMES_HOME, but
+    allow the LaunchAgent bootstrap pieces to live in ~/Library.
+    """
+    if not is_macos():
+        return None
+
+    home = _launchd_user_home()
+    hermes_home = get_hermes_home()
+    try:
+        external_home = not hermes_home.resolve().is_relative_to(home.resolve())
+    except OSError:
+        external_home = False
+    if not (hermes_home.is_symlink() or external_home):
+        return None
+
+    venv = home / "Library" / "Application Support" / "HermesGateway" / "venv"
+    python = venv / "bin" / "python"
+    return venv if python.exists() else None
+
+
 def generate_launchd_plist() -> str:
-    python_path = get_python_path()
-    working_dir = str(PROJECT_ROOT)
+    local_launchd_venv = _macos_launchd_local_gateway_venv()
+    detected_venv = local_launchd_venv or _detect_venv_dir()
+    python_path = str(detected_venv / "bin" / "python") if local_launchd_venv else get_python_path()
+    working_dir = str(_launchd_user_home() if local_launchd_venv else PROJECT_ROOT)
     hermes_home = str(get_hermes_home().resolve())
-    log_dir = get_hermes_home() / "logs"
+    log_dir = (_launchd_user_home() / "Library" / "Logs" / "Hermes") if local_launchd_venv else (get_hermes_home() / "logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     label = get_launchd_label()
     profile_arg = _profile_arg(hermes_home)
@@ -2753,7 +2780,6 @@ def generate_launchd_plist() -> str:
     # nvm, cargo, etc.  We prepend venv/bin and node_modules/.bin (matching
     # the systemd unit), then capture the user's full shell PATH so every
     # user-installed tool (node, ffmpeg, …) is reachable.
-    detected_venv = _detect_venv_dir()
     venv_bin = str(detected_venv / "bin") if detected_venv else str(PROJECT_ROOT / "venv" / "bin")
     venv_dir = str(detected_venv) if detected_venv else str(PROJECT_ROOT / "venv")
     node_bin = str(PROJECT_ROOT / "node_modules" / ".bin")
