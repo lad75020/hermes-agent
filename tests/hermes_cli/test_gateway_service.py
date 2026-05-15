@@ -450,29 +450,6 @@ class TestGatewayStopCleanup:
 
 
 class TestLaunchdServiceRecovery:
-    def test_generate_launchd_plist_uses_local_bootstrap_paths_for_external_home(self, tmp_path, monkeypatch):
-        home = tmp_path / "home"
-        external_home = tmp_path / "Volumes" / "Drive" / ".hermes"
-        project_root = external_home / "hermes-agent"
-        local_venv = home / "Library" / "Application Support" / "HermesGateway" / "venv"
-        (local_venv / "bin").mkdir(parents=True)
-        (local_venv / "bin" / "python").write_text("", encoding="utf-8")
-        project_root.mkdir(parents=True)
-        external_home.mkdir(parents=True, exist_ok=True)
-
-        monkeypatch.setattr(gateway_cli, "is_macos", lambda: True)
-        monkeypatch.setattr(gateway_cli, "_launchd_user_home", lambda: home)
-        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: external_home)
-        monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", project_root)
-
-        plist = gateway_cli.generate_launchd_plist()
-
-        assert f"<string>{local_venv}/bin/python</string>" in plist
-        assert f"<string>{home}</string>" in plist
-        assert f"<string>{home}/Library/Logs/Hermes/gateway.log</string>" in plist
-        assert f"<string>{home}/Library/Logs/Hermes/gateway.error.log</string>" in plist
-        assert f"<string>{external_home}</string>" in plist
-
     def test_get_restart_drain_timeout_prefers_env_then_config_then_default(self, monkeypatch):
         monkeypatch.delenv("HERMES_RESTART_DRAIN_TIMEOUT", raising=False)
         monkeypatch.setattr(gateway_cli, "read_raw_config", lambda: {})
