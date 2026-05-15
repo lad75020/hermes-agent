@@ -5305,13 +5305,13 @@ def _launchd_unsupported_marker_exists() -> bool:
     return _launchd_unsupported_marker_path().exists()
 
 
-def _gateway_run_command(*, python_path: str | None = None) -> list[str]:
+def _gateway_run_command() -> list[str]:
     """Build the `python -m hermes_cli.main [--profile X] gateway run --replace` argv.
 
     Profile-aware: honors the active HERMES_HOME via `_profile_arg()` so the
     detached fallback launches into the same profile as the CLI invocation.
     """
-    cmd = [python_path or get_python_path(), "-m", "hermes_cli.main"]
+    cmd = [get_python_path(), "-m", "hermes_cli.main"]
     profile_arg = _profile_arg()
     if profile_arg:
         cmd.extend(profile_arg.split())
@@ -5323,7 +5323,6 @@ def _timestamped_stderr_gateway_command(
     error_log: Path,
     *,
     external_supervisor: bool = False,
-    python_path: str | None = None,
 ) -> list[str]:
     """Wrap gateway run so raw stderr lines are timestamped before file write.
 
@@ -5343,14 +5342,13 @@ def _timestamped_stderr_gateway_command(
     run before supervision resumes. Mirrors ``generate_systemd_unit``,
     whose ExecStart also runs ``gateway run`` without ``--replace``.
     """
-    interpreter = python_path or get_python_path()
-    inner = _gateway_run_command(python_path=interpreter)
+    inner = _gateway_run_command()
     if external_supervisor and "--external-supervisor" not in inner:
         inner = [*inner, "--external-supervisor"]
     if external_supervisor and "--replace" in inner:
         inner = [part for part in inner if part != "--replace"]
     return [
-        interpreter,
+        get_python_path(),
         "-m",
         "hermes_cli.stderr_timestamp",
         "--error-log",
@@ -5456,47 +5454,11 @@ exec \"$VIRTUAL_ENV/bin/python\" \"$@\"
         wrapper_path.write_text(content, encoding="utf-8")
         wrapper_path.chmod(0o755)
     return wrapper_path
-
-
-def _macos_launchd_local_gateway_venv() -> Path | None:
-    """Return Laurent-style local launchd venv when Hermes home is external.
-
-    macOS launchd/BackgroundTaskManagement can reject LaunchAgents whose
-    executable, working directory, or stdio log paths traverse a symlinked
-    ~/.hermes into /Volumes.  Keep the code/config under HERMES_HOME, but
-    allow the LaunchAgent bootstrap pieces to live in ~/Library.
-    """
-    if not is_macos():
-        return None
-
-    home = _launchd_user_home()
-    hermes_home = get_hermes_home()
-    try:
-        external_home = not hermes_home.resolve().is_relative_to(home.resolve())
-    except OSError:
-        external_home = False
-    if not (hermes_home.is_symlink() or external_home):
-        return None
-
-    venv = home / "Library" / "Application Support" / "HermesGateway" / "venv"
-    python = venv / "bin" / "python"
-    return venv if python.exists() else None
-
-
 def generate_launchd_plist() -> str:
-    local_launchd_venv = _macos_launchd_local_gateway_venv()
-    detected_venv = local_launchd_venv or _detect_venv_dir()
-    python_path = (
-        str(local_launchd_venv / "bin" / "python")
-        if local_launchd_venv
-        else get_python_path()
-    )
-    # A normal service uses HERMES_HOME as its durable cwd.  For an external
-    # or symlinked Hermes home, launchd may reject that path itself; the local
-    # bootstrap venv is an explicit opt-in to use the real account home.
-    working_dir = (
-        str(_launchd_user_home()) if local_launchd_venv else _stable_service_working_dir()
-    )
+    # Stable cwd anchor — never the volatile source checkout. See
+    # _stable_service_working_dir() for the rationale (same rot risk applies
+    # to launchd's WorkingDirectory as to systemd's).
+    working_dir = _stable_service_working_dir()
     hermes_home = str(get_hermes_home().resolve())
     log_dir = _launchd_log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -5506,13 +5468,11 @@ def generate_launchd_plist() -> str:
     # nvm, cargo, etc.  We prepend venv/bin and node_modules/.bin (matching
     # the systemd unit), then capture the user's full shell PATH so every
     # user-installed tool (node, ffmpeg, …) is reachable.
+    detected_venv = _detect_venv_dir()
     venv_dir = str(detected_venv) if detected_venv else str(PROJECT_ROOT / "venv")
     # Resolve the directory containing the node binary (e.g. Homebrew, nvm)
     # so it's explicitly in PATH even if the user's shell PATH changes later.
     priority_dirs = _build_service_path_dirs()
-    if local_launchd_venv:
-        local_venv_bin = str(local_launchd_venv / "bin")
-        priority_dirs = [local_venv_bin, *[path for path in priority_dirs if path != local_venv_bin]]
     _append_node_dir_for_service(priority_dirs)
     sane_path = ":".join(
         dict.fromkeys(
@@ -5528,7 +5488,7 @@ def generate_launchd_plist() -> str:
     prog_args = [
         f"<string>{part}</string>"
         for part in _timestamped_stderr_gateway_command(
-            err_path, external_supervisor=True, python_path=python_path
+            err_path, external_supervisor=True
         )
     ]
     prog_args_xml = "\n        ".join(prog_args)
