@@ -71,3 +71,6 @@ result
 website/static/api/skills-index.json
 models-dev-upstream/
 tinker-atropos/
+hermes_cli/tui_dist/*
+hermes_cli/scripts/
+docs/superpowers/*
