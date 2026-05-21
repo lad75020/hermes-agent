@@ -928,6 +928,26 @@ SUPPORTED_DOCUMENT_TYPES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Image document types
+#
+# Image extensions that platforms may deliver as "documents" rather than
+# native photo attachments (Telegram users uploading via the file picker,
+# clients that wrap stickers/screenshots as files, etc.). When we see one
+# of these, we route the bytes through the image cache and the normal
+# vision/photo handling path instead of rejecting them as unsupported
+# documents.
+# ---------------------------------------------------------------------------
+
+SUPPORTED_IMAGE_DOCUMENT_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
 def get_document_cache_dir() -> Path:
     """Return the document cache directory, creating it if it doesn't exist."""
     DOCUMENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -3350,12 +3370,24 @@ class BasePlatformAdapter(ABC):
                         logger.warning("[%s] Auto-TTS failed: %s", self.name, tts_err)
 
                 # Play TTS audio before text (voice-first experience)
+                _tts_caption_delivered = False
                 if _tts_path and Path(_tts_path).exists():
                     try:
-                        await self.play_tts(
+                        telegram_tts_caption = None
+                        if (
+                            self.platform == Platform.TELEGRAM
+                            and text_content
+                            and text_content[:1024] == text_content
+                        ):
+                            telegram_tts_caption = text_content
+                        tts_result = await self.play_tts(
                             chat_id=event.source.chat_id,
                             audio_path=_tts_path,
+                            caption=telegram_tts_caption,
                             metadata=_thread_metadata,
+                        )
+                        _tts_caption_delivered = bool(
+                            telegram_tts_caption and getattr(tts_result, "success", False)
                         )
                     finally:
                         try:
@@ -3364,7 +3396,7 @@ class BasePlatformAdapter(ABC):
                             pass
 
                 # Send the text portion
-                if text_content:
+                if text_content and not _tts_caption_delivered:
                     logger.info("[%s] Sending response (%d chars) to %s", self.name, len(text_content), event.source.chat_id)
                     _reply_anchor = _reply_anchor_for_event(event)
                     # Mark final response messages for notification delivery.
