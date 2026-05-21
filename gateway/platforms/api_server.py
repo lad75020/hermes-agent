@@ -454,7 +454,11 @@ class ResponseStore:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key",
+    "Access-Control-Allow-Headers": (
+        "Authorization, Content-Type, Idempotency-Key, "
+        "X-Hermes-Request-Id, X-Hermes-Session-Id, "
+        "X-Hermes-Session-Key, X-Hermes-Profile"
+    ),
 }
 
 
@@ -967,27 +971,15 @@ class APIServerAdapter(BasePlatformAdapter):
         header yielding ``None`` for the key), or ``(None, error_response)``
         on validation failure.
 
-        Security: like session continuation, accepting a caller-supplied
-        memory scope requires API-key authentication so that an
-        unauthenticated client on a local-only server can't inject itself
-        into another user's long-term memory scope by guessing a key.
+        Header validation rejects injection characters and oversized values.
+        Authentication remains enforced globally when ``API_SERVER_KEY`` is
+        configured; in local no-key mode the header is accepted so browser and
+        VPN-local clients can keep the same session/memory-scoping contract as
+        the built-in gateway adapters.
         """
         raw = request.headers.get("X-Hermes-Session-Key", "").strip()
         if not raw:
             return None, None
-
-        if not self._api_key:
-            logger.warning(
-                "X-Hermes-Session-Key rejected: no API key configured. "
-                "Set API_SERVER_KEY to enable long-term memory scoping."
-            )
-            return None, web.json_response(
-                _openai_error(
-                    "X-Hermes-Session-Key requires API key authentication. "
-                    "Configure API_SERVER_KEY to enable this feature."
-                ),
-                status=403,
-            )
 
         # Reject control characters that could enable header injection on
         # the echo path.
@@ -1345,26 +1337,12 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
         # When provided, history is loaded from state.db instead of from the request body.
-        #
-        # Security: session continuation exposes conversation history, so it is
-        # only allowed when the API key is configured and the request is
-        # authenticated.  Without this gate, any unauthenticated client could
-        # read arbitrary session history by guessing/enumerating session IDs.
+        # Local no-key API servers are allowed to use the same continuation
+        # header contract as /v1/responses and native gateway adapters.  When
+        # API_SERVER_KEY is configured, _check_auth above still requires a
+        # valid bearer token before this point.
         provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
         if provided_session_id:
-            if not self._api_key:
-                logger.warning(
-                    "Session continuation via X-Hermes-Session-Id rejected: "
-                    "no API key configured.  Set API_SERVER_KEY to enable "
-                    "session continuity."
-                )
-                return web.json_response(
-                    _openai_error(
-                        "Session continuation requires API key authentication. "
-                        "Configure API_SERVER_KEY to enable this feature."
-                    ),
-                    status=403,
-                )
             # Sanitize: reject control characters that could enable header injection.
             if re.search(r'[\r\n\x00]', provided_session_id):
                 return web.json_response(

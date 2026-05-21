@@ -75,3 +75,4 @@ tinker-atropos/
 hermes_cli/tui_dist/*
 hermes_cli/scripts/
 docs/superpowers/*
+nohup.out
