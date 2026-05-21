@@ -1146,13 +1146,13 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             p = Path(ext_dir)
             if (p / "dist" / "entry.js").is_file():
                 node = _node_bin("node")
-                return [node, str(p / "dist" / "entry.js")], p
+                return [node, "--expose-gc", str(p / "dist" / "entry.js")], p
 
         # 1b. Bundled in wheel (pip install)
         bundled = _find_bundled_tui()
         if bundled is not None:
             node = _node_bin("node")
-            return [node, str(bundled)], bundled.parent
+            return [node, "--expose-gc", str(bundled)], bundled.parent
 
     # 2. Normal flow: npm install if needed, always esbuild, then node dist/entry.js.
     #    --dev flow: npm install if needed, then tsx src/entry.tsx.
@@ -1229,7 +1229,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             sys.exit(1)
 
     node = _node_bin("node")
-    return [node, str(tui_dir / "dist" / "entry.js")], tui_dir
+    return [node, "--expose-gc", str(tui_dir / "dist" / "entry.js")], tui_dir
 
 
 def _normalize_tui_toolsets(toolsets: object) -> list[str]:
@@ -1351,16 +1351,16 @@ def _launch_tui(
         env["HERMES_TUI_TOOL_PROGRESS"] = "off"
     if accept_hooks:
         env["HERMES_ACCEPT_HOOKS"] = "1"
-    # Guarantee an 8GB V8 heap + exposed GC for the TUI. Default node cap is
-    # ~1.5–4GB depending on version and can fatal-OOM on long sessions with
-    # large transcripts / reasoning blobs. Token-level merge: respect any
-    # user-supplied --max-old-space-size (they may have set it higher) and
-    # avoid duplicating --expose-gc.
+    # Guarantee an 8GB V8 heap for the TUI. Default node cap is ~1.5–4GB
+    # depending on version and can fatal-OOM on long sessions with large
+    # transcripts / reasoning blobs. Token-level merge: respect any
+    # user-supplied --max-old-space-size (they may have set it higher).
+    # --expose-gc is *not* added here: Node rejects it in NODE_OPTIONS
+    # ("--expose-gc is not allowed in NODE_OPTIONS") and refuses to start.
+    # It is passed as a direct argv flag in _make_tui_argv() instead.
     _tokens = env.get("NODE_OPTIONS", "").split()
     if not any(t.startswith("--max-old-space-size=") for t in _tokens):
         _tokens.append("--max-old-space-size=8192")
-    if "--expose-gc" not in _tokens:
-        _tokens.append("--expose-gc")
     env["NODE_OPTIONS"] = " ".join(_tokens)
     # HERMES_TUI_RESUME is an internal hand-off from the Python wrapper to the
     # Ink app.  Because we start from os.environ.copy(), an exported/stale value
@@ -10425,7 +10425,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "model", "pairing", "plugins", "postinstall", "profile", "proxy",
         "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
-        "version", "webhook", "whatsapp", "chat",
+        "version", "webhook", "whatsapp", "chat", "secrets",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
         # expensive eager import of every bundled plugin module.
@@ -10671,6 +10671,42 @@ def main():
         help="Remove all fallback entries",
     )
     fallback_parser.set_defaults(func=cmd_fallback)
+
+    # =========================================================================
+    # secrets command — external secret managers (currently: Bitwarden)
+    # =========================================================================
+    secrets_parser = subparsers.add_parser(
+        "secrets",
+        help="Manage external secret sources (Bitwarden Secrets Manager)",
+        description=(
+            "Pull API keys from an external secret manager at process startup "
+            "instead of storing them in ~/.hermes/.env.  Currently supports "
+            "Bitwarden Secrets Manager.  See: "
+            "https://hermes-agent.nousresearch.com/docs/user-guide/secrets/bitwarden"
+        ),
+    )
+    secrets_subparsers = secrets_parser.add_subparsers(dest="secrets_command")
+
+    secrets_bw = secrets_subparsers.add_parser(
+        "bitwarden",
+        aliases=["bw"],
+        help="Bitwarden Secrets Manager integration",
+    )
+
+    # Lazy import — only pays for itself when this subcommand is actually used.
+    from hermes_cli import secrets_cli as _secrets_cli
+
+    _secrets_cli.register_cli(secrets_bw)
+
+    def _dispatch_secrets(args):  # noqa: ANN001
+        sub = getattr(args, "secrets_command", None)
+        bw_sub = getattr(args, "secrets_bw_command", None)
+        if sub in ("bitwarden", "bw") and bw_sub is not None:
+            return args.func(args)
+        secrets_parser.print_help()
+        return 0
+
+    secrets_parser.set_defaults(func=_dispatch_secrets)
 
     # =========================================================================
     # migrate command
