@@ -326,3 +326,4 @@ native/fts5_cjk/*.so
 
 apps/desktop/.dist-build*
 tinker-atropos/
+nohup.out

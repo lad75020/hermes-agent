@@ -799,7 +799,7 @@ class ResponseStore:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key, X-Hermes-Session-Id, X-Hermes-Request-Id"}
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key, X-Hermes-Session-Id, X-Hermes-Request-Id, X-Hermes-Session-Key, X-Hermes-Profile"}
 _SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
@@ -1838,17 +1838,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _parse_session_key_header(
         self, request: web.Request) -> tuple[Optional[str], Optional[web.Response]]:
         """Validate ``X-Hermes-Session-Key`` (per-channel memory scope) -> ``(key_or_None, None)``
-        or ``(None, error)``. Requires API-key auth so a client can't guess another scope."""
+        or ``(None, error)``. Configured API keys are checked by the request auth gate."""
         raw = request.headers.get("X-Hermes-Session-Key", "").strip()
         if not raw:
             return None, None
-        if not self._api_key:
-            logger.warning(
-                "X-Hermes-Session-Key rejected: no API key configured. "
-                "Set API_SERVER_KEY to enable long-term memory scoping.")
-            return None, _error_response(
-                "X-Hermes-Session-Key requires API key authentication. "
-                "Configure API_SERVER_KEY to enable this feature.", 403)
         # Control characters could enable header injection on the echo path.
         if re.search(r'[\r\n\x00]', raw):
             return None, _invalid_request("Invalid session key")
