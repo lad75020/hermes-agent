@@ -2780,11 +2780,48 @@ def _launchd_domain() -> str:
     return f"gui/{os.getuid()}"  # windows-footgun: ok — POSIX launchd (macOS) helper, never invoked on Windows
 
 
+def _launchd_support_dir() -> Path:
+    """Return a local, launchd-safe support directory for macOS gateway agents."""
+    return Path.home() / "Library" / "Application Support" / "HermesGateway"
+
+
+def _launchd_log_dir() -> Path:
+    """Return a local, launchd-safe log directory for macOS gateway agents."""
+    return Path.home() / "Library" / "Logs" / "Hermes"
+
+
+def _ensure_launchd_wrapper_script() -> Path:
+    """Create the small local wrapper launchd uses to start Hermes.
+
+    On recent macOS versions launchd can refuse to spawn Python binaries from
+    venvs or symlinked/external Hermes paths with EX_CONFIG 78 / Operation not
+    permitted.  Spawning the system shell from a local Application Support
+    script avoids that constraint while still executing the selected venv
+    Python after environment setup.
+    """
+    support_dir = _launchd_support_dir()
+    support_dir.mkdir(parents=True, exist_ok=True)
+    wrapper_path = support_dir / "run_gateway.sh"
+    content = f"""#!/bin/zsh
+set -euo pipefail
+APP_HOME={str(support_dir)!r}
+export HERMES_HOME={str(get_hermes_home().resolve())!r}
+export VIRTUAL_ENV={str(_detect_venv_dir() or (PROJECT_ROOT / 'venv'))!r}
+export PATH=\"$VIRTUAL_ENV/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\"
+cd \"$APP_HOME\"
+exec \"$VIRTUAL_ENV/bin/python\" \"$@\"
+"""
+    if not wrapper_path.exists() or wrapper_path.read_text(encoding="utf-8") != content:
+        wrapper_path.write_text(content, encoding="utf-8")
+        wrapper_path.chmod(0o755)
+    return wrapper_path
+
+
 def generate_launchd_plist() -> str:
-    python_path = get_python_path()
-    working_dir = str(PROJECT_ROOT)
+    wrapper_path = _ensure_launchd_wrapper_script()
+    working_dir = str(_launchd_support_dir())
     hermes_home = str(get_hermes_home().resolve())
-    log_dir = get_hermes_home() / "logs"
+    log_dir = _launchd_log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     label = get_launchd_label()
     profile_arg = _profile_arg(hermes_home)
@@ -2807,9 +2844,12 @@ def generate_launchd_plist() -> str:
         dict.fromkeys(priority_dirs + [p for p in os.environ.get("PATH", "").split(":") if p])
     )
 
-    # Build ProgramArguments array, including --profile when using a named profile
+    # Build ProgramArguments array, including --profile when using a named profile.
+    # launchd spawns /bin/zsh and the local wrapper; the wrapper then execs the
+    # selected venv Python with the remaining arguments.
     prog_args = [
-        f"<string>{python_path}</string>",
+        "<string>/bin/zsh</string>",
+        f"<string>{wrapper_path}</string>",
         "<string>-m</string>",
         "<string>hermes_cli.main</string>",
     ]
