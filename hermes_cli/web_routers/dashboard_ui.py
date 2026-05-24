@@ -254,22 +254,52 @@ async def _named_plugin_action(request: Request, name: str, action: Callable[[st
         action(_validate_plugin_name(name)), fallback_error, rescan=rescan))
 
 
+def _plugin_name_from_route(
+    name: Optional[str] = None,
+    namespace: Optional[str] = None,
+    plugin: Optional[str] = None,
+) -> str:
+    """Build a plugin registry key from dashboard route parameters.
+
+    Starlette/FastAPI's path converter is reliable at the end of a route, but
+    a route like ``/{name:path}/enable`` can be shadowed by sibling catch-all
+    routes when ``name`` itself contains a slash (for example
+    ``observability/langfuse``), producing HTTP 405.  The explicit
+    ``/{namespace}/{plugin}/...`` routes below cover the category-style plugin
+    keys used by Hermes while preserving the original single-segment route.
+    """
+    if namespace is not None and plugin is not None:
+        return f"{namespace}/{plugin}"
+    return name or ""
+
 @router.post("/api/dashboard/agent-plugins/{name:path}/enable")
-async def post_agent_plugin_enable(request: Request, name: str):
+@router.post("/api/dashboard/agent-plugins/{namespace}/{plugin}/enable")
+async def post_agent_plugin_enable(
+    request: Request, name: Optional[str] = None, namespace: Optional[str] = None, plugin: Optional[str] = None,
+):
+    name = _plugin_name_from_route(name, namespace, plugin)
     from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
     return await _named_plugin_action(request, name, lambda n: dashboard_set_agent_plugin_enabled(n, enabled=True),
                                       "Enable failed.", rescan=False)
 
 
 @router.post("/api/dashboard/agent-plugins/{name:path}/disable")
-async def post_agent_plugin_disable(request: Request, name: str):
+@router.post("/api/dashboard/agent-plugins/{namespace}/{plugin}/disable")
+async def post_agent_plugin_disable(
+    request: Request, name: Optional[str] = None, namespace: Optional[str] = None, plugin: Optional[str] = None,
+):
+    name = _plugin_name_from_route(name, namespace, plugin)
     from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
     return await _named_plugin_action(request, name, lambda n: dashboard_set_agent_plugin_enabled(n, enabled=False),
                                       "Disable failed.", rescan=False)
 
 
 @router.post("/api/dashboard/agent-plugins/{name:path}/update")
-async def post_agent_plugin_update(request: Request, name: str):
+@router.post("/api/dashboard/agent-plugins/{namespace}/{plugin}/update")
+async def post_agent_plugin_update(
+    request: Request, name: Optional[str] = None, namespace: Optional[str] = None, plugin: Optional[str] = None,
+):
+    name = _plugin_name_from_route(name, namespace, plugin)
     from hermes_cli.plugins_cmd import dashboard_update_user_plugin
     # Body is optional: ``{"accept_capabilities": true}`` applies a re-pin the user confirmed after a
     # ``consent_required`` answer.
