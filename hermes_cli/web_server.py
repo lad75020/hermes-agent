@@ -4465,37 +4465,74 @@ def _validate_plugin_name(name: str) -> str:
     return name
 
 
+def _plugin_name_from_route(
+    name: Optional[str] = None,
+    namespace: Optional[str] = None,
+    plugin: Optional[str] = None,
+) -> str:
+    """Build a plugin registry key from dashboard route parameters.
+
+    Starlette/FastAPI's path converter is reliable at the end of a route, but
+    a route like ``/{name:path}/enable`` can be shadowed by sibling catch-all
+    routes when ``name`` itself contains a slash (for example
+    ``observability/langfuse``), producing HTTP 405.  The explicit
+    ``/{namespace}/{plugin}/...`` routes below cover the category-style plugin
+    keys used by Hermes while preserving the original single-segment route.
+    """
+    if namespace is not None and plugin is not None:
+        return f"{namespace}/{plugin}"
+    return name or ""
+
+
 @app.post("/api/dashboard/agent-plugins/{name:path}/enable")
-async def post_agent_plugin_enable(request: Request, name: str):
+@app.post("/api/dashboard/agent-plugins/{namespace}/{plugin}/enable")
+async def post_agent_plugin_enable(
+    request: Request,
+    name: Optional[str] = None,
+    namespace: Optional[str] = None,
+    plugin: Optional[str] = None,
+):
     _require_token(request)
-    name = _validate_plugin_name(name)
+    plugin_name = _validate_plugin_name(_plugin_name_from_route(name, namespace, plugin))
     from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
 
-    result = dashboard_set_agent_plugin_enabled(name, enabled=True)
+    result = dashboard_set_agent_plugin_enabled(plugin_name, enabled=True)
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error") or "Enable failed.")
     return result
 
 
 @app.post("/api/dashboard/agent-plugins/{name:path}/disable")
-async def post_agent_plugin_disable(request: Request, name: str):
+@app.post("/api/dashboard/agent-plugins/{namespace}/{plugin}/disable")
+async def post_agent_plugin_disable(
+    request: Request,
+    name: Optional[str] = None,
+    namespace: Optional[str] = None,
+    plugin: Optional[str] = None,
+):
     _require_token(request)
-    name = _validate_plugin_name(name)
+    plugin_name = _validate_plugin_name(_plugin_name_from_route(name, namespace, plugin))
     from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
 
-    result = dashboard_set_agent_plugin_enabled(name, enabled=False)
+    result = dashboard_set_agent_plugin_enabled(plugin_name, enabled=False)
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error") or "Disable failed.")
     return result
 
 
 @app.post("/api/dashboard/agent-plugins/{name:path}/update")
-async def post_agent_plugin_update(request: Request, name: str):
+@app.post("/api/dashboard/agent-plugins/{namespace}/{plugin}/update")
+async def post_agent_plugin_update(
+    request: Request,
+    name: Optional[str] = None,
+    namespace: Optional[str] = None,
+    plugin: Optional[str] = None,
+):
     _require_token(request)
-    name = _validate_plugin_name(name)
+    plugin_name = _validate_plugin_name(_plugin_name_from_route(name, namespace, plugin))
     from hermes_cli.plugins_cmd import dashboard_update_user_plugin
 
-    result = dashboard_update_user_plugin(name)
+    result = dashboard_update_user_plugin(plugin_name)
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error") or "Update failed.")
     _get_dashboard_plugins(force_rescan=True)
