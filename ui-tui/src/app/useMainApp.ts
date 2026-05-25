@@ -234,9 +234,15 @@ export function useMainApp(gw: GatewayClient) {
     return next
   }, [])
 
+  // Wrapped row heights are width-dependent. Cached layout outlives a resize
+  // and lands sticky-scroll at the stale max, cutting off the tail. The
+  // hook's "scale heights by oldCols/newCols" path is too approximate for
+  // mixed markdown — we deliberately remount every row so yoga re-measures
+  // off live geometry. Cost: per-row local state (e.g. systemOpen toggles)
+  // resets on resize; small UX hit for a hard correctness win.
   const virtualRows = useMemo<TranscriptRow[]>(
-    () => historyItems.map((msg, index) => ({ index, key: messageId(msg), msg })),
-    [historyItems, messageId]
+    () => historyItems.map((msg, index) => ({ index, key: `${messageId(msg)}:c${cols}`, msg })),
+    [cols, historyItems, messageId]
   )
 
   const detailsLayoutKey = useMemo(() => {
@@ -246,7 +252,10 @@ export function useMainApp(gw: GatewayClient) {
     return `${thinking}:${tools}`
   }, [ui.detailsMode, ui.detailsModeCommandOverride, ui.sections])
 
-  const detailsVisible = detailsLayoutKey !== 'hidden:hidden'
+  const [thinkingDetailsMode, toolsDetailsMode] = detailsLayoutKey.split(':')
+  const thinkingDetailsVisible = thinkingDetailsMode !== 'hidden'
+  const toolsDetailsVisible = toolsDetailsMode !== 'hidden'
+  const detailsVisible = thinkingDetailsVisible || toolsDetailsVisible
   const userPromptWidth = composerPromptWidth(ui.theme.brand.prompt)
   const heightCacheKey = `${ui.sid ?? 'draft'}:${cols}:${userPromptWidth}:${ui.compact ? '1' : '0'}:${detailsLayoutKey}`
 
@@ -275,10 +284,21 @@ export function useMainApp(gw: GatewayClient) {
       estimatedMsgHeight(virtualRows[index]!.msg, cols, {
         compact: ui.compact,
         details: detailsVisible,
+        thinkingVisible: thinkingDetailsVisible,
+        toolsVisible: toolsDetailsVisible,
         userPrompt: ui.theme.brand.prompt,
         withSeparator: virtualRows[index]!.msg.role === 'user' && firstUserIdx >= 0 && index > firstUserIdx
       }),
-    [cols, detailsVisible, firstUserIdx, ui.compact, ui.theme.brand.prompt, virtualRows]
+    [
+      cols,
+      detailsVisible,
+      firstUserIdx,
+      thinkingDetailsVisible,
+      toolsDetailsVisible,
+      ui.compact,
+      ui.theme.brand.prompt,
+      virtualRows
+    ]
   )
 
   const syncHeightCache = useCallback(
@@ -425,10 +445,20 @@ export function useMainApp(gw: GatewayClient) {
 
     let timer: ReturnType<typeof setTimeout> | undefined
 
+    // Resize reflows wrapped lines; if the user is still pinned to the tail
+    // we need to re-snap once React has remeasured. virtualRows is keyed on
+    // cols so every column change forces a fresh measurement pass before
+    // this timer fires. Re-check isSticky() inside the timeout — a manual
+    // scroll during the 100ms window otherwise yanks the user back to tail.
     const onResize = () => {
       clearTimeout(timer)
       timer = setTimeout(() => {
         timer = undefined
+
+        if (scrollRef.current?.isSticky()) {
+          scrollRef.current.scrollToBottom()
+        }
+
         void rpc<TerminalResizeResponse>('terminal.resize', { cols: stdout.columns ?? 80, session_id: ui.sid })
       }, 100)
     }
