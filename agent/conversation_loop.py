@@ -2218,7 +2218,7 @@ def run_conversation(
                         print(f"{agent.log_prefix}   Response: {_body_text}")
                     print(f"{agent.log_prefix}   Most likely: Portal OAuth expired, account out of credits, or agent key revoked.")
                     print(f"{agent.log_prefix}   Troubleshooting:")
-                    print(f"{agent.log_prefix}     • Re-authenticate: hermes login --provider nous")
+                    print(f"{agent.log_prefix}     • Re-authenticate: hermes auth add nous")
                     print(f"{agent.log_prefix}     • Check credits / billing: https://portal.nousresearch.com")
                     print(f"{agent.log_prefix}     • Verify stored credentials: {_dhh}/auth.json")
                     print(f"{agent.log_prefix}     • Switch providers temporarily: /model <model> --provider openrouter")
@@ -3945,8 +3945,14 @@ def run_conversation(
                 print(f"❌ {error_msg}")
             except (OSError, ValueError):
                 logger.error(error_msg)
-            
-            logger.debug("Outer loop error in API call #%d", api_call_count, exc_info=True)
+
+            # Emit the full traceback at ERROR level so it lands in both
+            # agent.log AND errors.log.  Previously this was logged at DEBUG,
+            # which meant intermittent outer-loop failures were unreproducible
+            # — users would see a one-line summary on screen with no way to
+            # recover the call site.  logger.exception() includes the
+            # traceback automatically and emits at ERROR.
+            logger.exception("Outer loop error in API call #%d", api_call_count)
             
             # If an assistant message with tool_calls was already appended,
             # the API expects a role="tool" result for every tool_call_id.
