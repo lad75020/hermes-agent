@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from tools.approval_gateway_wait import _ApprovalEntry
+
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 import tools.approval as approval_module
-from tools.approval_gateway_wait import _ApprovalEntry
 from gateway.config import PlatformConfig
 from gateway.platforms.api_server import APIServerAdapter
 

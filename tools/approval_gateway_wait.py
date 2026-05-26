@@ -24,9 +24,10 @@ logger = logging.getLogger("tools.approval")
 
 class _ApprovalEntry:
     """One pending dangerous-command approval inside a gateway session."""
-    __slots__ = ("acknowledged", "cancelled", "data", "event", "reason", "result", "settle")
+    __slots__ = ("acknowledged", "cancelled", "created_at", "data", "event", "reason", "result", "settle")
 
     def __init__(self, data: dict):
+        self.created_at = time.time()
         self.event = threading.Event()
         self.data = dict(data)
         self.data.setdefault("request_id", uuid.uuid4().hex)

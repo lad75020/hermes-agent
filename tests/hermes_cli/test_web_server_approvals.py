@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from tools.approval_gateway_wait import _ApprovalEntry
+
 from fastapi.testclient import TestClient
 
 import hermes_cli.web_server as ws
 import tools.approval as approval_module
-from tools.approval_gateway_wait import _ApprovalEntry
 
 
 def _headers() -> dict[str, str]:

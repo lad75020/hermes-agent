@@ -1,3 +1,4 @@
+from tools.approval_gateway_wait import _ApprovalEntry
 """Tests for the dangerous command approval module."""
 
 import os

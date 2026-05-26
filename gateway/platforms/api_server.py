@@ -80,6 +80,8 @@ _STATIC_FEATURE_FLAGS = {
 _CAPABILITY_ENDPOINTS = (
     ("health", ("GET", "/health")), ("health_detailed", ("GET", "/health/detailed")),
     ("profiles", ("GET", "/v1/profiles")),
+    ("approvals", ("GET", "/v1/approvals")),
+    ("approval_resolve", ("POST", "/v1/approvals/resolve")),
     ("models", ("GET", "/v1/models")), ("model_options", ("GET", "/api/model/options")),
     ("chat_completions", ("POST", "/v1/chat/completions")),
     ("responses", ("POST", "/v1/responses")), ("runs", ("POST", "/v1/runs")),
@@ -1735,6 +1737,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("GET", "/v1/health", self._handle_health),
             ("GET", "/v1/models", self._handle_models),
             ("GET", "/v1/profiles", self._handle_profiles),
+            ("GET", "/v1/approvals", self._handle_approvals),
+            ("POST", "/v1/approvals/resolve", self._handle_approval_resolve),
+            ("POST", "/v1/approvals/{session_key}/resolve", self._handle_approval_resolve),
             ("POST", "/v1/requests/{request_id}/cancel", self._handle_cancel_request),
             ("GET", "/api/model/options", self._handle_model_options),
             ("GET", "/v1/capabilities", self._handle_capabilities),
