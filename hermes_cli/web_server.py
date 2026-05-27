@@ -475,6 +475,12 @@ class ModelAssignment(BaseModel):
     task: str = ""
 
 
+class ApprovalResolve(BaseModel):
+    session_key: Optional[str] = None
+    choice: str
+    resolve_all: bool = False
+
+
 _GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")
 try:
     _GATEWAY_HEALTH_TIMEOUT = float(os.getenv("GATEWAY_HEALTH_TIMEOUT", "3"))
@@ -771,6 +777,80 @@ async def get_action_status(name: str, lines: int = 200):
         "pid": pid,
         "lines": tail,
     }
+
+
+@app.get("/api/approvals")
+async def get_approvals():
+    """List pending gateway approval requests for dashboard/native clients."""
+    try:
+        from tools.approval import snapshot_gateway_approvals
+
+        approvals = snapshot_gateway_approvals()
+        return {"approvals": approvals, "count": len(approvals)}
+    except Exception:
+        _log.exception("GET /api/approvals failed")
+        raise HTTPException(status_code=500, detail="Failed to list approvals")
+
+
+def _normalize_approval_choice(choice: str) -> str:
+    normalized = (choice or "").strip().lower()
+    aliases = {
+        "approve": "once",
+        "allow": "once",
+        "yes": "once",
+        "no": "deny",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"once", "session", "always", "deny"}:
+        raise HTTPException(status_code=400, detail="Invalid approval choice")
+    return normalized
+
+
+def _resolve_dashboard_approval(session_key: str, choice: str, resolve_all: bool = False):
+    session_key = (session_key or "").strip()
+    if not session_key:
+        raise HTTPException(status_code=400, detail="session_key is required")
+    normalized_choice = _normalize_approval_choice(choice)
+    try:
+        from tools.approval import resolve_gateway_approval
+
+        resolved = resolve_gateway_approval(
+            session_key,
+            normalized_choice,
+            resolve_all=bool(resolve_all),
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("POST /api/approvals/resolve failed")
+        raise HTTPException(status_code=500, detail="Failed to resolve approval")
+    if resolved <= 0:
+        raise HTTPException(status_code=404, detail="No pending approval for session")
+    return {
+        "ok": True,
+        "session_key": session_key,
+        "choice": normalized_choice,
+        "resolve_all": bool(resolve_all),
+        "resolved": resolved,
+    }
+
+
+@app.post("/api/approvals/resolve")
+async def resolve_approval(body: ApprovalResolve):
+    return _resolve_dashboard_approval(
+        body.session_key or "",
+        body.choice,
+        resolve_all=body.resolve_all,
+    )
+
+
+@app.post("/api/approvals/{session_key}/resolve")
+async def resolve_approval_for_session(session_key: str, body: ApprovalResolve):
+    return _resolve_dashboard_approval(
+        session_key,
+        body.choice,
+        resolve_all=body.resolve_all,
+    )
 
 
 @app.get("/api/sessions")
@@ -1298,6 +1378,12 @@ async def set_env_var(body: EnvVarUpdate):
     try:
         save_env_value(body.key, body.value)
         return {"ok": True, "key": body.key}
+    except ValueError as exc:
+        # save_env_value raises ValueError for invalid names and for keys
+        # on the denylist (LD_PRELOAD, PATH, PYTHONPATH, …). Surface the
+        # message to the SPA so the user understands why the write was
+        # refused instead of seeing an opaque 500.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception:
         _log.exception("PUT /api/env failed")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -4656,6 +4742,17 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
 
     Only serves files from the plugin's ``dashboard/`` subdirectory.
     Path traversal is blocked by checking ``resolve().is_relative_to()``.
+
+    Restricted to a browser-fetchable suffix allowlist (JS/CSS/JSON/HTML/
+    SVG/PNG/JPG/WOFF). The dashboard loads plugin JS via ``<script src>``
+    and CSS via ``<link href>``, neither of which can attach a custom
+    auth header — so this route stays unauthenticated to keep the SPA
+    working. But user-installed plugins ship a ``plugin_api.py``
+    backend module that the browser never fetches; it's only imported
+    by :func:`_mount_plugin_api_routes` at startup. Without a suffix
+    allowlist, anyone on the loopback port can curl the ``.py`` source
+    of a private third-party plugin. Reject everything outside the
+    browser-asset set.
     """
     plugins = _get_dashboard_plugins()
     plugin = next((p for p in plugins if p["name"] == plugin_name), None)
@@ -4670,7 +4767,11 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
-    # Guess content type
+    # Browser-asset suffix allowlist. Everything outside this set is
+    # rejected with 404 so we don't leak ``.py`` backend sources, README
+    # files, ``.env.example`` templates, etc. — none of which the SPA
+    # actually fetches. Add to this set deliberately when a new asset
+    # type comes up; do NOT change the default fallback.
     suffix = target.suffix.lower()
     content_types = {
         ".js": "application/javascript",
@@ -4681,10 +4782,22 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
         ".svg": "image/svg+xml",
         ".png": "image/png",
         ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".ico": "image/x-icon",
         ".woff2": "font/woff2",
         ".woff": "font/woff",
+        ".ttf": "font/ttf",
+        ".otf": "font/otf",
+        ".map": "application/json",
     }
-    media_type = content_types.get(suffix, "application/octet-stream")
+    if suffix not in content_types:
+        raise HTTPException(
+            status_code=404,
+            detail="File not found",
+        )
+    media_type = content_types[suffix]
     return FileResponse(
         target,
         media_type=media_type,

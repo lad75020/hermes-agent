@@ -6294,7 +6294,7 @@ class GatewayRunner:
                 check_wecom_callback_requirements,
             )
             if not check_wecom_callback_requirements():
-                logger.warning("WeComCallback: aiohttp/httpx not installed")
+                logger.warning("WeComCallback: aiohttp/httpx/defusedxml not installed")
                 return None
             return WecomCallbackAdapter(config)
 
@@ -10436,7 +10436,21 @@ class GatewayRunner:
                         cfg = yaml.safe_load(f) or {}
                 else:
                     cfg = {}
-                model_cfg = cfg.setdefault("model", {})
+                # Coerce scalar/None ``model:`` into a dict before mutation —
+                # otherwise ``cfg.setdefault("model", {})`` returns the existing
+                # scalar and the next assignment raises
+                # ``TypeError: 'str' object does not support item assignment``.
+                # Reproduces when ``config.yaml`` has ``model: <name>`` (flat
+                # string) instead of the proper nested ``model: {default: ...}``.
+                raw_model = cfg.get("model")
+                if isinstance(raw_model, dict):
+                    model_cfg = raw_model
+                elif isinstance(raw_model, str) and raw_model.strip():
+                    model_cfg = {"default": raw_model.strip()}
+                    cfg["model"] = model_cfg
+                else:
+                    model_cfg = {}
+                    cfg["model"] = model_cfg
                 model_cfg["default"] = result.new_model
                 model_cfg["provider"] = result.target_provider
                 if result.base_url:
@@ -13344,6 +13358,40 @@ class GatewayRunner:
                 lines.append(t("gateway.reload_mcp.none_connected"))
             else:
                 lines.append(t("gateway.reload_mcp.tools_available", tools=len(new_tools), servers=len(connected_servers)))
+
+            # Refresh cached agents so existing sessions see new MCP tools on
+            # their next turn — without this, the user has to `/new` (which
+            # discards conversation history) to pick up tools from a server
+            # that was just added or reconnected. The user has already
+            # consented to the prompt-cache invalidation via the slash-confirm
+            # gate in _handle_reload_mcp_command before we reach this point.
+            try:
+                from model_tools import get_tool_definitions
+                _cache = getattr(self, "_agent_cache", None)
+                _cache_lock = getattr(self, "_agent_cache_lock", None)
+                if _cache_lock is not None and _cache:
+                    with _cache_lock:
+                        for _sess_key, _entry in list(_cache.items()):
+                            try:
+                                _agent = _entry[0] if isinstance(_entry, tuple) else _entry
+                            except Exception:
+                                continue
+                            if _agent is None:
+                                continue
+                            new_defs = get_tool_definitions(
+                                enabled_toolsets=getattr(_agent, "enabled_toolsets", None),
+                                disabled_toolsets=getattr(_agent, "disabled_toolsets", None),
+                                quiet_mode=True,
+                            )
+                            _agent.tools = new_defs
+                            _agent.valid_tool_names = {
+                                t["function"]["name"] for t in new_defs
+                            } if new_defs else set()
+            except Exception as _exc:
+                logger.debug(
+                    "Failed to update cached agent tools after MCP reload: %s",
+                    _exc,
+                )
 
             # Inject a message at the END of the session history so the
             # model knows tools changed on its next turn.  Appended after
