@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer

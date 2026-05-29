@@ -4307,7 +4307,36 @@ class APIServerAdapter(BasePlatformAdapter):
                 os.environ["HERMES_HOME"] = profile_home
             elif profile_name == "default":
                 os.environ.pop("HERMES_HOME", None)
+            effective_task_id = session_id or str(uuid.uuid4())
+            approval_session_key = gateway_session_key or effective_task_id
+            approval_token = None
+            session_tokens = []
             try:
+                from gateway.session_context import clear_session_vars, set_session_vars
+                from tools.approval import (
+                    register_gateway_notify,
+                    reset_current_session_key,
+                    set_current_session_key,
+                    unregister_gateway_notify,
+                )
+
+                def _approval_notify(approval_data: Dict[str, Any]) -> None:
+                    # OpenAI-compatible API calls do not have a platform chat
+                    # to send a text/button prompt to. Registering this callback
+                    # still switches the approval core into its blocking queue
+                    # path so native clients can list/resolve the request via
+                    # /v1/approvals and surface it in HermesMacOS.
+                    try:
+                        approval_data.setdefault("surface", "api_server")
+                    except Exception:
+                        pass
+
+                approval_token = set_current_session_key(approval_session_key)
+                session_tokens = set_session_vars(
+                    platform="api_server",
+                    session_key=approval_session_key,
+                )
+                register_gateway_notify(approval_session_key, _approval_notify)
                 agent = self._create_agent(
                     ephemeral_system_prompt=ephemeral_system_prompt,
                     session_id=session_id,
@@ -4321,7 +4350,6 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent
-                effective_task_id = session_id or str(uuid.uuid4())
                 result = agent.run_conversation(
                     user_message=user_message,
                     conversation_history=conversation_history,
@@ -4333,6 +4361,20 @@ class APIServerAdapter(BasePlatformAdapter):
                     "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
                 }
             finally:
+                try:
+                    unregister_gateway_notify(approval_session_key)
+                except Exception:
+                    pass
+                if approval_token is not None:
+                    try:
+                        reset_current_session_key(approval_token)
+                    except Exception:
+                        pass
+                if session_tokens:
+                    try:
+                        clear_session_vars(session_tokens)
+                    except Exception:
+                        pass
                 if previous_home is None:
                     os.environ.pop("HERMES_HOME", None)
                 else:
