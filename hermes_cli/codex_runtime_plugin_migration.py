@@ -381,6 +381,82 @@ def _strip_unmanaged_plugin_tables(toml_text: str) -> str:
     return "".join(out)
 
 
+def _split_toml_dotted_key(raw: str) -> list[str]:
+    """Split a TOML dotted key/table path, unquoting simple basic strings."""
+    parts: list[str] = []
+    cur: list[str] = []
+    in_quote = False
+    escaped = False
+    for ch in raw.strip():
+        if in_quote:
+            if escaped:
+                cur.append(ch)
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_quote = False
+            else:
+                cur.append(ch)
+            continue
+        if ch == '"':
+            in_quote = True
+        elif ch == ".":
+            parts.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur).strip())
+    return parts
+
+
+def _table_path_from_header(stripped_line: str) -> Optional[list[str]]:
+    """Return a TOML table header path, or None for non-header lines."""
+    if not _looks_like_table_header(stripped_line):
+        return None
+    head = stripped_line.split("#", 1)[0].rstrip()
+    if head.startswith("[[") and head.endswith("]]"):
+        body = head[2:-2]
+    else:
+        body = head[1:-1]
+    return _split_toml_dotted_key(body)
+
+
+def _strip_unmanaged_mcp_server_tables(
+    toml_text: str,
+    managed_server_names: set[str],
+) -> str:
+    """Remove user Codex MCP tables that collide with Hermes-managed names.
+
+    Re-running migration emits Hermes MCP servers inside the managed block. If
+    the Codex config already has ``[mcp_servers.<same-name>]`` outside that
+    block, preserving it creates duplicate TOML table headers and Codex refuses
+    to start. Only exact name collisions are stripped; unrelated user-defined
+    MCP servers remain untouched.
+    """
+    if not managed_server_names:
+        return toml_text
+
+    lines = toml_text.splitlines(keepends=True)
+    out: list[str] = []
+    in_colliding_mcp_table = False
+    for line in lines:
+        stripped = line.lstrip()
+        path = _table_path_from_header(stripped)
+        if path is not None:
+            in_colliding_mcp_table = (
+                len(path) >= 2
+                and path[0] == "mcp_servers"
+                and path[1] in managed_server_names
+            )
+            if in_colliding_mcp_table:
+                continue
+        if in_colliding_mcp_table:
+            continue
+        out.append(line)
+    return "".join(out)
+
+
 def _looks_like_table_header(stripped_line: str) -> bool:
     """Return True if ``stripped_line`` is a TOML table header.
 
@@ -721,6 +797,10 @@ def migrate(
         # those pre-existing tables since plugin/list is the source of truth.
         if plugin_query_succeeded:
             without_managed = _strip_unmanaged_plugin_tables(without_managed)
+        without_managed = _strip_unmanaged_mcp_server_tables(
+            without_managed,
+            set(translated.keys()),
+        )
         new_text = _insert_managed_block_at_top_level(without_managed, managed_block)
     else:
         new_text = managed_block

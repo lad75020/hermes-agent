@@ -12,6 +12,7 @@ from hermes_cli.codex_runtime_plugin_migration import (
     _format_toml_value,
     _looks_like_test_tempdir,
     _strip_existing_managed_block,
+    _strip_unmanaged_mcp_server_tables,
     _strip_unmanaged_plugin_tables,
     _translate_one_server,
     migrate,
@@ -627,6 +628,32 @@ class TestMigrate:
         # And our managed block is still there with the new content
         assert "[mcp_servers.hermes-mcp]" in final
 
+    def test_replaces_colliding_user_mcp_server_outside_managed_block(self, tmp_path):
+        """A Codex-local MCP table with the same name as a Hermes-migrated
+        server must be replaced, not duplicated, or Codex rejects config.toml.
+        Non-colliding user MCP servers must still survive."""
+        import tomllib
+
+        target = tmp_path / "config.toml"
+        target.write_text(
+            "[mcp_servers.codebase-memory-mcp]\n"
+            'command = "/Users/alice/.local/bin/codebase-memory-mcp"\n'
+            "\n"
+            "[mcp_servers.user-below]\n"
+            'command = "below-server"\n'
+        )
+        migrate(
+            {"mcp_servers": {"codebase-memory-mcp": {"command": "codebase-memory-mcp"}}},
+            codex_home=tmp_path,
+            discover_plugins=False,
+            expose_hermes_tools=False,
+        )
+        final = target.read_text()
+        assert final.count("[mcp_servers.codebase-memory-mcp]") == 1
+        assert "/Users/alice/.local/bin/codebase-memory-mcp" not in final
+        assert "[mcp_servers.user-below]" in final
+        tomllib.loads(final)
+
     def test_skipped_keys_reported(self, tmp_path):
         report = migrate({
             "mcp_servers": {
@@ -661,6 +688,40 @@ class TestMigrate:
 
 
 # ---- Bug B: duplicate [plugins.X] tables ----
+
+
+class TestStripUnmanagedMcpServerTables:
+    """Regression tests for colliding Codex-local MCP server tables."""
+
+    def test_strips_only_colliding_mcp_tables_and_nested_env(self):
+        text = (
+            "[mcp_servers.codebase-memory-mcp]\n"
+            'command = "old"\n'
+            "[mcp_servers.codebase-memory-mcp.env]\n"
+            'FOO = "bar"\n'
+            "\n"
+            "[mcp_servers.user-server]\n"
+            'command = "keep"\n'
+        )
+        stripped = _strip_unmanaged_mcp_server_tables(
+            text,
+            {"codebase-memory-mcp"},
+        )
+        assert "codebase-memory-mcp" not in stripped
+        assert "FOO" not in stripped
+        assert "[mcp_servers.user-server]" in stripped
+        assert 'command = "keep"' in stripped
+
+    def test_strips_quoted_colliding_mcp_table_names(self):
+        text = (
+            '[mcp_servers."server.with.dot"]\n'
+            'command = "old"\n'
+            "[features]\n"
+            "x = true\n"
+        )
+        stripped = _strip_unmanaged_mcp_server_tables(text, {"server.with.dot"})
+        assert "server.with.dot" not in stripped
+        assert "[features]" in stripped
 
 
 class TestStripUnmanagedPluginTables:
