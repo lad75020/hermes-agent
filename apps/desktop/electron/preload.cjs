@@ -31,6 +31,11 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   setPreviewShortcutActive: active => ipcRenderer.send('hermes:previewShortcutActive', Boolean(active)),
   openExternal: url => ipcRenderer.invoke('hermes:openExternal', url),
   fetchLinkTitle: url => ipcRenderer.invoke('hermes:fetchLinkTitle', url),
+  settings: {
+    getDefaultProjectDir: () => ipcRenderer.invoke('hermes:setting:defaultProjectDir:get'),
+    setDefaultProjectDir: dir => ipcRenderer.invoke('hermes:setting:defaultProjectDir:set', dir),
+    pickDefaultProjectDir: () => ipcRenderer.invoke('hermes:setting:defaultProjectDir:pick')
+  },
   revealLogs: () => ipcRenderer.invoke('hermes:logs:reveal'),
   getRecentLogs: () => ipcRenderer.invoke('hermes:logs:recent'),
   readDir: dirPath => ipcRenderer.invoke('hermes:fs:readDir', dirPath),
@@ -77,6 +82,11 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     const listener = (_event, payload) => callback(payload)
     ipcRenderer.on('hermes:backend-exit', listener)
     return () => ipcRenderer.removeListener('hermes:backend-exit', listener)
+  },
+  onPowerResume: callback => {
+    const listener = () => callback()
+    ipcRenderer.on('hermes:power-resume', listener)
+    return () => ipcRenderer.removeListener('hermes:power-resume', listener)
   },
   onBootProgress: callback => {
     const listener = (_event, payload) => callback(payload)

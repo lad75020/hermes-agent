@@ -177,7 +177,7 @@ function applyEvent(state: DesktopBootstrapState, ev: DesktopBootstrapEvent): De
     }
   }
   if (ev.type === 'log') {
-    const next = state.log.concat({ ts: Date.now(), stage: ev.stage ?? null, line: ev.line })
+    const next = state.log.concat({ ts: Date.now(), stage: ev.stage ?? null, line: ev.line, stream: ev.stream })
     while (next.length > 500) next.shift()
     return { ...state, log: next }
   }
@@ -348,7 +348,7 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
           </h2>
           <p className="mt-1.5 text-sm text-muted-foreground">
             {failed
-              ? 'One of the install steps failed. Check the details below or the desktop log for the full transcript.'
+              ? 'One of the install steps failed. On Windows, this can happen if another Hermes CLI or desktop instance is running. Stop any running Hermes instances, then retry. Check the details below or the desktop log for the full transcript.'
               : 'This is a one-time setup. The Hermes installer is downloading dependencies and configuring your machine. ' +
                 'Subsequent launches will skip this step.'}
           </p>
@@ -431,7 +431,10 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
                 ) : (
                   <>
                     {state.log.map((entry, i) => (
-                      <div key={i} className="whitespace-pre-wrap break-words">
+                      <div
+                        key={i}
+                        className={cn('whitespace-pre-wrap break-words', entry.stream === 'stderr' && 'text-muted-foreground')}
+                      >
                         {entry.stage ? <span className="text-muted-foreground/70">[{entry.stage}] </span> : null}
                         <span>{entry.line}</span>
                       </div>
