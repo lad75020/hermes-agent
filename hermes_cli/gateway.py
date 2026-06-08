@@ -3067,12 +3067,49 @@ def get_launchd_label() -> str:
     return f"ai.hermes.gateway-{suffix}" if suffix else "ai.hermes.gateway"
 
 
-def _launchd_domain() -> str:
+def _launchd_preferred_domain() -> str:
     # The `user/<uid>` domain (vs the older `gui/<uid>`) is reachable from
-    # non-Aqua/background sessions (SSH, headless, login items) and is the only
-    # one that supports service management on macOS 26+. `gui/<uid>` returns
-    # error 125 ("Domain does not support specified action") there. See #23387.
+    # non-Aqua/background sessions (SSH, headless, login items) on many macOS
+    # 26+ hosts.  Keep it as the install/bootstrap default for fresh services.
     return f"user/{os.getuid()}"  # windows-footgun: ok — POSIX launchd (macOS) helper, never invoked on Windows
+
+
+def _launchd_domain_candidates() -> list[str]:
+    """Return launchd domains Hermes can use for this user's LaunchAgent."""
+    uid = os.getuid()
+    return list(dict.fromkeys([_launchd_preferred_domain(), f"gui/{uid}"]))
+
+
+def _launchd_loaded_domain(label: str | None = None) -> str | None:
+    """Return the launchd domain where *label* is already loaded, if any.
+
+    Hermes used ``gui/<uid>`` for older LaunchAgents and later switched to
+    ``user/<uid>`` for headless/macOS 26 compatibility. Some hosts still have a
+    healthy gateway loaded in ``gui/<uid>`` while ``user/<uid>`` returns
+    bootstrap error 5. Prefer managing the live service over treating it as
+    unloaded and spawning an unsupervised fallback process.
+    """
+    label = label or get_launchd_label()
+    for domain in _launchd_domain_candidates():
+        try:
+            result = subprocess.run(
+                ["launchctl", "print", f"{domain}/{label}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0:
+            return domain
+    return None
+
+
+def _launchd_domain() -> str:
+    # If an older/current LaunchAgent is already loaded in gui/<uid>, operate on
+    # that domain. Otherwise prefer user/<uid> for fresh installs/bootstrap.
+    return _launchd_loaded_domain() or _launchd_preferred_domain()
 
 
 # On macOS, exit code 125 ("Domain does not support specified action") and
@@ -3336,14 +3373,18 @@ def refresh_launchd_plist_if_needed() -> bool:
 
     plist_path.write_text(generate_launchd_plist(), encoding="utf-8")
     label = get_launchd_label()
-    # Bootout/bootstrap so launchd picks up the new definition
+    domain = _launchd_domain()
+    # Bootout/bootstrap so launchd picks up the new definition. Capture the
+    # domain once: after bootout there is no loaded job to discover, so a second
+    # _launchd_domain() call could switch from gui/<uid> to user/<uid> and fail
+    # to reload a service that was previously managed successfully in gui/<uid>.
     subprocess.run(
-        ["launchctl", "bootout", f"{_launchd_domain()}/{label}"],
+        ["launchctl", "bootout", f"{domain}/{label}"],
         check=False,
         timeout=90,
     )
     subprocess.run(
-        ["launchctl", "bootstrap", _launchd_domain(), str(plist_path)],
+        ["launchctl", "bootstrap", domain, str(plist_path)],
         check=False,
         timeout=30,
     )

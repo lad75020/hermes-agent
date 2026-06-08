@@ -482,6 +482,14 @@ class TestListProfiles:
         assert by_name["ollama"].model == "gemma4:e4b"
         assert by_name["ollama"].provider == "custom"
 
+    def test_skips_default_directory_under_profiles_root(self, profile_env):
+        default_dir = profile_env / ".hermes" / "profiles" / "Default"
+        default_dir.mkdir(parents=True)
+
+        profiles = list_profiles()
+
+        assert [p.name for p in profiles].count("default") == 1
+
     def test_sorted_alphabetically(self, profile_env):
         create_profile("zebra", no_alias=True)
         create_profile("alpha", no_alias=True)

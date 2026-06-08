@@ -451,6 +451,10 @@ class TestGatewayStopCleanup:
 
 
 class TestLaunchdServiceRecovery:
+    @pytest.fixture(autouse=True)
+    def _default_to_unloaded_launchd_domain(self, monkeypatch):
+        monkeypatch.setattr(gateway_cli, "_launchd_loaded_domain", lambda label=None: None)
+
     def test_get_restart_drain_timeout_prefers_env_then_config_then_default(self, monkeypatch):
         monkeypatch.delenv("HERMES_RESTART_DRAIN_TIMEOUT", raising=False)
         monkeypatch.setattr(gateway_cli, "read_raw_config", lambda: {})
@@ -679,10 +683,21 @@ class TestLaunchdServiceRecovery:
         assert "stale" in output.lower()
         assert "not loaded" in output.lower()
 
-    def test_launchd_domain_uses_user_domain(self):
-        # The user/<uid> domain (not gui/<uid>) is the one reachable from
-        # non-Aqua/background sessions on macOS 26+ (issue #23387).
+    def test_launchd_domain_uses_user_domain_when_no_job_is_loaded(self):
+        # The user/<uid> domain remains the fresh-install/default target.
         assert gateway_cli._launchd_domain() == f"user/{os.getuid()}"
+
+    def test_launchd_domain_prefers_loaded_gui_job(self, monkeypatch):
+        # Regression: older LaunchAgents may still be loaded under gui/<uid> on
+        # hosts where user/<uid> bootstrap returns error 5. Manage the live
+        # supervised service instead of falling back to detached.
+        monkeypatch.setattr(
+            gateway_cli,
+            "_launchd_loaded_domain",
+            lambda label=None: f"gui/{os.getuid()}",
+        )
+
+        assert gateway_cli._launchd_domain() == f"gui/{os.getuid()}"
 
     def test_launchctl_domain_unsupported_recognizes_macos26_codes(self):
         # Codes that persist after a fresh bootstrap → launchd truly unavailable.

@@ -713,13 +713,13 @@ def list_profiles() -> List[ProfileInfo]:
             if not entry.is_dir():
                 continue
             raw_name = entry.name
-            if name == "default":
-                continue  # already added as the built-in default above
             try:
                 name = normalize_profile_name(raw_name)
                 validate_profile_name(name)
             except ValueError:
                 continue
+            if name == "default":
+                continue  # already added as the built-in default above
             model, provider = _read_config_model(entry)
             alias_name = find_alias_for_profile(name)
             if alias_name:
