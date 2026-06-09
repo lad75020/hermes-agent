@@ -4411,23 +4411,23 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 from gateway.session_context import clear_session_vars, set_session_vars
 
-            tokens = set_session_vars(
-                platform="api_server",
-                chat_id=session_id or "",
-                session_key=gateway_session_key or session_id or "",
-                session_id=session_id or "",
-            )
-            try:
-                agent = self._create_agent(
+                tokens = set_session_vars(
+                    platform="api_server",
+                    chat_id=session_id or "",
+                    session_key=gateway_session_key or session_id or "",
+                    session_id=session_id or "",
+                )
+                try:
+                    agent = self._create_agent(
                         ephemeral_system_prompt=ephemeral_system_prompt,
                         session_id=session_id,
                         stream_delta_callback=stream_delta_callback,
                         tool_progress_callback=tool_progress_callback,
                         tool_start_callback=tool_start_callback,
                         tool_complete_callback=tool_complete_callback,
-                    reasoning_callback=reasoning_callback,
+                        reasoning_callback=reasoning_callback,
                         gateway_session_key=gateway_session_key,
-                    profile_name=profile_name,
+                        profile_name=profile_name,
                     )
                     if agent_ref is not None:
                         agent_ref[0] = agent
@@ -4442,20 +4442,20 @@ class APIServerAdapter(BasePlatformAdapter):
                         "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                         "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
                     }
+                    # Include the effective session ID in the result so callers
+                    # (e.g. X-Hermes-Session-Id header) can track compression-
+                    # triggered session rotations. (#16938)
+                    _eff_sid = getattr(agent, "session_id", session_id)
+                    if isinstance(_eff_sid, str) and _eff_sid:
+                        result["session_id"] = _eff_sid
+                    return result, usage
+                finally:
+                    clear_session_vars(tokens)
             finally:
                 if previous_home is None:
                     os.environ.pop("HERMES_HOME", None)
                 else:
                     os.environ["HERMES_HOME"] = previous_home
-                # Include the effective session ID in the result so callers
-                # (e.g. X-Hermes-Session-Id header) can track compression-
-                # triggered session rotations. (#16938)
-                _eff_sid = getattr(agent, "session_id", session_id)
-                if isinstance(_eff_sid, str) and _eff_sid:
-                    result["session_id"] = _eff_sid
-                return result, usage
-            finally:
-                clear_session_vars(tokens)
 
         return await loop.run_in_executor(None, _run)
 
