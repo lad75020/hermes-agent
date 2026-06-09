@@ -9,7 +9,53 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+from hermes_cli.active_sessions import active_session_registry_snapshot
 from tui_gateway import server
+
+
+def test_session_create_rejects_at_active_session_limit(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("max_concurrent_sessions: 1\n", encoding="utf-8")
+    token = set_hermes_home_override(home)
+
+    def _clear_server_sessions():
+        for session in list(server._sessions.values()):
+            server._teardown_session(session)
+        server._sessions.clear()
+
+    try:
+        server._cfg_cache = None
+        server._cfg_mtime = None
+        server._cfg_path = None
+        _clear_server_sessions()
+        monkeypatch.setattr(server, "_start_agent_build", lambda *args, **kwargs: None)
+        monkeypatch.setattr(server, "_completion_cwd", lambda params=None: str(tmp_path))
+
+        first = server._methods["session.create"]("r1", {"cols": 80})
+        assert "result" in first
+        sid = first["result"]["session_id"]
+
+        second = server._methods["session.create"]("r2", {"cols": 80})
+        assert second["error"]["message"] == (
+            "Hermes is at the active session limit (1/1). "
+            "Try again when another session finishes."
+        )
+        assert list(server._sessions) == [sid]
+
+        closed = server._methods["session.close"]("r3", {"session_id": sid})
+        assert closed["result"]["closed"] is True
+        assert active_session_registry_snapshot() == []
+
+        third = server._methods["session.create"]("r4", {"cols": 80})
+        assert "result" in third
+    finally:
+        _clear_server_sessions()
+        server._cfg_cache = None
+        server._cfg_mtime = None
+        server._cfg_path = None
+        reset_hermes_home_override(token)
 
 
 def test_session_context_uses_session_cwd(monkeypatch, tmp_path):
@@ -854,6 +900,115 @@ def test_startup_runtime_detects_provider_for_model_env(monkeypatch):
         "anthropic/claude-sonnet-4.6",
         "anthropic",
     )
+
+
+def test_load_fallback_model_merges_chain_providers_first(monkeypatch):
+    # Parity with HermesCLI / gateway: fallback_providers stays first and keeps
+    # its order, with any distinct legacy fallback_model entry merged in after
+    # (deduped on provider/model/base_url).
+    fallback_chain = [
+        {"provider": "openrouter", "model": "openai/gpt-5.5"},
+        {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+    ]
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {
+            "fallback_model": {"provider": "legacy", "model": "legacy-model"},
+            "fallback_providers": fallback_chain,
+        },
+    )
+
+    assert server._load_fallback_model() == [
+        {"provider": "openrouter", "model": "openai/gpt-5.5"},
+        {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+        {"provider": "legacy", "model": "legacy-model"},
+    ]
+
+
+def test_make_agent_passes_configured_fallback_chain(monkeypatch):
+    captured = {}
+    fallback_chain = [
+        {"provider": "openrouter", "model": "openai/gpt-5.5"},
+    ]
+
+    def fake_agent(**kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(model=kwargs.get("model"))
+
+    monkeypatch.delenv("HERMES_MODEL", raising=False)
+    monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
+    monkeypatch.delenv("HERMES_TUI_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {
+            "model": {"default": "gpt-5.5", "provider": "openai-codex"},
+            "fallback_providers": fallback_chain,
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda requested=None, target_model=None: {
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "token",
+            "api_mode": "codex_responses",
+            "credential_pool": None,
+        },
+    )
+    monkeypatch.setattr("run_agent.AIAgent", fake_agent)
+    monkeypatch.setattr(server, "_load_enabled_toolsets", lambda: ["file"])
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    agent = server._make_agent("sid", "session-key")
+
+    assert agent.model == "gpt-5.5"
+    assert captured["fallback_model"] == fallback_chain
+    assert captured["platform"] == "tui"
+
+
+def test_background_agent_kwargs_preserves_full_fallback_chain(monkeypatch):
+    chain = [
+        {"provider": "openrouter", "model": "openai/gpt-5.5"},
+        {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+    ]
+    agent = types.SimpleNamespace(
+        model="gpt-5.5",
+        provider="openai-codex",
+        _fallback_chain=chain,
+    )
+    monkeypatch.setattr(server, "_load_cfg", lambda: {"max_turns": 25})
+    monkeypatch.setattr(server, "_load_enabled_toolsets", lambda: ["file"])
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    kwargs = server._background_agent_kwargs(agent, "task-id")
+
+    assert kwargs["fallback_model"] == chain
+
+
+def test_background_agent_kwargs_preserves_empty_fallback_chain(monkeypatch):
+    agent = types.SimpleNamespace(
+        model="gpt-5.5",
+        provider="anthropic",
+        _fallback_chain=[],
+    )
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {
+            "max_turns": 25,
+            "fallback_providers": [
+                {"provider": "openrouter", "model": "openai/gpt-5.5"},
+            ],
+        },
+    )
+    monkeypatch.setattr(server, "_load_enabled_toolsets", lambda: ["file"])
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+
+    kwargs = server._background_agent_kwargs(agent, "task-id")
+
+    assert kwargs["fallback_model"] == []
 
 
 def test_startup_runtime_resolves_short_alias_without_network(monkeypatch):
