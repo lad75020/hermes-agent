@@ -7680,9 +7680,10 @@ def latest_summaries(
     calling :func:`latest_summary` per task. Returns a dict mapping
     ``task_id`` → summary string, omitting tasks with no summary.
 
-    Approach: a window function picks the newest non-null-summary row
-    per ``task_id``; works against SQLite ≥ 3.25 (default on every
-    supported platform).
+    Approach: a correlated anti-join picks the newest non-null-summary
+    row per ``task_id``. Avoid SQLite window functions here because
+    Laurent's bundled Hermes runtime may be linked against SQLite 3.19,
+    while ``ROW_NUMBER() OVER (...)`` requires SQLite 3.25+.
     """
     ids = list(task_ids)
     if not ids:
@@ -7690,16 +7691,25 @@ def latest_summaries(
     placeholders = ",".join("?" for _ in ids)
     rows = conn.execute(
         f"""
-        SELECT task_id, summary FROM (
-            SELECT task_id, summary,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY task_id
-                       ORDER BY COALESCE(ended_at, started_at) DESC, id DESC
-                   ) AS rn
-              FROM task_runs
-             WHERE task_id IN ({placeholders})
-               AND summary IS NOT NULL AND summary != ''
-        ) WHERE rn = 1
+        SELECT tr.task_id, tr.summary
+          FROM task_runs AS tr
+         WHERE tr.task_id IN ({placeholders})
+           AND tr.summary IS NOT NULL AND tr.summary != ''
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM task_runs AS newer
+                 WHERE newer.task_id = tr.task_id
+                   AND newer.summary IS NOT NULL AND newer.summary != ''
+                   AND (
+                        COALESCE(newer.ended_at, newer.started_at, 0) >
+                        COALESCE(tr.ended_at, tr.started_at, 0)
+                        OR (
+                            COALESCE(newer.ended_at, newer.started_at, 0) =
+                            COALESCE(tr.ended_at, tr.started_at, 0)
+                            AND newer.id > tr.id
+                        )
+                   )
+           )
         """,
         ids,
     ).fetchall()

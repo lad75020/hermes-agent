@@ -2691,8 +2691,19 @@ def test_latest_summaries_batch_omits_tasks_without_summary(kanban_home):
         t3 = kb.create_task(conn, title="c", assignee="carol")
         kb.complete_task(conn, t1, summary="alpha")
         kb.complete_task(conn, t3, summary="charlie")
+        conn.execute(
+            "INSERT INTO task_runs (task_id, status, started_at, ended_at, "
+            "outcome, summary) VALUES (?, 'done', ?, ?, 'completed', ?)",
+            (t1, int(time.time()) + 10, int(time.time()) + 11, "alpha newest"),
+        )
+        conn.execute(
+            "INSERT INTO task_runs (task_id, status, started_at, ended_at, "
+            "outcome, summary) VALUES (?, 'done', ?, ?, 'completed', ?)",
+            (t3, int(time.time()) + 20, int(time.time()) + 21, ""),
+        )
+        conn.commit()
         out = kb.latest_summaries(conn, [t1, t2, t3])
-        assert out == {t1: "alpha", t3: "charlie"}
+        assert out == {t1: "alpha newest", t3: "charlie"}
         # Empty input → empty dict, no SQL syntax error from "IN ()".
         assert kb.latest_summaries(conn, []) == {}
 
