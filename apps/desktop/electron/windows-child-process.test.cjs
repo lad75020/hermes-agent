@@ -12,13 +12,15 @@ function readElectronFile(name) {
 }
 
 function requireHiddenChildOptions(source, needle) {
-  const index = source.indexOf(needle)
-  assert.notEqual(index, -1, `missing call site: ${needle}`)
+  const match = needle instanceof RegExp ? needle.exec(source) : null
+  const index = match ? match.index : source.indexOf(needle)
+  const label = needle instanceof RegExp ? needle.toString() : needle
+  assert.notEqual(index, -1, `missing call site: ${label}`)
   const snippet = source.slice(index, index + 700)
   assert.match(
     snippet,
-    /hiddenWindowsChildOptions\(/,
-    `expected ${needle} to wrap child-process options with hiddenWindowsChildOptions`
+    /hiddenWindowsChildOptions\(|windowsHide:\s*true/,
+    `expected ${label} to hide Windows child-process consoles`
   )
 }
 
@@ -28,14 +30,14 @@ test('desktop background child processes opt into hidden Windows consoles', () =
   assert.match(source, /function hiddenWindowsChildOptions\(options = \{\}\)/)
 
   requireHiddenChildOptions(source, "execFileSync(\n          'reg'")
-  requireHiddenChildOptions(source, 'execFileSync(pyExe')
-  requireHiddenChildOptions(source, 'spawn(resolveGitBinary()')
+  requireHiddenChildOptions(source, "execFileSync(\n          pyExe")
+  requireHiddenChildOptions(source, /spawn\(\s*resolveGitBinary\(\)/)
   requireHiddenChildOptions(source, "execFileSync('taskkill'")
-  requireHiddenChildOptions(source, 'spawn(command, args')
+  requireHiddenChildOptions(source, /spawn\(\s*command,\s*args,\s*hiddenWindowsChildOptions\(/)
   requireHiddenChildOptions(source, "spawn('curl'")
-  requireHiddenChildOptions(source, 'spawn(backend.command, backend.args')
-  requireHiddenChildOptions(source, 'hermesProcess = spawn(backend.command, backend.args')
-  requireHiddenChildOptions(source, "spawn(py, ['-m', 'hermes_cli.main', 'uninstall', '--gui-summary']")
+  requireHiddenChildOptions(source, /spawn\(\s*backend\.command,\s*backend\.args,\s*hiddenWindowsChildOptions\(/)
+  requireHiddenChildOptions(source, /hermesProcess = spawn\(\s*backend\.command,\s*backend\.args,\s*hiddenWindowsChildOptions\(/)
+  requireHiddenChildOptions(source, /spawn\(\s*runner,\s*runnerArgs,\s*\{/)
 })
 
 test('intentional or interactive desktop child processes stay documented', () => {

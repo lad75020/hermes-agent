@@ -27,6 +27,10 @@ const { execFileSync, spawn } = require('node:child_process')
 const { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } = require('./bootstrap-platform.cjs')
 const { runBootstrap } = require('./bootstrap-runner.cjs')
 const {
+  hasUsableActiveHermesInstall,
+  isBootstrapCompleteForInstall
+} = require('./bootstrap-complete.cjs')
+const {
   buildSessionWindowUrl,
   createSessionWindowRegistry,
   SESSION_WINDOW_MIN_HEIGHT,
@@ -2060,18 +2064,21 @@ function readBootstrapMarker() {
 }
 
 function isBootstrapComplete() {
-  const marker = readBootstrapMarker()
-  if (!marker || typeof marker !== 'object') return false
-  if (marker.schemaVersion !== BOOTSTRAP_MARKER_SCHEMA_VERSION) return false
-  if (typeof marker.pinnedCommit !== 'string' || marker.pinnedCommit.length < 7) return false
-  // We DELIBERATELY do NOT verify that the checkout is currently at the
-  // pinned commit -- users update via the in-app update path or `hermes
-  // update`, which moves HEAD legitimately. The marker just attests "we
-  // ran the bootstrap successfully at least once." We DO additionally require
-  // a runnable venv: an interrupted or split-home install can leave the marker
-  // + checkout without a venv, and trusting that spawns a dead backend
-  // ("gateway offline") instead of re-running bootstrap to repair it.
-  return isHermesSourceRoot(ACTIVE_HERMES_ROOT) && fileExists(getVenvPython(VENV_ROOT))
+  // Marker-driven completion remains strict for installs the desktop itself
+  // performed. Existing CLI/source installs are accepted separately by
+  // hasUsableActiveHermesInstall() in resolveHermesBackend(), so a packaged app
+  // built from source can use a pre-existing Hermes Agent checkout without
+  // forcing the first-launch installer to re-run just because the desktop marker
+  // was never written.
+  return isBootstrapCompleteForInstall({
+    marker: readBootstrapMarker(),
+    schemaVersion: BOOTSTRAP_MARKER_SCHEMA_VERSION,
+    activeRoot: ACTIVE_HERMES_ROOT,
+    venvRoot: VENV_ROOT,
+    fileExists,
+    directoryExists,
+    platform: process.platform
+  })
 }
 
 function writeBootstrapMarker(payload) {
@@ -2295,13 +2302,30 @@ function resolveHermesBackend(dashboardArgs) {
     if (backend) return backend
   }
 
-  // 3. Bootstrap-complete ACTIVE_HERMES_ROOT -- the canonical install at
+  // 3. ACTIVE_HERMES_ROOT -- the canonical install at
   //    %LOCALAPPDATA%\hermes\hermes-agent (Windows) or ~/.hermes/hermes-agent.
-  //    The bootstrap marker means install.ps1 stages finished and the user
-  //    completed initial configuration; we trust the install and go straight
-  //    to spawning hermes. Updates flow through the in-app update path
-  //    (applyUpdates -> git pull) or `hermes update` from the CLI.
+  //    A desktop-written bootstrap marker still proves that the desktop's
+  //    first-launch installer completed, but it is not the only valid install
+  //    signal: users can already have a working CLI/source checkout here. If the
+  //    checkout and venv are both present, use them directly instead of showing
+  //    the installer again.
   if (isBootstrapComplete()) {
+    return createActiveBackend(dashboardArgs)
+  }
+
+  if (
+    hasUsableActiveHermesInstall({
+      activeRoot: ACTIVE_HERMES_ROOT,
+      venvRoot: VENV_ROOT,
+      fileExists,
+      directoryExists,
+      platform: process.platform
+    })
+  ) {
+    rememberLog(
+      `[bootstrap] using existing Hermes install at ${ACTIVE_HERMES_ROOT}; ` +
+        'desktop bootstrap marker is missing, so first-launch install is skipped.'
+    )
     return createActiveBackend(dashboardArgs)
   }
 
