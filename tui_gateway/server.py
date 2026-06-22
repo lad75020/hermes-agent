@@ -3789,6 +3789,21 @@ def _make_agent(
             target_model=model or None,
         )
     _pr = _load_provider_routing()
+    effective_service_tier = (
+        service_tier_override
+        if service_tier_override is not None
+        else _load_service_tier()
+    )
+    request_overrides: dict = {}
+    if effective_service_tier == "priority":
+        try:
+            from hermes_cli.models import resolve_fast_mode_overrides
+
+            request_overrides = resolve_fast_mode_overrides(model) or {}
+        except Exception:
+            logger.debug("failed to resolve fast-mode request overrides", exc_info=True)
+            request_overrides = {}
+
     return AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
@@ -3810,11 +3825,8 @@ def _make_agent(
             if reasoning_config_override is not None
             else _load_reasoning_config()
         ),
-        service_tier=(
-            service_tier_override
-            if service_tier_override is not None
-            else _load_service_tier()
-        ),
+        service_tier=effective_service_tier,
+        request_overrides=request_overrides,
         enabled_toolsets=_load_enabled_toolsets(),
         # OpenRouter provider-routing prefs (config.yaml `provider_routing`).
         # Mirrors the messaging gateway + CLI so the desktop/TUI honors the same
