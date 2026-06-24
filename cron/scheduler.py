@@ -316,17 +316,9 @@ def _get_hermes_home() -> Path:
 
 
 def _get_lock_paths() -> tuple[Path, Path]:
-    """Resolve cron lock paths at call time so profile/env changes are honored.
-
-    Anchored on the DEFAULT ROOT home (not the active profile), matching the
-    jobs store in cron.jobs (which uses get_default_hermes_root). The tick lock
-    is storage-coordination — it must live next to the single jobs.json so that
-    tickers running under different profiles share one lock and can't
-    double-fire the relocated store (#32091). Execution context (.env,
-    config.yaml, scripts) stays profile-aware via _get_hermes_home().
-    """
-    from hermes_constants import get_default_hermes_root
-    lock_dir = (_hermes_home or get_default_hermes_root()) / "cron"
+    """Resolve cron lock paths at call time so profile/env changes are honored."""
+    hermes_home = _get_hermes_home()
+    lock_dir = hermes_home / "cron"
     return lock_dir, lock_dir / ".tick.lock"
 
 
@@ -1857,32 +1849,6 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         os.environ["TERMINAL_CWD"] = _job_workdir
         logger.info("Job '%s': using workdir %s", job_id, _job_workdir)
 
-    # Scope this job's execution to its owning profile's HERMES_HOME (#32091).
-    # The shared root store holds every profile's jobs, but a job must run with
-    # the .env / config.yaml / credentials of the profile that created it — not
-    # whichever profile's ticker happened to pick it up. We set both the
-    # in-process ContextVar override (consumed by _get_hermes_home() for the
-    # config/.env/script loads below) AND os.environ["HERMES_HOME"] (inherited
-    # by any child subprocess the agent spawns). tick() routes profile-scoped
-    # jobs to the single-worker sequential pool, so mutating os.environ here is
-    # safe — they never overlap. Restored in the finally block.
-    from cron.jobs import resolve_profile_home
-    from hermes_constants import set_hermes_home_override
-    _job_profile = (job.get("profile") or "default").strip() or "default"
-    _profile_home = resolve_profile_home(_job_profile)
-    _prior_hermes_home = os.environ.get("HERMES_HOME", "_UNSET_")
-    _hermes_home_token = None
-    if _profile_home is not None and _profile_home != _get_hermes_home().resolve():
-        os.environ["HERMES_HOME"] = str(_profile_home)
-        _hermes_home_token = set_hermes_home_override(str(_profile_home))
-        logger.info("Job '%s': executing under profile %r (HERMES_HOME=%s)",
-                    job_id, _job_profile, _profile_home)
-    elif _profile_home is None and _job_profile != "default":
-        logger.warning(
-            "Job '%s': profile %r no longer exists — running under the "
-            "ticker's profile instead", job_id, _job_profile,
-        )
-
     try:
         # Re-read .env and config.yaml fresh every run so provider/key
         # changes take effect without a gateway restart.
@@ -2041,6 +2007,60 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         except Exception as exc:
             message = format_runtime_provider_error(exc)
             raise RuntimeError(message) from exc
+
+        # Provider/model-drift fail-closed guard (#44585).
+        #
+        # An UNPINNED job (no explicit job["provider"]/["model"]) follows the
+        # global default, which can change after the job was created — a switch
+        # to a paid PROVIDER (e.g. nous) OR a paid MODEL on the same provider
+        # (e.g. claude-fable-5 on openrouter). Without a guard the job would
+        # silently inherit that change and spend real money on every tick — the
+        # $7.73 incident named BOTH a provider and a model.
+        #
+        # create_job() snapshots whatever resolution would have picked at
+        # creation for each unpinned axis (job["provider_snapshot"] /
+        # job["model_snapshot"]). Here, for each axis that (a) has a snapshot and
+        # (b) is unpinned and (c) currently resolves to a DIFFERENT value, we
+        # fail closed: skip this run, make NO paid call, and deliver a loud,
+        # actionable alert telling the user to pin the axis explicitly.
+        #
+        # Back-compat: an axis with no snapshot (pre-existing jobs, no_agent, or
+        # any axis whose creation-time resolution failed) behaves exactly as
+        # before — the guard never engages for it. Pinned axes are unaffected.
+        _drift: list[str] = []
+        _provider_snapshot = (job.get("provider_snapshot") or "").strip().lower()
+        if _provider_snapshot and not (job.get("provider") or "").strip():
+            _current_provider = str(runtime.get("provider") or "").strip().lower()
+            if _current_provider and _current_provider != _provider_snapshot:
+                _drift.append(
+                    f"provider '{_provider_snapshot}' -> '{_current_provider}'"
+                )
+        _model_snapshot = (job.get("model_snapshot") or "").strip().lower()
+        if _model_snapshot and not (job.get("model") or "").strip():
+            _current_model = str(model or "").strip().lower()
+            if _current_model and _current_model != _model_snapshot:
+                _drift.append(
+                    f"model '{_model_snapshot}' -> '{_current_model}'"
+                )
+        if _drift:
+            _changes = "; ".join(_drift)
+            logger.warning(
+                "Job '%s': SKIPPED — global inference config drifted since "
+                "creation (%s) and this job is unpinned. Skipped to prevent "
+                "unintended spend. Pin explicitly to proceed: "
+                "`cronjob action=update job_id=%s provider=<p> model=<m>`.",
+                job_id,
+                _changes,
+                job_id,
+            )
+            raise RuntimeError(
+                f"Skipped to prevent unintended spend: global inference config "
+                f"drifted since this job was created ({_changes}), and this job "
+                f"is unpinned. No inference call was made. To run on the new "
+                f"config, pin it explicitly: `cronjob action=update "
+                f"job_id={job_id} provider=<provider> model=<model>` "
+                f"(or pin the original values to keep them). See #44585."
+            )
 
         fallback_model = _cfg.get("fallback_providers") or _cfg.get("fallback_model") or None
         credential_pool = None
@@ -2294,19 +2314,6 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 os.environ.pop("TERMINAL_CWD", None)
             else:
                 os.environ["TERMINAL_CWD"] = _prior_terminal_cwd
-        # Restore HERMES_HOME to the ticker's value when this job overrode it
-        # for profile-scoped execution (#32091). Mirrors the TERMINAL_CWD
-        # restore above; the sequential pool guarantees no overlap.
-        if _hermes_home_token is not None:
-            try:
-                from hermes_constants import reset_hermes_home_override
-                reset_hermes_home_override(_hermes_home_token)
-            except Exception:
-                pass
-            if _prior_hermes_home == "_UNSET_":
-                os.environ.pop("HERMES_HOME", None)
-            else:
-                os.environ["HERMES_HOME"] = _prior_hermes_home
         # Clean up ContextVar session/delivery state for this job.
         clear_session_vars(_ctx_tokens)
         for _var_name in _cron_delivery_vars:
@@ -2512,26 +2519,12 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
             body."""
             return run_one_job(job, adapters=adapters, loop=loop, verbose=verbose)
 
-        # Partition due jobs: those that mutate process-global os.environ
-        # inside run_job MUST run sequentially to avoid corrupting each other.
-        # Two cases mutate env:
-        #   - a per-job workdir sets os.environ["TERMINAL_CWD"].
-        #   - a per-job profile whose HERMES_HOME differs from the ticker's
-        #     sets os.environ["HERMES_HOME"] to scope execution (#32091).
-        # Jobs that need neither leave env untouched and stay parallel-safe.
-        def _needs_sequential(j: dict) -> bool:
-            if (j.get("workdir") or "").strip():
-                return True
-            prof = (j.get("profile") or "default").strip() or "default"
-            try:
-                from cron.jobs import resolve_profile_home
-                phome = resolve_profile_home(prof)
-            except Exception:
-                phome = None
-            return phome is not None and phome != _get_hermes_home().resolve()
-
-        sequential_jobs = [j for j in due_jobs if _needs_sequential(j)]
-        parallel_jobs = [j for j in due_jobs if not _needs_sequential(j)]
+        # Partition due jobs: those with a per-job workdir mutate
+        # os.environ["TERMINAL_CWD"] inside run_job, which is process-global —
+        # so they MUST run sequentially to avoid corrupting each other.  Jobs
+        # without a workdir leave env untouched and stay parallel-safe.
+        sequential_jobs = [j for j in due_jobs if (j.get("workdir") or "").strip()]
+        parallel_jobs = [j for j in due_jobs if not (j.get("workdir") or "").strip()]
 
         _results: list = []
         _all_futures: list = []
