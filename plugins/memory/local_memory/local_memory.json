@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "mongo_uri": "mongodb://localhost:27017/hermes-local-memory",
+  "mongo_database": "hermes-local-memory",
+  "redis_url": "redis://localhost:6379",
+  "ollama_base_url": "http://localhost:11434",
+  "ollama_embedding_model": "nomic-embed-text",
+  "ollama_curator_model": "llama3.1",
+  "chroma_path": "/Volumes/WDBlack4TB/.hermes/hermes-local-memory/chroma",
+  "chroma_collection": "hermes_local_memory",
+  "max_prefetch_results": 8,
+  "max_prefetch_chars": 3000,
+  "min_relevance": 0.25,
+  "write_non_primary_contexts": false
+}

@@ -1,0 +1,9 @@
+name: local_memory
+version: 0.1.0
+description: "Local Hermes MemoryProvider backed by MongoDB, Redis, ChromaDB, and Ollama."
+pip_dependencies:
+  - pymongo
+  - redis
+  - chromadb
+  - httpx
+  - pydantic
