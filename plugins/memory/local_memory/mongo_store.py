@@ -1,6 +1,7 @@
 """MongoDB persistence adapter plus in-memory store for tests."""
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from .models import DurableMemoryRecord, IdentityScope, MemoryFeedbackRecord, ProviderEvent, RawTurnRecord, TombstoneRecord, content_hash, utc_now_iso
@@ -55,6 +56,19 @@ class MongoStore:
             if scope.user_id:
                 query["scope.user_id"] = scope.user_id
         return [DurableMemoryRecord.from_dict(row) for row in self.db.durable_memories.find(query)]
+
+    def find_active_memories_by_keywords(self, keywords: Iterable[str], scope: IdentityScope | None = None, limit: int = 100) -> List[DurableMemoryRecord]:
+        cleaned = [str(keyword).strip() for keyword in keywords if str(keyword).strip()]
+        if not cleaned:
+            return []
+        query: Dict[str, Any] = {"status": "active"}
+        if scope:
+            query.update({"scope.agent_identity": scope.agent_identity, "scope.agent_workspace": scope.agent_workspace})
+            if scope.user_id:
+                query["scope.user_id"] = scope.user_id
+        query["$or"] = [{"content": {"$regex": re.compile(re.escape(keyword), re.IGNORECASE)}} for keyword in cleaned]
+        cursor = self.db.durable_memories.find(query).sort("updated_at", -1).limit(max(1, int(limit)))
+        return [DurableMemoryRecord.from_dict(row) for row in cursor]
 
     def find_duplicate(self, memory: DurableMemoryRecord) -> Optional[DurableMemoryRecord]:
         query = {"content_hash": memory.content_hash, "status": "active", "scope.agent_identity": memory.scope.agent_identity, "scope.agent_workspace": memory.scope.agent_workspace}
@@ -127,6 +141,25 @@ class InMemoryMongoStore:
             if scope and scope.user_id and memory.scope.user_id != scope.user_id:
                 continue
             out.append(memory)
+        return out
+
+    def find_active_memories_by_keywords(self, keywords: Iterable[str], scope: IdentityScope | None = None, limit: int = 100) -> List[DurableMemoryRecord]:
+        cleaned = [str(keyword).strip().lower() for keyword in keywords if str(keyword).strip()]
+        if not cleaned:
+            return []
+        out: List[DurableMemoryRecord] = []
+        for memory in self.memories.values():
+            if memory.status != "active":
+                continue
+            if scope and (memory.scope.agent_identity != scope.agent_identity or memory.scope.agent_workspace != scope.agent_workspace):
+                continue
+            if scope and scope.user_id and memory.scope.user_id != scope.user_id:
+                continue
+            haystack = memory.content.lower()
+            if any(keyword in haystack for keyword in cleaned):
+                out.append(memory)
+            if len(out) >= max(1, int(limit)):
+                break
         return out
 
     def find_duplicate(self, memory: DurableMemoryRecord) -> Optional[DurableMemoryRecord]:

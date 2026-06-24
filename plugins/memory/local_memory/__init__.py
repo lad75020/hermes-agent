@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 try:
     from agent.memory_provider import MemoryProvider
@@ -127,6 +128,105 @@ class LocalMemoryProvider(MemoryProvider):
         lines.append("</local-memory-context>")
         text = "\n".join(lines)
         return text[: self.config.max_prefetch_chars]
+
+    @staticmethod
+    def _eraser_keywords(topic: str) -> List[str]:
+        phrase = (topic or "").strip().lower()
+        tokens = [token for token in re.split(r"[^0-9a-zA-Z]+", phrase) if len(token) >= 3]
+        keywords: List[str] = []
+        for keyword in ([phrase] if len(phrase) >= 3 else []) + tokens:
+            if keyword and keyword not in keywords:
+                keywords.append(keyword)
+        return keywords
+
+    @staticmethod
+    def _eraser_confidence(topic: str, keywords: Sequence[str], text: str) -> float:
+        haystack = (text or "").lower()
+        phrase = (topic or "").strip().lower()
+        if len(phrase) >= 3 and phrase in haystack:
+            return 1.0
+        token_keywords = [keyword for keyword in keywords if " " not in keyword]
+        if not token_keywords:
+            return 0.0
+        matched = [keyword for keyword in token_keywords if keyword in haystack]
+        required = max(1, min(2, len(token_keywords)))
+        if len(matched) < required:
+            return 0.0
+        return min(0.95, 0.45 + (len(matched) / max(1, len(token_keywords))) * 0.5)
+
+    def find_eraser_keyword_matches(self, topic: str, *, limit: int = 100, scoped: bool = False) -> List[Dict[str, Any]]:
+        """Find active durable memories whose Mongo or Chroma documents contain eraser keywords."""
+        keywords = self._eraser_keywords(topic)
+        if not keywords or not self.mongo_store or not self.chroma_index:
+            return []
+        active_scope = self.scope if scoped else None
+        capped_limit = max(1, min(500, int(limit)))
+        mongo_memories = self.mongo_store.find_active_memories_by_keywords(keywords, active_scope, capped_limit)
+        chroma_hits = self.chroma_index.find_memory_documents_by_keywords(
+            keywords,
+            where=(active_scope.chroma_where() if active_scope else {}) | {"status": "active"},
+            limit=capped_limit,
+        )
+        ids: List[str] = []
+        source_by_id: Dict[str, Dict[str, Any]] = {}
+        for memory in mongo_memories:
+            ids.append(memory.memory_id)
+            source_by_id.setdefault(memory.memory_id, {"mongo_match": False, "chroma_match": False, "chroma_document": ""})["mongo_match"] = True
+        for hit in chroma_hits:
+            memory_id = str(hit.get("memory_id") or "")
+            if not memory_id:
+                continue
+            ids.append(memory_id)
+            source = source_by_id.setdefault(memory_id, {"mongo_match": False, "chroma_match": False, "chroma_document": ""})
+            source["chroma_match"] = True
+            source["chroma_document"] = str(hit.get("document") or "")
+        ordered_ids = list(dict.fromkeys(ids))[:capped_limit]
+        memories = self.mongo_store.get_active_memories(ordered_ids, active_scope)
+        memory_by_id = {memory.memory_id: memory for memory in memories}
+        rows: List[Dict[str, Any]] = []
+        for memory_id in ordered_ids:
+            memory = memory_by_id.get(memory_id)
+            if not memory:
+                continue
+            source = source_by_id.get(memory_id, {})
+            score_text = memory.content + "\n" + str(source.get("chroma_document") or "")
+            confidence = self._eraser_confidence(topic, keywords, score_text)
+            if confidence <= 0:
+                continue
+            rows.append({
+                "memory_id": memory.memory_id,
+                "content": memory.content,
+                "memory_type": memory.memory_type,
+                "confidence": round(confidence, 4),
+                "updated_at": memory.updated_at,
+                "scope": memory.scope.to_dict(),
+                "source_session_ids": memory.source_session_ids,
+                "mongo_match": bool(source.get("mongo_match")),
+                "chroma_match": bool(source.get("chroma_match")),
+            })
+        rows.sort(key=lambda item: (item["confidence"], item["updated_at"]), reverse=True)
+        return rows
+
+    def erase_eraser_memories(self, memory_ids: Sequence[str], *, reason: str = "knowledge_eraser") -> Dict[str, Any]:
+        """Tombstone selected durable memories and delete their Chroma vectors."""
+        if not self.mongo_store or not self.chroma_index:
+            return {"erased": [], "skipped": list(memory_ids), "message": "local_memory is not initialized"}
+        ordered_ids = list(dict.fromkeys(str(memory_id).strip() for memory_id in memory_ids if str(memory_id).strip()))
+        active_memories = self.mongo_store.get_active_memories(ordered_ids, None)
+        active_ids = {memory.memory_id for memory in active_memories}
+        erased: List[str] = []
+        skipped: List[str] = []
+        for memory_id in ordered_ids:
+            if memory_id not in active_ids:
+                skipped.append(memory_id)
+                continue
+            ok = self.mongo_store.tombstone_memory(memory_id, reason)
+            if ok:
+                self.chroma_index.delete_memory(memory_id)
+                erased.append(memory_id)
+            else:
+                skipped.append(memory_id)
+        return {"erased": erased, "skipped": skipped, "message": f"Erased {len(erased)} local_memory memories"}
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         cache_key = content_hash(query)[:16]

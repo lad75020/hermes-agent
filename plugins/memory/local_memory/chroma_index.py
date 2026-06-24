@@ -68,6 +68,28 @@ class ChromaIndex:
             self.bootstrap()
         self._collection.delete(ids=[memory_id])
 
+    def find_memory_documents_by_keywords(self, keywords: Sequence[str], *, where: Dict[str, Any], limit: int = 100) -> List[Dict[str, Any]]:
+        if self._collection is None:
+            self.bootstrap()
+        cleaned = [str(keyword).strip().lower() for keyword in keywords if str(keyword).strip()]
+        if not cleaned:
+            return []
+        result = self._collection.get(where=_chroma_where_filter(where), include=["documents", "metadatas"])
+        ids = result.get("ids") or []
+        documents = result.get("documents") or []
+        metadatas = result.get("metadatas") or []
+        rows: List[Dict[str, Any]] = []
+        for index, item_id in enumerate(ids):
+            document = str(documents[index] if index < len(documents) else "")
+            haystack = document.lower()
+            if not any(keyword in haystack for keyword in cleaned):
+                continue
+            metadata = metadatas[index] if index < len(metadatas) else {}
+            rows.append({"memory_id": str((metadata or {}).get("memory_id") or item_id), "document": document, "metadata": metadata or {}})
+            if len(rows) >= max(1, int(limit)):
+                break
+        return rows
+
     def search(self, embedding: List[float], *, where: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
         if self._collection is None:
             self.bootstrap()
@@ -99,6 +121,23 @@ class InMemoryChromaIndex:
         self.vectors.pop(memory_id, None)
         self.metadata.pop(memory_id, None)
         self.documents.pop(memory_id, None)
+
+    def find_memory_documents_by_keywords(self, keywords: Sequence[str], *, where: Dict[str, Any], limit: int = 100) -> List[Dict[str, Any]]:
+        cleaned = [str(keyword).strip().lower() for keyword in keywords if str(keyword).strip()]
+        if not cleaned:
+            return []
+        rows: List[Dict[str, Any]] = []
+        for memory_id, document in self.documents.items():
+            meta = self.metadata.get(memory_id, {})
+            if any(meta.get(k) != v for k, v in (where or {}).items()):
+                continue
+            haystack = document.lower()
+            if not any(keyword in haystack for keyword in cleaned):
+                continue
+            rows.append({"memory_id": memory_id, "document": document, "metadata": meta})
+            if len(rows) >= max(1, int(limit)):
+                break
+        return rows
 
     def search(self, embedding: List[float], *, where: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
         rows = []
