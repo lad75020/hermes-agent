@@ -769,10 +769,11 @@ def finalize_turn(
         agent._iters_since_skill = 0
 
     # External memory provider: sync the completed turn + queue next prefetch.
-    agent._sync_external_memory_for_turn(
-        original_user_message=original_user_message, final_response=final_response,
-        interrupted=interrupted, messages=messages,
-    )
+    if completed:
+        agent._sync_external_memory_for_turn(
+            original_user_message=original_user_message, final_response=final_response,
+            interrupted=interrupted, messages=messages,
+        )
 
     # Background memory/skill review runs AFTER delivery so it never competes with the
     # user's task. Suppressed by skip_background_review (e.g. cron): the fork costs

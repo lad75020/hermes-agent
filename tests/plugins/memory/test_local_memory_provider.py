@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from plugins.memory.local_memory import LocalMemoryProvider
+from plugins.memory.local_memory.chroma_index import InMemoryChromaIndex
+from plugins.memory.local_memory.config import LocalMemoryConfig
+from plugins.memory.local_memory.mongo_store import InMemoryMongoStore
+from plugins.memory.local_memory.redis_queue import InMemoryRedisQueue
+
+
+def _provider() -> LocalMemoryProvider:
+    provider = LocalMemoryProvider(
+        config=LocalMemoryConfig(enabled=True),
+        mongo_store=InMemoryMongoStore(),
+        redis_queue=InMemoryRedisQueue(),
+        chroma_index=InMemoryChromaIndex(),
+        ollama_client=SimpleNamespace(embed=lambda text: [float(len(text) % 7), 1.0]),
+    )
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-test",
+        platform="tui",
+        agent_identity="default",
+        agent_workspace="workspace",
+    )
+    return provider
+
+
+def test_on_memory_write_add_mirrors_builtin_memory_save_to_mongo_and_chroma():
+    provider = _provider()
+
+    provider.on_memory_write(
+        "add",
+        "user",
+        "Laurent prefers concise autonomous progress",
+        metadata={"session_id": "session-1", "tool_name": "memory"},
+    )
+
+    memories = list(provider.mongo_store.memories.values())
+    assert len(memories) == 1
+    memory = memories[0]
+    assert memory.content == "Laurent prefers concise autonomous progress"
+    assert memory.memory_type == "preference"
+    assert memory.source_session_ids == ["session-1"]
+    assert memory.memory_id in provider.chroma_index.documents
+    assert provider.chroma_index.documents[memory.memory_id] == memory.content
+
+
+def test_on_memory_write_remove_tombstones_mongo_and_deletes_chroma_vector():
+    provider = _provider()
+    provider.on_memory_write("add", "memory", "Project uses pytest for verification")
+    memory_id = next(iter(provider.mongo_store.memories))
+    assert memory_id in provider.chroma_index.documents
+
+    provider.on_memory_write(
+        "remove",
+        "memory",
+        "",
+        metadata={"old_text": "Project uses pytest for verification"},
+    )
+
+    assert provider.mongo_store.memories[memory_id].status == "tombstoned"
+    assert memory_id not in provider.chroma_index.documents
+
+
+def test_on_memory_write_replace_removes_old_text_and_adds_new_text():
+    provider = _provider()
+    provider.on_memory_write("add", "memory", "Old local memory preference")
+    old_id = next(iter(provider.mongo_store.memories))
+
+    provider.on_memory_write(
+        "replace",
+        "memory",
+        "New local memory preference",
+        metadata={"old_text": "Old local memory preference"},
+    )
+
+    active = [m for m in provider.mongo_store.memories.values() if m.status == "active"]
+    assert len(active) == 1
+    assert active[0].content == "New local memory preference"
+    assert provider.mongo_store.memories[old_id].status == "tombstoned"
+    assert old_id not in provider.chroma_index.documents
+
+
+def test_local_memory_status_separates_actual_queue_depth_from_cumulative_metrics():
+    provider = _provider()
+    provider.sync_turn("user", "assistant", session_id="session-1")
+    job = provider.redis_queue.pop()
+    assert job is not None
+    provider.redis_queue.ack(job)
+
+    health = provider.redis_queue.health()
+
+    assert health["queue_key"] == "hermes:local-memory:queue"
+    assert health["metrics_key"] == "hermes:local-memory:metrics"
+    assert health["queue_depth"] == 0
+    assert health["cumulative_metrics"] == {"enqueued": 1, "acked": 1}

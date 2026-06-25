@@ -29,12 +29,21 @@ class RedisQueue:
 
     def health(self) -> Dict[str, Any]:
         try:
+            queue_depth = int(self.client.llen(QUEUE_KEY))
+            cumulative_metrics = dict(self.client.hgetall(METRICS_KEY) or {})
             return {
                 "ok": bool(self.client.ping()),
-                "queue_depth": self.client.llen(QUEUE_KEY),
+                # Actual backlog: Redis LLEN hermes:local-memory:queue.
+                "queue_depth": queue_depth,
                 "retry_depth": self.client.zcard(RETRY_KEY),
                 "dead_depth": self.client.llen(DEAD_KEY),
                 "leased_depth": self.client.hlen(LEASE_KEY),
+                # Cumulative counters: Redis HGETALL hermes:local-memory:metrics.
+                # Keep separate from queue_depth so status UIs do not confuse
+                # all-time enqueue/ack totals with the current backlog.
+                "cumulative_metrics": cumulative_metrics,
+                "queue_key": QUEUE_KEY,
+                "metrics_key": METRICS_KEY,
             }
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
@@ -113,12 +122,23 @@ class InMemoryRedisQueue:
         self.dead: list[tuple[IngestionJob, str]] = []
         self.leased: dict[str, IngestionJob] = {}
         self.cache: dict[str, str] = {}
+        self.metrics: dict[str, int] = {}
 
     def health(self) -> Dict[str, Any]:
-        return {"ok": True, "queue_depth": len(self.jobs), "retry_depth": len(self.retry_jobs), "dead_depth": len(self.dead), "leased_depth": len(self.leased)}
+        return {
+            "ok": True,
+            "queue_depth": len(self.jobs),
+            "retry_depth": len(self.retry_jobs),
+            "dead_depth": len(self.dead),
+            "leased_depth": len(self.leased),
+            "cumulative_metrics": dict(self.metrics),
+            "queue_key": QUEUE_KEY,
+            "metrics_key": METRICS_KEY,
+        }
 
     def enqueue(self, job: IngestionJob) -> None:
         self.jobs.append(job)
+        self.metrics["enqueued"] = self.metrics.get("enqueued", 0) + 1
 
     def pop(self, timeout: float = 0.0) -> Optional[IngestionJob]:
         if not self.jobs and self.retry_jobs:
@@ -131,15 +151,18 @@ class InMemoryRedisQueue:
 
     def ack(self, job: IngestionJob) -> None:
         self.leased.pop(job.job_id, None)
+        self.metrics["acked"] = self.metrics.get("acked", 0) + 1
 
     def retry(self, job: IngestionJob, error: Exception) -> None:
         job.schedule_retry(error)
         self.leased.pop(job.job_id, None)
         self.retry_jobs.append(job)
+        self.metrics["retried"] = self.metrics.get("retried", 0) + 1
 
     def dead_letter(self, job: IngestionJob, error: str) -> None:
         self.leased.pop(job.job_id, None)
         self.dead.append((job, error))
+        self.metrics["dead"] = self.metrics.get("dead", 0) + 1
 
     def set_prefetch_cache(self, session_id: str, query_hash: str, value: str, ttl: int = 120) -> None:
         self.cache[f"{session_id}:{query_hash}"] = value

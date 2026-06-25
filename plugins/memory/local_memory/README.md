@@ -38,7 +38,7 @@ Every record carries `hermes_home`, `agent_identity`, `agent_workspace`, `platfo
 /Volumes/WDBlack4TB/.hermes/hermes-agent/venv/bin/python3 -m plugins.memory.local_memory.cli status --hermes-home /Volumes/WDBlack4TB/.hermes
 ```
 
-Diagnostics report service health, queue depth, Chroma collection status, Ollama reachability, Python executable, and recent provider events without printing secrets.
+Diagnostics report service health, actual Redis queue depth (`LLEN hermes:local-memory:queue`), cumulative Redis metrics (`HGETALL hermes:local-memory:metrics`), Chroma collection status, Ollama reachability, Python executable, and recent provider events without printing secrets.
 
 ## Recovery
 
