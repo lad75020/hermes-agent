@@ -13,7 +13,6 @@ import inspect
 import json
 import logging
 import os
-import tempfile
 import html as _html
 import re
 from datetime import datetime, timezone
@@ -497,6 +496,10 @@ class TelegramAdapter(BasePlatformAdapter):
         # as plain text, which is worse than degraded table/task-list rendering
         # for command snippets and mobile handoffs.
         self._rich_messages_enabled: bool = self._coerce_bool_extra("rich_messages", False)
+        # Rich draft previews use a separate opt-in. Telegram macOS / Desktop
+        # can leave Bot API 10.1 rich draft frames visually overlaid until the
+        # chat is redrawn, while final rich messages remain useful.
+        self._rich_drafts_enabled: bool = self._coerce_bool_extra("rich_drafts", False)
         # Latched off after a capability failure on sendRichMessage /
         # sendRichMessageDraft (e.g. older python-telegram-bot without the
         # endpoint) so later sends skip the doomed rich attempt entirely.
@@ -1378,6 +1381,15 @@ class TelegramAdapter(BasePlatformAdapter):
                 _TimedOut = None
             is_timeout = (_TimedOut and isinstance(exc, _TimedOut)) or "timed out" in err_str
             is_connect_timeout = self._looks_like_connect_timeout(exc)
+            # Extract server-requested retry_after for flood control so the
+            # base retry layer honors Telegram's backoff instead of its own
+            # short exponential schedule.
+            _retry_after = getattr(exc, "retry_after", None)
+            if _retry_after is None:
+                import re as _re
+                _m = _re.search(r"retry\s+(?:in\s+)?(\d+)", err_str, _re.IGNORECASE)
+                if _m:
+                    _retry_after = float(_m.group(1))
             logger.warning(
                 "[%s] sendRichMessage transient failure (no legacy resend): %s",
                 self.name, exc,
@@ -1386,6 +1398,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 success=False,
                 error=str(exc),
                 retryable=(is_connect_timeout or not is_timeout),
+                retry_after=_retry_after,
             )
 
         message_id = None
@@ -1485,6 +1498,7 @@ class TelegramAdapter(BasePlatformAdapter):
     def _should_attempt_rich_draft(self, content: str) -> bool:
         return bool(
             getattr(self, "_rich_messages_enabled", True)
+            and getattr(self, "_rich_drafts_enabled", False)
             and not getattr(self, "_rich_send_disabled", False)
             and not getattr(self, "_rich_draft_disabled", False)
             and content
@@ -2020,29 +2034,14 @@ class TelegramAdapter(BasePlatformAdapter):
                 changed = True
 
             if changed:
-                fd, tmp_path = tempfile.mkstemp(
-                    dir=str(config_path.parent),
-                    suffix=".tmp",
-                    prefix=".config_",
+                from utils import atomic_yaml_write
+
+                atomic_yaml_write(
+                    config_path,
+                    config,
+                    default_flow_style=False,
+                    sort_keys=False,
                 )
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        _yaml.dump(
-                            config,
-                            f,
-                            default_flow_style=False,
-                            sort_keys=False,
-                            allow_unicode=True,
-                        )
-                        f.flush()
-                        os.fsync(f.fileno())
-                    atomic_replace(tmp_path, config_path)
-                except BaseException:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-                    raise
                 logger.info(
                     "[%s] Persisted thread_id=%s for topic '%s' in config.yaml",
                     self.name, thread_id, topic_name,
