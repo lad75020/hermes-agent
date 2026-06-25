@@ -359,6 +359,7 @@ def run_codex_app_server_turn(
 
     # External memory provider sync (mirrors line ~15439). Skipped on
     # interrupt/error to avoid feeding partial transcripts to memory.
+    external_memory_synced = False
     if not turn.interrupted and turn.error is None:
         try:
             agent._sync_external_memory_for_turn(
@@ -367,6 +368,7 @@ def run_codex_app_server_turn(
                 interrupted=False,
                 messages=messages,
             )
+            external_memory_synced = bool(turn.final_text and original_user_message)
         except Exception:
             logger.debug("external memory sync raised", exc_info=True)
 
@@ -396,6 +398,7 @@ def run_codex_app_server_turn(
         "error": turn.error,
         "codex_thread_id": turn.thread_id,
         "codex_turn_id": turn.turn_id,
+        "external_memory_synced": external_memory_synced,
         **usage_result,
     }
 

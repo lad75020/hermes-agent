@@ -17,7 +17,15 @@ except Exception:  # pragma: no cover - only for standalone docs/tests without H
 from .chroma_index import ChromaIndex
 from .config import LocalMemoryConfig, load_config, save_config
 from .diagnostics import collect_diagnostics
-from .models import DurableMemoryRecord, IdentityScope, IngestionJob, content_hash
+from .models import (
+    DurableMemoryRecord,
+    IdentityScope,
+    IngestionJob,
+    content_hash,
+    looks_like_secret,
+    normalize_content,
+    utc_now_iso,
+)
 from .mongo_store import MongoStore
 from .ollama_client import OllamaClient
 from .redis_queue import RedisQueue
@@ -270,6 +278,146 @@ class LocalMemoryProvider(MemoryProvider):
         except Exception as exc:  # noqa: BLE001
             if self.mongo_store:
                 self.mongo_store.record_event("enqueue_failure", str(exc), "error", {"job_id": job.job_id}, self.scope)
+
+    def _memory_tool_type(self, target: str) -> str:
+        target = (target or "").strip().lower()
+        if target == "user":
+            return "preference"
+        return "fact"
+
+    def _mirror_memory_tool_add(self, content: str, *, target: str, metadata: Dict[str, Any]) -> str:
+        if not self.scope or not self.mongo_store or not self.chroma_index:
+            return ""
+        text = (content or "").strip()
+        if not text or looks_like_secret(text):
+            return ""
+        session_id = str(metadata.get("session_id") or self._session_id or "")
+        memory = DurableMemoryRecord(
+            content=text,
+            scope=self.scope,
+            memory_type=self._memory_tool_type(target),
+            source_session_ids=[session_id] if session_id else [],
+            confidence=1.0,
+            sensitivity=str(metadata.get("sensitivity") or "normal"),
+        )
+        existing = self.mongo_store.find_duplicate(memory)
+        if existing:
+            memory = existing
+            memory.status = "active"
+            memory.confidence = max(float(memory.confidence), 1.0)
+            memory.updated_at = utc_now_iso()
+            if session_id and session_id not in memory.source_session_ids:
+                memory.source_session_ids.append(session_id)
+        embedding = self._safe_embed(memory.content)
+        memory.embedding = {
+            "model": self.config.ollama_embedding_model,
+            "dim": len(embedding),
+            "source": "memory_tool",
+        }
+        self.mongo_store.upsert_memory(memory)
+        self.chroma_index.upsert_memory(memory, embedding)
+        self.mongo_store.record_event(
+            "memory_write_mirrored",
+            "Mirrored explicit memory tool write",
+            "info",
+            {
+                "action": "add",
+                "target": target,
+                "memory_id": memory.memory_id,
+                "source": str(metadata.get("tool_name") or "memory"),
+            },
+            self.scope,
+        )
+        return memory.memory_id
+
+    def _mirror_memory_tool_remove(self, topic: str, *, action: str, metadata: Dict[str, Any]) -> List[str]:
+        if not self.scope or not self.mongo_store or not self.chroma_index:
+            return []
+        needle = normalize_content(topic or "")
+        if not needle:
+            return []
+        keywords = self._eraser_keywords(topic)
+        if not keywords:
+            return []
+        matches = self.mongo_store.find_active_memories_by_keywords(
+            keywords,
+            self.scope,
+            limit=100,
+        )
+        erased: List[str] = []
+        for memory in matches:
+            haystack = normalize_content(memory.content)
+            if needle not in haystack and haystack not in needle:
+                continue
+            if self.mongo_store.tombstone_memory(memory.memory_id, reason=f"memory_tool_{action}"):
+                try:
+                    self.chroma_index.delete_memory(memory.memory_id)
+                except Exception as exc:  # noqa: BLE001
+                    self.mongo_store.record_event(
+                        "memory_write_chroma_delete_failure",
+                        str(exc),
+                        "warning",
+                        {"memory_id": memory.memory_id, "action": action},
+                        self.scope,
+                    )
+                erased.append(memory.memory_id)
+        if erased:
+            self.mongo_store.record_event(
+                "memory_write_mirrored",
+                "Mirrored explicit memory tool removal",
+                "info",
+                {
+                    "action": action,
+                    "memory_ids": erased,
+                    "source": str(metadata.get("tool_name") or "memory"),
+                },
+                self.scope,
+            )
+        return erased
+
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Mirror built-in ``memory`` tool writes into Mongo and Chroma.
+
+        ``sync_turn`` queues conversational curation for the worker.  Explicit
+        saves through Hermes' built-in ``memory`` tool are already curated by the
+        user/agent at write time, so they should become durable local memories
+        immediately rather than waiting for turn ingestion.
+        """
+        if not self.scope or not self.scope.allows_write(self.config.write_non_primary_contexts):
+            return
+        metadata = dict(metadata or {})
+        action = (action or "").strip().lower()
+        target = (target or "memory").strip().lower()
+        try:
+            if action == "add":
+                self._mirror_memory_tool_add(content, target=target, metadata=metadata)
+            elif action == "replace":
+                old_text = str(metadata.get("old_text") or "")
+                if old_text:
+                    self._mirror_memory_tool_remove(old_text, action=action, metadata=metadata)
+                self._mirror_memory_tool_add(content, target=target, metadata=metadata)
+            elif action == "remove":
+                topic = str(metadata.get("old_text") or content or "")
+                self._mirror_memory_tool_remove(topic, action=action, metadata=metadata)
+        except Exception as exc:  # noqa: BLE001 - provider hooks are best-effort
+            if self.mongo_store:
+                try:
+                    self.mongo_store.record_event(
+                        "memory_write_mirror_failure",
+                        str(exc),
+                        "warning",
+                        {"action": action, "target": target},
+                        self.scope,
+                    )
+                except Exception:
+                    pass
+            logger.debug("local_memory on_memory_write failed", exc_info=True)
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         if not messages:

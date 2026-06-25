@@ -1284,6 +1284,53 @@ def test_status_callback_accepts_single_message_argument():
     )
 
 
+def test_tui_memory_sync_helper_calls_agent_after_completed_turn():
+    calls = []
+
+    agent = types.SimpleNamespace(
+        _sync_external_memory_for_turn=lambda **kwargs: calls.append(kwargs)
+    )
+    messages = [{"role": "assistant", "content": "done"}]
+    result = {"messages": messages}
+
+    server._sync_external_memory_after_tui_turn(
+        agent,
+        original_user_message="hello",
+        final_response="done",
+        interrupted=False,
+        messages=messages,
+        result=result,
+    )
+
+    assert calls == [
+        {
+            "original_user_message": "hello",
+            "final_response": "done",
+            "interrupted": False,
+            "messages": messages,
+        }
+    ]
+    assert result["external_memory_synced"] is True
+
+
+def test_tui_memory_sync_helper_does_not_duplicate_run_conversation_sync():
+    calls = []
+    agent = types.SimpleNamespace(
+        _sync_external_memory_for_turn=lambda **kwargs: calls.append(kwargs)
+    )
+
+    server._sync_external_memory_after_tui_turn(
+        agent,
+        original_user_message="hello",
+        final_response="done",
+        interrupted=False,
+        messages=[],
+        result={"external_memory_synced": True},
+    )
+
+    assert calls == []
+
+
 def test_resolve_model_uses_inference_model_env(monkeypatch):
     monkeypatch.delenv("HERMES_MODEL", raising=False)
     monkeypatch.setenv("HERMES_INFERENCE_MODEL", " anthropic/claude-sonnet-4.6\n")

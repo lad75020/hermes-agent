@@ -17,6 +17,7 @@ These tests exercise the helper directly on a bare ``AIAgent`` built
 via ``__new__`` so the full ``run_conversation`` machinery isn't needed
 — the method is pure logic and three state arguments.
 """
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -35,6 +36,47 @@ def _bare_agent():
     # providers that cache per-session state can update it mid-process
     # (see #6672).
     agent.session_id = "test_session_001"
+    return agent
+
+
+def _finalizer_ready_agent():
+    agent = _bare_agent()
+    agent.max_iterations = 5
+    agent.iteration_budget = SimpleNamespace(remaining=5, used=1, max_total=5)
+    agent.quiet_mode = True
+    agent.model = "test-model"
+    agent.provider = "test-provider"
+    agent.base_url = ""
+    agent.platform = "tui"
+    agent.session_input_tokens = 0
+    agent.session_output_tokens = 0
+    agent.session_cache_read_tokens = 0
+    agent.session_cache_write_tokens = 0
+    agent.session_reasoning_tokens = 0
+    agent.session_prompt_tokens = 0
+    agent.session_completion_tokens = 0
+    agent.session_total_tokens = 0
+    agent.session_estimated_cost_usd = 0.0
+    agent.session_cost_status = "ok"
+    agent.session_cost_source = "test"
+    agent.context_compressor = SimpleNamespace(last_prompt_tokens=0)
+    agent._tool_guardrail_halt_decision = None
+    agent._response_was_previewed = False
+    agent._interrupt_message = ""
+    agent._stream_callback = None
+    agent._skill_nudge_interval = 0
+    agent._iters_since_skill = 0
+    agent.valid_tool_names = []
+    agent._turn_failed_file_mutations = {}
+    agent._save_trajectory = MagicMock()
+    agent._cleanup_task_resources = MagicMock()
+    agent._drop_trailing_empty_response_scaffolding = MagicMock()
+    agent._persist_session = MagicMock()
+    agent._file_mutation_verifier_enabled = MagicMock(return_value=False)
+    agent._turn_completion_explainer_enabled = MagicMock(return_value=False)
+    agent._drain_pending_steer = MagicMock(return_value=None)
+    agent.clear_interrupt = MagicMock()
+    agent._spawn_background_review = MagicMock()
     return agent
 
 
@@ -128,6 +170,55 @@ class TestSyncExternalMemoryForTurn:
             "tests passed",
             session_id="test_session_001",
             messages=messages,
+        )
+
+    def test_run_conversation_finalizer_syncs_memory_after_successful_turn(self, monkeypatch):
+        """Integration guard for the run_conversation post-response boundary.
+
+        The TUI gateway calls ``AIAgent.run_conversation``.  A successful final
+        assistant response must reach ``MemoryManager.sync_all`` with the
+        original user message, final assistant text, and current message list.
+        """
+        from agent.turn_finalizer import finalize_turn
+
+        monkeypatch.setattr(
+            "hermes_cli.plugins.invoke_hook",
+            lambda *args, **kwargs: [],
+            raising=False,
+        )
+        agent = _finalizer_ready_agent()
+        messages = [
+            {"role": "user", "content": "Remember this completed turn"},
+            {"role": "assistant", "content": "Completed response"},
+        ]
+
+        result = finalize_turn(
+            agent,
+            final_response="Completed response",
+            api_call_count=1,
+            interrupted=False,
+            failed=False,
+            messages=messages,
+            conversation_history=[],
+            effective_task_id="test_session_001",
+            turn_id="turn-1",
+            user_message="Remember this completed turn",
+            original_user_message="Remember this completed turn",
+            _should_review_memory=False,
+            _turn_exit_reason="text_response(finish_reason=stop)",
+        )
+
+        assert result["completed"] is True
+        assert result["external_memory_synced"] is True
+        agent._memory_manager.sync_all.assert_called_once_with(
+            "Remember this completed turn",
+            "Completed response",
+            session_id="test_session_001",
+            messages=messages,
+        )
+        agent._memory_manager.queue_prefetch_all.assert_called_once_with(
+            "Remember this completed turn",
+            session_id="test_session_001",
         )
 
     def test_completed_skill_turn_keeps_original_message_for_memory_manager(self):

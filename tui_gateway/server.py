@@ -926,6 +926,44 @@ def _status_update(sid: str, kind: str, text: str | None = None):
     _emit("status.update", sid, {"kind": out_kind, "text": body})
 
 
+def _sync_external_memory_after_tui_turn(
+    agent: Any,
+    *,
+    original_user_message: Any,
+    final_response: Any,
+    interrupted: bool,
+    messages: list[dict[str, Any]] | None,
+    result: dict[str, Any] | None = None,
+) -> None:
+    """Best-effort TUI memory boundary for completed assistant turns.
+
+    Normal ``AIAgent.run_conversation`` already performs this sync from its
+    post-loop finalizer and marks the returned result with
+    ``external_memory_synced``.  The TUI gateway still owns the final visible
+    turn boundary, so this helper provides a defensive fallback for tests,
+    wrappers, and alternate agent implementations while avoiding duplicate
+    writes for the standard path.
+    """
+    if interrupted or not final_response or not original_user_message:
+        return
+    if result and result.get("external_memory_synced"):
+        return
+    sync = getattr(agent, "_sync_external_memory_for_turn", None)
+    if not callable(sync):
+        return
+    try:
+        sync(
+            original_user_message=original_user_message,
+            final_response=final_response,
+            interrupted=bool(interrupted),
+            messages=messages,
+        )
+        if result is not None:
+            result["external_memory_synced"] = True
+    except Exception:
+        logger.debug("TUI external memory sync failed", exc_info=True)
+
+
 def _estimate_image_tokens(width: int, height: int) -> int:
     """Very rough UI estimate for image prompt cost.
 
@@ -8016,6 +8054,21 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             else:
                 raw = str(result)
                 status = "complete"
+
+            if status == "complete":
+                _sync_external_memory_after_tui_turn(
+                    agent,
+                    original_user_message=run_message,
+                    final_response=raw,
+                    interrupted=False,
+                    messages=(
+                        result.get("messages")
+                        if isinstance(result, dict)
+                        and isinstance(result.get("messages"), list)
+                        else list(session.get("history", []))
+                    ),
+                    result=result if isinstance(result, dict) else None,
+                )
 
             payload = {"text": raw, "usage": _get_usage(agent), "status": status}
             if last_reasoning:

@@ -434,11 +434,19 @@ def finalize_turn(
         agent._iters_since_skill = 0
 
     # External memory provider: sync the completed turn + queue next prefetch.
-    agent._sync_external_memory_for_turn(
-        original_user_message=original_user_message,
-        final_response=final_response,
-        interrupted=interrupted,
-        messages=messages,
+    # This is the run_conversation post-response memory boundary used by the
+    # CLI and TUI gateway alike: pass the original user input, the final
+    # assistant text after any output transforms, the interrupt state, and the
+    # current messages snapshot so providers can persist the complete turn.
+    if completed:
+        agent._sync_external_memory_for_turn(
+            original_user_message=original_user_message,
+            final_response=final_response,
+            interrupted=interrupted,
+            messages=messages,
+        )
+    result["external_memory_synced"] = bool(
+        completed and final_response and original_user_message and not interrupted
     )
 
     # Background memory/skill review — runs AFTER the response is delivered
