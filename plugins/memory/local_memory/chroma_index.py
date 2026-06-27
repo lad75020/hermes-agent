@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 from .config import LocalMemoryConfig
-from .models import DurableMemoryRecord
+from .models import DurableMemoryRecord, TurnChunkRecord
 
 
 def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
@@ -53,6 +53,7 @@ class ChromaIndex:
         if self._collection is None:
             self.bootstrap()
         metadata = memory.scope.chroma_where() | {
+            "record_type": "durable_memory",
             "memory_id": memory.memory_id,
             "status": memory.status,
             "memory_type": memory.memory_type,
@@ -62,6 +63,23 @@ class ChromaIndex:
             "updated_at": memory.updated_at,
         }
         self._collection.upsert(ids=[memory.memory_id], embeddings=[embedding], documents=[memory.content], metadatas=[metadata])
+
+    def upsert_turn_chunk(self, chunk: TurnChunkRecord, embedding: List[float]) -> None:
+        if self._collection is None:
+            self.bootstrap()
+        metadata = chunk.scope.chroma_where() | {
+            "record_type": "turn_chunk",
+            "chunk_id": chunk.chunk_id,
+            "raw_turn_id": chunk.raw_turn_id,
+            "role": chunk.role,
+            "chunk_index": chunk.chunk_index,
+            "total_chunks": chunk.total_chunks,
+            "status": chunk.status,
+            "content_hash": chunk.content_hash,
+            "embedding_dim": len(embedding),
+            "created_at": chunk.created_at,
+        }
+        self._collection.upsert(ids=[chunk.chunk_id], embeddings=[embedding], documents=[chunk.content], metadatas=[metadata])
 
     def delete_memory(self, memory_id: str) -> None:
         if self._collection is None:
@@ -97,7 +115,19 @@ class ChromaIndex:
         ids = (result.get("ids") or [[]])[0]
         distances = (result.get("distances") or [[]])[0]
         metadatas = (result.get("metadatas") or [[]])[0]
-        return [{"memory_id": mid, "score": 1.0 - float(distances[i] if i < len(distances) else 0.0), "metadata": metadatas[i] if i < len(metadatas) else {}} for i, mid in enumerate(ids)]
+        rows: List[Dict[str, Any]] = []
+        for i, mid in enumerate(ids):
+            metadata = metadatas[i] if i < len(metadatas) else {}
+            record_type = str((metadata or {}).get("record_type") or "durable_memory")
+            rows.append({
+                "id": mid,
+                "memory_id": str((metadata or {}).get("memory_id") or mid),
+                "chunk_id": str((metadata or {}).get("chunk_id") or mid),
+                "record_type": record_type,
+                "score": 1.0 - float(distances[i] if i < len(distances) else 0.0),
+                "metadata": metadata or {},
+            })
+        return rows
 
 
 class InMemoryChromaIndex:
@@ -115,7 +145,12 @@ class InMemoryChromaIndex:
     def upsert_memory(self, memory: DurableMemoryRecord, embedding: List[float]) -> None:
         self.vectors[memory.memory_id] = list(embedding)
         self.documents[memory.memory_id] = memory.content
-        self.metadata[memory.memory_id] = memory.scope.chroma_where() | {"status": memory.status, "memory_type": memory.memory_type, "memory_id": memory.memory_id, "content_hash": memory.content_hash}
+        self.metadata[memory.memory_id] = memory.scope.chroma_where() | {"record_type": "durable_memory", "status": memory.status, "memory_type": memory.memory_type, "memory_id": memory.memory_id, "content_hash": memory.content_hash}
+
+    def upsert_turn_chunk(self, chunk: TurnChunkRecord, embedding: List[float]) -> None:
+        self.vectors[chunk.chunk_id] = list(embedding)
+        self.documents[chunk.chunk_id] = chunk.content
+        self.metadata[chunk.chunk_id] = chunk.scope.chroma_where() | {"record_type": "turn_chunk", "status": chunk.status, "chunk_id": chunk.chunk_id, "raw_turn_id": chunk.raw_turn_id, "role": chunk.role, "chunk_index": chunk.chunk_index, "total_chunks": chunk.total_chunks, "content_hash": chunk.content_hash}
 
     def delete_memory(self, memory_id: str) -> None:
         self.vectors.pop(memory_id, None)
@@ -145,5 +180,5 @@ class InMemoryChromaIndex:
             meta = self.metadata.get(memory_id, {})
             if any(meta.get(k) != v for k, v in (where or {}).items()):
                 continue
-            rows.append({"memory_id": memory_id, "score": cosine_similarity(embedding, vector), "metadata": meta})
+            rows.append({"id": memory_id, "memory_id": meta.get("memory_id", memory_id), "chunk_id": meta.get("chunk_id", memory_id), "record_type": meta.get("record_type", "durable_memory"), "score": cosine_similarity(embedding, vector), "metadata": meta})
         return sorted(rows, key=lambda item: item["score"], reverse=True)[:limit]

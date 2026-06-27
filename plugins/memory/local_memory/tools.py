@@ -50,7 +50,7 @@ class LocalMemoryToolHandler:
         if not query:
             return json_result(success=False, results=[], message="query is required")
         results = self.provider._recall(query, limit=limit, include_context_wrapper=False)
-        return json_result(success=True, results=results, message=f"Found {len(results)} memories")
+        return json_result(success=True, results=results, message=f"Found {len(results)} local memory records")
 
     def remember(self, args: Dict[str, Any]) -> str:
         content = str(args.get("content") or "").strip()

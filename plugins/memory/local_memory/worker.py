@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 from .chroma_index import ChromaIndex
 from .config import LocalMemoryConfig, _coerce, load_config
 from .curator import build_memory, fallback_extract_candidates, merge_memory, parse_ollama_curation
-from .models import IngestionJob, RawTurnRecord
+from .models import IngestionJob, RawTurnRecord, TurnChunkRecord
 from .mongo_store import MongoStore
 from .ollama_client import OllamaClient
 from .redis_queue import RedisQueue
@@ -22,6 +22,54 @@ class LocalMemoryWorker:
         self.redis_queue = redis_queue
         self.chroma_index = chroma_index
         self.ollama_client = ollama_client
+
+    def _split_text(self, text: str) -> List[str]:
+        normalized = "\n".join(line.rstrip() for line in (text or "").splitlines()).strip()
+        if not normalized:
+            return []
+        size = max(1, int(self.config.turn_chunk_chars))
+        overlap = max(0, min(size // 2, int(self.config.turn_chunk_overlap_chars)))
+        chunks: List[str] = []
+        start = 0
+        while start < len(normalized) and len(chunks) < int(self.config.max_turn_chunks):
+            end = min(len(normalized), start + size)
+            chunk = normalized[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            if end >= len(normalized):
+                break
+            start = max(end - overlap, start + 1)
+        return chunks
+
+    def _build_turn_chunks(self, raw: RawTurnRecord, raw_turn_id: str) -> List[TurnChunkRecord]:
+        built: List[TurnChunkRecord] = []
+        for role, text in (("user", raw.user_content), ("assistant", raw.assistant_content)):
+            parts = self._split_text(text)
+            for index, content in enumerate(parts):
+                built.append(
+                    TurnChunkRecord(
+                        raw_turn_id=raw_turn_id,
+                        idempotency_key=raw.idempotency_key,
+                        scope=raw.scope,
+                        role=role,
+                        content=content,
+                        chunk_index=index,
+                        total_chunks=len(parts),
+                    )
+                )
+        return built
+
+    def _index_turn_chunks(self, raw: RawTurnRecord, raw_turn_id: str) -> List[str]:
+        chunks = self._build_turn_chunks(raw, raw_turn_id)
+        if not chunks:
+            return []
+        self.mongo_store.upsert_turn_chunks(chunks)
+        written: List[str] = []
+        for chunk in chunks:
+            embedding = self.ollama_client.embed(chunk.content)
+            self.chroma_index.upsert_turn_chunk(chunk, embedding)
+            written.append(chunk.chunk_id)
+        return written
 
     def process_one(self) -> bool:
         job = self.redis_queue.pop(timeout=self.config.worker_poll_timeout_sec)
@@ -54,6 +102,7 @@ class LocalMemoryWorker:
             content_hash=str(payload.get("content_hash") or ""),
         )
         raw_turn_id = str(payload.get("raw_turn_id") or "") or self.mongo_store.insert_raw_turn(raw)
+        written_chunks = self._index_turn_chunks(raw, raw_turn_id)
         candidates = []
         try:
             curated_raw = self.ollama_client.curate(raw.user_content, raw.assistant_content, [])
@@ -75,7 +124,7 @@ class LocalMemoryWorker:
             self.mongo_store.upsert_memory(memory)
             self.chroma_index.upsert_memory(memory, embedding)
             written.append(memory.memory_id)
-        self.mongo_store.record_event("job_processed", f"Processed {job.job_id}", "info", {"memories": written}, job.scope)
+        self.mongo_store.record_event("job_processed", f"Processed {job.job_id}", "info", {"memories": written, "turn_chunks": written_chunks}, job.scope)
         return written
 
 

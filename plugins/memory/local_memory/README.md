@@ -26,7 +26,7 @@ hermes config set memory.provider local_memory
 /Volumes/WDBlack4TB/.hermes/hermes-agent/venv/bin/python3 -m plugins.memory.local_memory.worker --hermes-home /Volumes/WDBlack4TB/.hermes
 ```
 
-The provider `sync_turn()` path only enqueues Redis jobs. The worker stores raw turns in MongoDB, curates durable memories with Ollama, embeds memory text, and upserts Chroma vectors.
+The provider `sync_turn()` path records raw turns in MongoDB and enqueues Redis jobs. The worker indexes larger user/assistant turn chunks into MongoDB `turn_chunks` plus Chroma for semantic context recall, then curates concise durable memories with Ollama, embeds memory text, and upserts Chroma vectors.
 
 ## Profile isolation
 

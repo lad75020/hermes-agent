@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
-from .models import DurableMemoryRecord, IdentityScope, MemoryFeedbackRecord, ProviderEvent, RawTurnRecord, TombstoneRecord, content_hash, utc_now_iso
+from .models import DurableMemoryRecord, IdentityScope, MemoryFeedbackRecord, ProviderEvent, RawTurnRecord, TombstoneRecord, TurnChunkRecord, content_hash, utc_now_iso
 
 
 class MongoStore:
@@ -19,6 +19,9 @@ class MongoStore:
         self._client = MongoClient(self.uri, serverSelectionTimeoutMS=1500)
         self._db = self._client[self.database]
         self._db.raw_turns.create_index("idempotency_key", unique=True)
+        self._db.turn_chunks.create_index("idempotency_key")
+        self._db.turn_chunks.create_index("raw_turn_id")
+        self._db.turn_chunks.create_index([("scope.agent_identity", 1), ("scope.agent_workspace", 1), ("scope.user_id", 1), ("status", 1)])
         self._db.durable_memories.create_index([("scope.agent_identity", 1), ("scope.agent_workspace", 1), ("scope.user_id", 1), ("status", 1)])
         self._db.durable_memories.create_index([("scope.agent_identity", 1), ("scope.agent_workspace", 1), ("content_hash", 1)])
 
@@ -45,6 +48,13 @@ class MongoStore:
         self.db.durable_memories.update_one({"_id": memory.memory_id}, {"$set": memory.to_dict()}, upsert=True)
         return memory
 
+    def upsert_turn_chunks(self, chunks: Iterable[TurnChunkRecord]) -> List[TurnChunkRecord]:
+        written: List[TurnChunkRecord] = []
+        for chunk in chunks:
+            self.db.turn_chunks.update_one({"_id": chunk.chunk_id}, {"$set": chunk.to_dict()}, upsert=True)
+            written.append(chunk)
+        return written
+
     def get_memory(self, memory_id: str) -> Optional[DurableMemoryRecord]:
         data = self.db.durable_memories.find_one({"_id": memory_id})
         return DurableMemoryRecord.from_dict(data) if data else None
@@ -56,6 +66,14 @@ class MongoStore:
             if scope.user_id:
                 query["scope.user_id"] = scope.user_id
         return [DurableMemoryRecord.from_dict(row) for row in self.db.durable_memories.find(query)]
+
+    def get_turn_chunks(self, ids: Iterable[str], scope: IdentityScope | None = None) -> List[TurnChunkRecord]:
+        query: Dict[str, Any] = {"_id": {"$in": list(ids)}, "status": "active"}
+        if scope:
+            query.update({"scope.agent_identity": scope.agent_identity, "scope.agent_workspace": scope.agent_workspace})
+            if scope.user_id:
+                query["scope.user_id"] = scope.user_id
+        return [TurnChunkRecord.from_dict(row) for row in self.db.turn_chunks.find(query)]
 
     def find_active_memories_by_keywords(self, keywords: Iterable[str], scope: IdentityScope | None = None, limit: int = 100) -> List[DurableMemoryRecord]:
         cleaned = [str(keyword).strip() for keyword in keywords if str(keyword).strip()]
@@ -108,6 +126,7 @@ class MongoStore:
 class InMemoryMongoStore:
     def __init__(self) -> None:
         self.raw_turns: Dict[str, Dict[str, Any]] = {}
+        self.turn_chunks: Dict[str, TurnChunkRecord] = {}
         self.memories: Dict[str, DurableMemoryRecord] = {}
         self.feedback: List[MemoryFeedbackRecord] = []
         self.events: List[Dict[str, Any]] = []
@@ -127,6 +146,13 @@ class InMemoryMongoStore:
         self.memories[memory.memory_id] = memory
         return memory
 
+    def upsert_turn_chunks(self, chunks: Iterable[TurnChunkRecord]) -> List[TurnChunkRecord]:
+        written: List[TurnChunkRecord] = []
+        for chunk in chunks:
+            self.turn_chunks[chunk.chunk_id] = chunk
+            written.append(chunk)
+        return written
+
     def get_memory(self, memory_id: str) -> Optional[DurableMemoryRecord]:
         return self.memories.get(memory_id)
 
@@ -141,6 +167,19 @@ class InMemoryMongoStore:
             if scope and scope.user_id and memory.scope.user_id != scope.user_id:
                 continue
             out.append(memory)
+        return out
+
+    def get_turn_chunks(self, ids: Iterable[str], scope: IdentityScope | None = None) -> List[TurnChunkRecord]:
+        out: List[TurnChunkRecord] = []
+        for chunk_id in ids:
+            chunk = self.turn_chunks.get(chunk_id)
+            if not chunk or chunk.status != "active":
+                continue
+            if scope and (chunk.scope.agent_identity != scope.agent_identity or chunk.scope.agent_workspace != scope.agent_workspace):
+                continue
+            if scope and scope.user_id and chunk.scope.user_id != scope.user_id:
+                continue
+            out.append(chunk)
         return out
 
     def find_active_memories_by_keywords(self, keywords: Iterable[str], scope: IdentityScope | None = None, limit: int = 100) -> List[DurableMemoryRecord]:

@@ -103,6 +103,60 @@ class RawTurnRecord:
 
 
 @dataclass
+class TurnChunkRecord:
+    """Searchable chunk of a completed conversation turn.
+
+    Durable memories are concise curated facts.  Turn chunks preserve larger
+    slices of the actual user/assistant exchange so semantic recall can recover
+    relevant context that was not promoted into a durable fact.
+    """
+
+    raw_turn_id: str
+    idempotency_key: str
+    scope: IdentityScope
+    role: str
+    content: str
+    chunk_index: int = 0
+    total_chunks: int = 1
+    chunk_id: str = ""
+    status: str = "active"
+    created_at: str = field(default_factory=utc_now_iso)
+    content_hash: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.content_hash:
+            self.content_hash = content_hash(self.content)
+        if not self.chunk_id:
+            self.chunk_id = content_hash(
+                f"{self.raw_turn_id}:{self.role}:{self.chunk_index}:{self.content}"
+            )[:32]
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["_id"] = self.chunk_id
+        data["scope"] = self.scope.to_dict()
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TurnChunkRecord":
+        scope_data = data.get("scope") or {}
+        scope = scope_data if isinstance(scope_data, IdentityScope) else IdentityScope(**{k: str(v) for k, v in scope_data.items() if k in IdentityScope.__dataclass_fields__})
+        return cls(
+            chunk_id=str(data.get("chunk_id") or data.get("_id") or ""),
+            raw_turn_id=str(data.get("raw_turn_id") or ""),
+            idempotency_key=str(data.get("idempotency_key") or ""),
+            scope=scope,
+            role=str(data.get("role") or "unknown"),
+            content=str(data.get("content") or ""),
+            chunk_index=int(data.get("chunk_index", 0)),
+            total_chunks=int(data.get("total_chunks", 1)),
+            status=str(data.get("status") or "active"),
+            created_at=str(data.get("created_at") or utc_now_iso()),
+            content_hash=str(data.get("content_hash") or ""),
+        )
+
+
+@dataclass
 class DurableMemoryRecord:
     content: str
     scope: IdentityScope

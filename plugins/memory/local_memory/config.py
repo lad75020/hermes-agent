@@ -28,6 +28,9 @@ class LocalMemoryConfig:
     write_non_primary_contexts: bool = False
     raw_turn_retention_days: int = 365
     curator_prompt_version: str = "local-memory-curator-v1"
+    turn_chunk_chars: int = 1800
+    turn_chunk_overlap_chars: int = 200
+    max_turn_chunks: int = 24
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -51,13 +54,16 @@ def _coerce(raw: Dict[str, Any]) -> LocalMemoryConfig:
     data.update({k: v for k, v in raw.items() if k in data and v is not None})
     data["enabled"] = _as_bool(data.get("enabled"), True)
     data["write_non_primary_contexts"] = _as_bool(data.get("write_non_primary_contexts"), False)
-    for key in ("max_prefetch_results", "max_prefetch_chars", "sync_enqueue_timeout_ms", "worker_max_attempts", "raw_turn_retention_days"):
+    for key in ("max_prefetch_results", "max_prefetch_chars", "sync_enqueue_timeout_ms", "worker_max_attempts", "raw_turn_retention_days", "turn_chunk_chars", "turn_chunk_overlap_chars", "max_turn_chunks"):
         data[key] = int(data[key])
     for key in ("min_relevance", "worker_poll_timeout_sec"):
         data[key] = float(data[key])
     data["max_prefetch_results"] = max(1, min(20, data["max_prefetch_results"]))
     data["max_prefetch_chars"] = max(500, min(8000, data["max_prefetch_chars"]))
     data["min_relevance"] = max(0.0, min(1.0, data["min_relevance"]))
+    data["turn_chunk_chars"] = max(500, min(8000, data["turn_chunk_chars"]))
+    data["turn_chunk_overlap_chars"] = max(0, min(data["turn_chunk_chars"] // 2, data["turn_chunk_overlap_chars"]))
+    data["max_turn_chunks"] = max(1, min(100, data["max_turn_chunks"]))
     return LocalMemoryConfig(**data)
 
 

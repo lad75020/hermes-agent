@@ -7,6 +7,7 @@ from plugins.memory.local_memory.chroma_index import InMemoryChromaIndex
 from plugins.memory.local_memory.config import LocalMemoryConfig
 from plugins.memory.local_memory.mongo_store import InMemoryMongoStore
 from plugins.memory.local_memory.redis_queue import InMemoryRedisQueue
+from plugins.memory.local_memory.worker import LocalMemoryWorker
 
 
 def _provider() -> LocalMemoryProvider:
@@ -16,6 +17,27 @@ def _provider() -> LocalMemoryProvider:
         redis_queue=InMemoryRedisQueue(),
         chroma_index=InMemoryChromaIndex(),
         ollama_client=SimpleNamespace(embed=lambda text: [float(len(text) % 7), 1.0]),
+    )
+    provider.initialize(
+        "session-1",
+        hermes_home="/tmp/hermes-test",
+        platform="tui",
+        agent_identity="default",
+        agent_workspace="workspace",
+    )
+    return provider
+
+
+def _worker_provider() -> LocalMemoryProvider:
+    provider = LocalMemoryProvider(
+        config=LocalMemoryConfig(enabled=True, min_relevance=0.0, max_prefetch_chars=8000),
+        mongo_store=InMemoryMongoStore(),
+        redis_queue=InMemoryRedisQueue(),
+        chroma_index=InMemoryChromaIndex(),
+        ollama_client=SimpleNamespace(
+            embed=lambda text: [1.0, 0.0],
+            curate=lambda user, assistant, existing: '{"candidates": []}',
+        ),
     )
     provider.initialize(
         "session-1",
@@ -121,3 +143,59 @@ def test_sync_turn_records_raw_turn_before_worker_runs():
     job = provider.redis_queue.pop()
     assert job is not None
     assert job.payload["raw_turn_id"]
+
+
+def test_worker_indexes_larger_turn_chunks_to_mongo_and_chroma():
+    provider = _worker_provider()
+    assistant = (
+        "First sentence only would be insufficient. "
+        + "The later details include RETRIEVABLE_SECOND_SENTENCE_CONTEXT and implementation caveats. "
+        + "More assistant explanation follows so the indexed context is a real chunk rather than a tiny summary. " * 8
+    )
+    provider.sync_turn("Please explain the storage issue", assistant, session_id="session-1")
+    job = provider.redis_queue.pop()
+    assert job is not None
+
+    worker = LocalMemoryWorker(
+        config=provider.config,
+        mongo_store=provider.mongo_store,
+        redis_queue=provider.redis_queue,
+        chroma_index=provider.chroma_index,
+        ollama_client=provider.ollama_client,
+    )
+    worker.process_job(job)
+
+    chunks = list(provider.mongo_store.turn_chunks.values())
+    assert chunks
+    assistant_chunks = [chunk for chunk in chunks if chunk.role == "assistant"]
+    assert assistant_chunks
+    assert any("RETRIEVABLE_SECOND_SENTENCE_CONTEXT" in chunk.content for chunk in assistant_chunks)
+    assert any(provider.chroma_index.documents.get(chunk.chunk_id) == chunk.content for chunk in assistant_chunks)
+
+    recalled = provider._recall("RETRIEVABLE_SECOND_SENTENCE_CONTEXT", limit=5, include_context_wrapper=False)
+    assert any(row.get("record_type") == "turn_chunk" and "RETRIEVABLE_SECOND_SENTENCE_CONTEXT" in row.get("content", "") for row in recalled)
+
+
+def test_prefetch_context_includes_turn_chunk_text_not_only_curated_memory():
+    provider = _worker_provider()
+    assistant = (
+        "Short opener. "
+        + "A later section says UNIQUE_PREFETCH_CHUNK_MARKER belongs in recalled context with surrounding explanation. "
+        + "Additional details keep this as conversation context instead of a one-sentence durable memory. " * 7
+    )
+    provider.sync_turn("What happened?", assistant, session_id="session-1")
+    job = provider.redis_queue.pop()
+    assert job is not None
+    worker = LocalMemoryWorker(
+        config=provider.config,
+        mongo_store=provider.mongo_store,
+        redis_queue=provider.redis_queue,
+        chroma_index=provider.chroma_index,
+        ollama_client=provider.ollama_client,
+    )
+    worker.process_job(job)
+
+    context = provider.prefetch("UNIQUE_PREFETCH_CHUNK_MARKER", session_id="session-1")
+
+    assert "conversation chunks" in context
+    assert "UNIQUE_PREFETCH_CHUNK_MARKER" in context
