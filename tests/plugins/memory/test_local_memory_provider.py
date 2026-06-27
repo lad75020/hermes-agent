@@ -86,6 +86,7 @@ def test_on_memory_write_replace_removes_old_text_and_adds_new_text():
 def test_local_memory_status_separates_actual_queue_depth_from_cumulative_metrics():
     provider = _provider()
     provider.sync_turn("user", "assistant", session_id="session-1")
+    assert len(provider.mongo_store.raw_turns) == 1
     job = provider.redis_queue.pop()
     assert job is not None
     provider.redis_queue.ack(job)
@@ -96,3 +97,27 @@ def test_local_memory_status_separates_actual_queue_depth_from_cumulative_metric
     assert health["metrics_key"] == "hermes:local-memory:metrics"
     assert health["queue_depth"] == 0
     assert health["cumulative_metrics"] == {"enqueued": 1, "acked": 1}
+
+
+def test_sync_turn_records_raw_turn_before_worker_runs():
+    provider = _provider()
+
+    provider.sync_turn(
+        "User asks from HermesMacOS",
+        "Assistant replies through TUI gateway",
+        session_id="tui-session",
+        messages=[
+            {"role": "user", "content": "User asks from HermesMacOS"},
+            {"role": "assistant", "content": "Assistant replies through TUI gateway"},
+        ],
+    )
+
+    assert len(provider.mongo_store.raw_turns) == 1
+    raw = next(iter(provider.mongo_store.raw_turns.values()))
+    assert raw["user_content"] == "User asks from HermesMacOS"
+    assert raw["assistant_content"] == "Assistant replies through TUI gateway"
+    assert raw["scope"]["platform"] == "tui"
+    assert raw["messages"][-1]["content"] == "Assistant replies through TUI gateway"
+    job = provider.redis_queue.pop()
+    assert job is not None
+    assert job.payload["raw_turn_id"]

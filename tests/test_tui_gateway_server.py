@@ -1286,9 +1286,13 @@ def test_status_callback_accepts_single_message_argument():
 
 def test_tui_memory_sync_helper_calls_agent_after_completed_turn():
     calls = []
+    flushes = []
 
     agent = types.SimpleNamespace(
-        _sync_external_memory_for_turn=lambda **kwargs: calls.append(kwargs)
+        _sync_external_memory_for_turn=lambda **kwargs: calls.append(kwargs),
+        _memory_manager=types.SimpleNamespace(
+            flush_pending=lambda timeout=None: flushes.append(timeout) or True
+        ),
     )
     messages = [{"role": "assistant", "content": "done"}]
     result = {"messages": messages}
@@ -1310,6 +1314,7 @@ def test_tui_memory_sync_helper_calls_agent_after_completed_turn():
             "messages": messages,
         }
     ]
+    assert flushes == [1.0]
     assert result["external_memory_synced"] is True
 
 
@@ -6539,6 +6544,10 @@ def test_browser_manage_connect_default_local_reports_launch_hint(monkeypatch):
             patch(
                 "hermes_cli.browser_connect.get_chrome_debug_candidates",
                 return_value=[],
+            ),
+            patch(
+                "hermes_cli.browser_connect.manual_chrome_debug_command",
+                return_value=None,
             ),
         ):
             resp = server.handle_request(

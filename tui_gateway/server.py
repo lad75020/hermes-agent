@@ -958,6 +958,13 @@ def _sync_external_memory_after_tui_turn(
             interrupted=bool(interrupted),
             messages=messages,
         )
+        manager = getattr(agent, "_memory_manager", None)
+        flush = getattr(manager, "flush_pending", None)
+        if callable(flush):
+            try:
+                flush(timeout=1.0)
+            except Exception:
+                logger.debug("TUI external memory flush failed", exc_info=True)
         if result is not None:
             result["external_memory_synced"] = True
     except Exception:

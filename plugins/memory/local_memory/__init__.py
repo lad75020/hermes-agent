@@ -21,6 +21,7 @@ from .models import (
     DurableMemoryRecord,
     IdentityScope,
     IngestionJob,
+    RawTurnRecord,
     content_hash,
     looks_like_secret,
     normalize_content,
@@ -265,12 +266,36 @@ class LocalMemoryProvider(MemoryProvider):
         if not self.scope or not self.scope.allows_write(self.config.write_non_primary_contexts):
             return
         key = content_hash(f"{self.scope.agent_identity}:{session_id or self._session_id}:{user_content}:{assistant_content}")
+        raw_turn_id = ""
+        if self.mongo_store:
+            try:
+                raw_turn_id = self.mongo_store.insert_raw_turn(
+                    RawTurnRecord(
+                        idempotency_key=key,
+                        scope=self.scope,
+                        user_content=user_content,
+                        assistant_content=assistant_content,
+                        messages=messages or [],
+                        content_hash=key,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - turn capture is best-effort
+                try:
+                    self.mongo_store.record_event(
+                        "raw_turn_capture_failure",
+                        str(exc),
+                        "warning",
+                        {"session_id": session_id or self._session_id},
+                        self.scope,
+                    )
+                except Exception:
+                    pass
         job = IngestionJob(
             job_id=f"lmj_{uuid.uuid4().hex[:16]}",
             idempotency_key=key,
             job_type="turn_ingest",
             scope=self.scope,
-            payload={"user_content": user_content, "assistant_content": assistant_content, "messages": messages or [], "content_hash": key},
+            payload={"user_content": user_content, "assistant_content": assistant_content, "messages": messages or [], "content_hash": key, "raw_turn_id": raw_turn_id},
             max_attempts=self.config.worker_max_attempts,
         )
         try:

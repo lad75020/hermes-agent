@@ -53,7 +53,7 @@ class LocalMemoryWorker:
             messages=list(payload.get("messages") or []),
             content_hash=str(payload.get("content_hash") or ""),
         )
-        raw_turn_id = self.mongo_store.insert_raw_turn(raw)
+        raw_turn_id = str(payload.get("raw_turn_id") or "") or self.mongo_store.insert_raw_turn(raw)
         candidates = []
         try:
             curated_raw = self.ollama_client.curate(raw.user_content, raw.assistant_content, [])
