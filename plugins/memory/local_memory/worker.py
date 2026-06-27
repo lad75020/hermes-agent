@@ -83,11 +83,20 @@ class LocalMemoryWorker:
         except Exception as exc:  # noqa: BLE001
             if job.attempt + 1 >= job.max_attempts:
                 self.redis_queue.dead_letter(job, str(exc))
+                status = "failed"
             elif hasattr(self.redis_queue, "retry"):
                 self.redis_queue.retry(job, exc)
+                status = "retrying"
             else:
                 job.schedule_retry(exc)
                 self.redis_queue.enqueue(job)
+                status = "retrying"
+            marker = getattr(self.mongo_store, "mark_raw_turn_curation", None)
+            if callable(marker):
+                try:
+                    marker(job.idempotency_key, status, error=str(exc))
+                except Exception:
+                    pass
             self.mongo_store.record_event("worker_failure", str(exc), "error", {"job_id": job.job_id, "attempt": job.attempt}, job.scope)
             return False
 
@@ -124,6 +133,14 @@ class LocalMemoryWorker:
             self.mongo_store.upsert_memory(memory)
             self.chroma_index.upsert_memory(memory, embedding)
             written.append(memory.memory_id)
+        marker = getattr(self.mongo_store, "mark_raw_turn_curation", None)
+        if callable(marker):
+            marker(
+                raw.idempotency_key,
+                "processed" if written else "processed_empty",
+                memory_ids=written,
+                turn_chunk_ids=written_chunks,
+            )
         self.mongo_store.record_event("job_processed", f"Processed {job.job_id}", "info", {"memories": written, "turn_chunks": written_chunks}, job.scope)
         return written
 

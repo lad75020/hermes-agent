@@ -176,6 +176,58 @@ def test_worker_indexes_larger_turn_chunks_to_mongo_and_chroma():
     assert any(row.get("record_type") == "turn_chunk" and "RETRIEVABLE_SECOND_SENTENCE_CONTEXT" in row.get("content", "") for row in recalled)
 
 
+def test_worker_marks_raw_turn_processed_with_curated_memory_ids():
+    provider = _worker_provider()
+    provider.ollama_client.curate = lambda user, assistant, existing: (
+        '{"candidates": [{"content": "Laurent prefers local memory worker status tracking", '
+        '"memory_type": "preference", "confidence": 0.91}]}'
+    )
+    provider.sync_turn(
+        "Please remember that Laurent prefers local memory worker status tracking.",
+        "Noted.",
+        session_id="session-1",
+    )
+    job = provider.redis_queue.pop()
+    assert job is not None
+
+    worker = LocalMemoryWorker(
+        config=provider.config,
+        mongo_store=provider.mongo_store,
+        redis_queue=provider.redis_queue,
+        chroma_index=provider.chroma_index,
+        ollama_client=provider.ollama_client,
+    )
+    written = worker.process_job(job)
+
+    assert written
+    raw = provider.mongo_store.raw_turns[job.idempotency_key]
+    assert raw["curation_status"] == "processed"
+    assert raw["curated_memory_ids"] == written
+    assert raw["curated_memory_ids"][0] in provider.mongo_store.memories
+    assert "curated_at" in raw
+
+
+def test_worker_marks_raw_turn_processed_empty_when_no_memory_candidates():
+    provider = _worker_provider()
+    provider.sync_turn("What happened?", "Nothing durable to remember.", session_id="session-1")
+    job = provider.redis_queue.pop()
+    assert job is not None
+
+    worker = LocalMemoryWorker(
+        config=provider.config,
+        mongo_store=provider.mongo_store,
+        redis_queue=provider.redis_queue,
+        chroma_index=provider.chroma_index,
+        ollama_client=provider.ollama_client,
+    )
+    written = worker.process_job(job)
+
+    raw = provider.mongo_store.raw_turns[job.idempotency_key]
+    assert written == []
+    assert raw["curation_status"] == "processed_empty"
+    assert raw["curated_memory_ids"] == []
+
+
 def test_prefetch_context_includes_turn_chunk_text_not_only_curated_memory():
     provider = _worker_provider()
     assistant = (

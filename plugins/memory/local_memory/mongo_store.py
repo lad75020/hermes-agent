@@ -44,6 +44,27 @@ class MongoStore:
         existing = self.db.raw_turns.find_one({"idempotency_key": raw.idempotency_key})
         return str(existing.get("_id") or result.upserted_id or raw.idempotency_key)
 
+    def mark_raw_turn_curation(
+        self,
+        idempotency_key: str,
+        status: str,
+        *,
+        memory_ids: Iterable[str] | None = None,
+        turn_chunk_ids: Iterable[str] | None = None,
+        error: str = "",
+    ) -> None:
+        update: Dict[str, Any] = {
+            "curation_status": status,
+            "curated_at": utc_now_iso(),
+        }
+        if memory_ids is not None:
+            update["curated_memory_ids"] = list(memory_ids)
+        if turn_chunk_ids is not None:
+            update["turn_chunk_ids"] = list(turn_chunk_ids)
+        if error:
+            update["curation_error"] = str(error)[:500]
+        self.db.raw_turns.update_one({"idempotency_key": idempotency_key}, {"$set": update})
+
     def upsert_memory(self, memory: DurableMemoryRecord) -> DurableMemoryRecord:
         self.db.durable_memories.update_one({"_id": memory.memory_id}, {"$set": memory.to_dict()}, upsert=True)
         return memory
@@ -141,6 +162,27 @@ class InMemoryMongoStore:
         key = raw.idempotency_key
         self.raw_turns.setdefault(key, raw.to_dict() | {"_id": key})
         return key
+
+    def mark_raw_turn_curation(
+        self,
+        idempotency_key: str,
+        status: str,
+        *,
+        memory_ids: Iterable[str] | None = None,
+        turn_chunk_ids: Iterable[str] | None = None,
+        error: str = "",
+    ) -> None:
+        row = self.raw_turns.get(idempotency_key)
+        if not row:
+            return
+        row["curation_status"] = status
+        row["curated_at"] = utc_now_iso()
+        if memory_ids is not None:
+            row["curated_memory_ids"] = list(memory_ids)
+        if turn_chunk_ids is not None:
+            row["turn_chunk_ids"] = list(turn_chunk_ids)
+        if error:
+            row["curation_error"] = str(error)[:500]
 
     def upsert_memory(self, memory: DurableMemoryRecord) -> DurableMemoryRecord:
         self.memories[memory.memory_id] = memory
