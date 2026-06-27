@@ -24,6 +24,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import List, NamedTuple, Optional
+from urllib.parse import urlparse
 
 from hermes_cli.providers import (
     ProviderDef,
@@ -62,6 +63,39 @@ def _bare_custom_provider_def(current_base_url: str) -> Optional[ProviderDef]:
         auth_type="api_key",
         source="model-config",
     )
+
+
+def _is_loopback_endpoint(base_url: str) -> bool:
+    """Return True for local OpenAI-compatible endpoints."""
+    try:
+        host = (urlparse(str(base_url or "")).hostname or "").strip().lower()
+    except Exception:
+        return False
+    return host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"} or host.startswith("127.")
+
+
+def _should_probe_custom_models(
+    api_url: str,
+    *,
+    api_key: str = "",
+    explicit_model_count: int = 0,
+    discover: bool = True,
+) -> bool:
+    """Decide whether a custom OpenAI-compatible row should call /v1/models.
+
+    Credentialed endpoints use live discovery as the source of truth. Bare
+    endpoints with no configured models also probe. Loopback endpoints with
+    only one saved model probe even without a key: local Ollama/OMLX profiles
+    commonly save just the active model while ``GET /v1/models`` exposes the
+    full local catalog. Multi-model no-key rows remain an explicit subset.
+    """
+    if not api_url or not discover:
+        return False
+    if api_key:
+        return True
+    if explicit_model_count <= 0:
+        return True
+    return explicit_model_count == 1 and _is_loopback_endpoint(api_url)
 
 
 # ---------------------------------------------------------------------------
@@ -1934,13 +1968,10 @@ def list_authenticated_providers(
 
             # Prefer the endpoint's live /models list when discoverable,
             # unless the provider explicitly opts out via discover_models: false.
-            # Policy mirrors Section 4's should_probe logic:
-            # - With an api_key: always probe (user opted into the endpoint).
-            # - Without an api_key but with explicit models: skip — the user
-            #   is narrowing a public endpoint to a specific subset.
-            # - Without an api_key AND no explicit models: probe anyway so
-            #   bare-endpoint providers (local llama.cpp / Ollama servers)
-            #   still show their full model catalog.
+            # Credentialed endpoints always probe.  No-key bare endpoints probe
+            # too, and no-key loopback endpoints with only one saved model also
+            # probe so local Ollama/OMLX rows expand from the active model to
+            # the full /v1/models catalog.
             api_key = str(ep_cfg.get("api_key", "") or "").strip()
             if not api_key:
                 key_env = str(ep_cfg.get("key_env", "") or "").strip()
@@ -1948,14 +1979,16 @@ def list_authenticated_providers(
             discover = ep_cfg.get("discover_models", True)
             if isinstance(discover, str):
                 discover = discover.lower() not in {"false", "no", "0"}
-            has_explicit_models = bool(models_list)
-            should_probe = bool(api_url) and discover and (
-                bool(api_key) or not has_explicit_models
+            should_probe = _should_probe_custom_models(
+                api_url,
+                api_key=api_key,
+                explicit_model_count=len(models_list),
+                discover=bool(discover),
             )
             if should_probe:
                 try:
                     from hermes_cli.models import fetch_api_models
-                    live_models = fetch_api_models(api_key, api_url)
+                    live_models = fetch_api_models(api_key, api_url, timeout=1.5)
                     if live_models:
                         models_list = live_models
                 except Exception:
@@ -2005,6 +2038,20 @@ def list_authenticated_providers(
         )
     ):
         _models = [current_model] if current_model else []
+        if _should_probe_custom_models(
+            current_base_url,
+            api_key="",
+            explicit_model_count=len(_models),
+            discover=True,
+        ):
+            try:
+                from hermes_cli.models import fetch_api_models
+
+                live_models = fetch_api_models("", current_base_url, timeout=1.5)
+                if live_models:
+                    _models = live_models
+            except Exception:
+                pass
         results.append({
             "slug": "custom",
             "name": "Custom endpoint",
@@ -2170,39 +2217,23 @@ def list_authenticated_providers(
                 continue
             # Live model discovery from custom provider endpoints (matches
             # Section 3 behavior for user ``providers:`` entries).
-            # Also probes when no api_key is set (e.g. local llama.cpp /
-            # Ollama servers) — the /models endpoint often works without
-            # auth.  The CLI's _model_flow_named_custom always probes, so
-            # the Telegram/Discord picker should do the same for parity.
-            # Live-discovery policy:
-            # - With an api_key, the user has explicitly opted into the
-            #   endpoint and live /models is the source of truth — replace
-            #   the (possibly partial) ``models:`` subset configured for
-            #   context-length overrides with the full live catalog.
-            #   This is the Bifrost / aggregator-gateway case.
-            # - Without an api_key but with an explicit ``models:`` list
-            #   (or top-level ``model:``), the user is narrowing a public
-            #   endpoint to a specific subset (e.g. ollama.com /v1/models
-            #   returns 35 models but the user only wants 4). Preserve the
-            #   explicit list and skip live discovery.
-            # - Without an api_key AND no explicit models, fall through to
-            #   live discovery so bare-endpoint custom providers (local
-            #   llama.cpp / Ollama servers) still appear populated.
-            # - When discover_models: false is set, skip live discovery and
-            #   keep the explicit ``models:`` list regardless of whether an
-            #   api_key is present. This supports endpoints that expose a
-            #   full aggregator catalog via /models but only serve a subset
-            #   (parity with section 3's user ``providers:`` behaviour).
-            should_probe = (
-                bool(api_url)
-                and (bool(api_key) or not grp["models"])
-                and grp.get("discover_models", True)
+            # Credentialed endpoints always use live /models as the source of
+            # truth. No-key endpoints with no explicit models probe as before.
+            # No-key loopback endpoints with exactly one saved model also probe:
+            # local Ollama/OMLX configs often store only the selected model even
+            # though /v1/models exposes the full local catalog. Set
+            # ``discover_models: false`` to keep an explicit subset.
+            should_probe = _should_probe_custom_models(
+                api_url,
+                api_key=api_key,
+                explicit_model_count=len(grp["models"]),
+                discover=bool(grp.get("discover_models", True)),
             )
             if should_probe:
                 try:
                     from hermes_cli.models import fetch_api_models
 
-                    live_models = fetch_api_models(api_key, api_url)
+                    live_models = fetch_api_models(api_key, api_url, timeout=1.5)
                     if live_models:
                         grp["models"] = live_models
                         grp["total_models"] = len(live_models)

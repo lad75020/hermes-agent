@@ -1,10 +1,9 @@
 ---
 name: hermes-agent
 description: "Configure, extend, or contribute to Hermes Agent."
-version: 2.2.0
+version: 2.0.0
 author: Hermes Agent + Teknium
 license: MIT
-platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [hermes, setup, configuration, multi-agent, spawning, cli, gateway, development]
@@ -29,23 +28,14 @@ People use Hermes for software development, research, system administration, dat
 
 **This skill helps you work with Hermes Agent effectively** — setting it up, configuring features, spawning additional agent instances, troubleshooting issues, finding the right commands and settings, and understanding how the system works when you need to extend or contribute to it.
 
-**Docs:** https://hermes-agent.nousresearch.com/docs/
-
-## Scope & Verification
-
-This skill is a concise operating guide, not the complete source of truth for every Hermes feature. If a Hermes feature, command, or setting is not mentioned here, do not treat that absence as evidence that it does not exist. Check the live repository and official docs before giving a negative answer.
-
-Good verification targets:
-
-- CLI commands: `hermes --help`, `hermes <command> --help`, and `hermes_cli/main.py`
-- User documentation: https://hermes-agent.nousresearch.com/docs/
-- Source tree: https://github.com/NousResearch/hermes-agent
+**Docs:** Preferred `/Volumes/WDBlack4TB/.hermes/docs/HERMES-AGENT.md`
+**Docs:** Also available at https://hermes-agent.nousresearch.com/docs/
 
 ## Quick Start
 
 ```bash
 # Install
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
 
 # Interactive chat (default)
 hermes
@@ -110,15 +100,15 @@ hermes config path          Print config.yaml path
 hermes config env-path      Print .env path
 hermes config check         Check for missing/outdated config
 hermes config migrate       Update config with new options
-hermes auth                 Interactive credential manager
-hermes auth add PROVIDER    Add OAuth or API-key credential (e.g. nous, openai-codex, qwen-oauth)
-hermes auth list            List stored credentials
-hermes auth remove PROVIDER Remove a stored credential
+hermes login [--provider P] OAuth login (nous, openai-codex)
+hermes logout               Clear stored auth
 hermes doctor [--fix]       Check dependencies and config
 hermes status [--all]       Show component status
 ```
 
 ### Tools & Skills
+
+**Skill authoring lane:** for in-repo `SKILL.md` creation, validation, frontmatter, support-file layout, and generated host-skill docs, use this Hermes Agent skill as the umbrella. The former `hermes-agent-skill-authoring` package is preserved under `references/absorbed/hermes-agent-skill-authoring/` for detailed validator and external-skill-directory recipes.
 
 ```
 hermes tools                Interactive tool enable/disable (curses UI)
@@ -128,7 +118,7 @@ hermes tools disable NAME   Disable a toolset
 
 hermes skills list          List installed skills
 hermes skills search QUERY  Search the skills hub
-hermes skills install ID    Install a skill (ID can be a hub identifier OR a direct https://…/SKILL.md URL; pass --name to override when frontmatter has no name)
+hermes skills install ID    Install a skill (ID can be a hub identifier OR a direct https://…/SKILL.md URL; pass --name to override when frontmatter has no name). It does NOT accept local filesystem paths; for a local SKILL.md, copy/import it into $HERMES_HOME/skills/<category>/<name>/SKILL.md or use the skill_manage tool.
 hermes skills inspect ID    Preview without installing
 hermes skills config        Enable/disable skills per platform
 hermes skills check         Check for updates
@@ -148,11 +138,26 @@ hermes mcp remove NAME      Remove an MCP server
 hermes mcp list             List configured servers
 hermes mcp test NAME        Test connection
 hermes mcp configure NAME   Toggle tool selection
+
+# Common add forms:
+hermes mcp add SERVER --command CMD --args ARG1 ARG2
+hermes mcp add SERVER --url https://example.com/mcp
+hermes mcp add SERVER --url https://example.com/mcp --auth header
+# For --auth header, pass JSON such as {"Authorization":"Bearer ..."} on stdin/interactively; redact token values in logs/UI.
 ```
 
-How the built-in MCP client connects servers (stdio/HTTP), auto-discovers
-their tools, and exposes them as first-class tools, plus catalog install
-(`hermes mcp install <name>`): `skill_view(name="hermes-agent", file_path="references/native-mcp.md")`.
+**Pitfall: stdio args that begin with `-`.** `hermes mcp add ... --args` currently uses argparse `nargs="*"`; values like `-y` may be parsed as Hermes options instead of child-command arguments. For commands such as Chrome DevTools MCP (`npx -y chrome-devtools-mcp@latest`), prefer editing `mcp_servers` directly in `config.yaml`:
+
+```yaml
+mcp_servers:
+  chrome-devtools:
+    command: npx
+    args:
+      - -y
+      - chrome-devtools-mcp@latest
+```
+
+Then run `/reload-mcp` or restart Hermes. Alternative: create an executable wrapper script that runs `exec npx -y chrome-devtools-mcp@latest`, and add that script as the MCP `--command` with no `--args`.
 
 ### Gateway (Messaging Platforms)
 
@@ -165,7 +170,19 @@ hermes gateway status       Check status
 hermes gateway setup        Configure platforms
 ```
 
-Supported platforms: Telegram, Discord, Slack, WhatsApp, Signal, Email, SMS, Matrix, Mattermost, Home Assistant, DingTalk, Feishu, WeCom, BlueBubbles (iMessage), Weixin (WeChat), API Server, Webhooks. Open WebUI connects via the API Server adapter.
+Supported platforms: Telegram, Discord, Slack, WhatsApp, Signal, Email, SMS, Matrix, Mattermost, Home Assistant, DingTalk, Feishu, WeCom, BlueBubbles (iMessage), Weixin (WeChat), API Server, Webhooks. Open WebUI / “office site” style frontends connect via the API Server adapter.
+
+**Open WebUI / office URL field pitfall:** when a web frontend asks for a server URL, use the Hermes **API Server** endpoint with `/v1`, not the Hermes dashboard. Local browser/native frontend: `http://127.0.0.1:8642/v1`. Dockerized frontend reaching the host: `http://host.docker.internal:8642/v1`. The API key must match `API_SERVER_KEY`. Do not use dashboard URLs such as `http://127.0.0.1:9119` or the Tailscale dashboard URL; those are UI/dashboard endpoints, not OpenAI-compatible API endpoints. If a client configured with a bare origin (`http://127.0.0.1:8642`) gets `404 Not Found` on `/responses` or `/chat/completions`, first check for a `/v1` route mismatch; see `references/api-server-v1-bare-origin-404.md` for the reproduction, dual client/server fix, running-tree pitfall, and verification checklist.
+
+**API Server `model` field pitfall:** for `/v1/chat/completions` and `/v1/responses`, the `model` field should be the advertised Hermes API-server model id (normally `hermes-agent`, or the id returned by `GET /v1/models`), not the underlying provider LLM. `API_SERVER_MODEL_NAME` can override the advertised id, and named profiles may advertise the profile name. The request model is primarily OpenAI-compatible metadata/echoing; the actual backing model/provider is resolved from Hermes gateway/runtime config. See `references/api-server-model-field.md`.
+
+**Hermes Office / Claw3D gateway pitfall:** distinguish the Hermes API HTTP endpoint from the Claw3D/OpenClaw-compatible WebSocket gateway. `http://127.0.0.1:8642/v1` is correct for OpenAI-compatible API fields, but `ws://localhost:8642` is wrong for Claw3D gateway fields because port 8642 is HTTP. To connect Claw3D to Hermes Agent, run Hermes Office's `npm run hermes-adapter` and point Claw3D at that adapter, e.g. `ws://localhost:18790` if OpenClaw already uses `18789`. If the API is healthy but Claw3D cannot connect, prove `:18790` is listening and that Studio settings use `adapterType=hermes`; on Laurent's Mac the persistent adapter is LaunchAgent `fr.dubertrand.hermes-office-adapter`. When installing/building Hermes Office, if `npm run build` fails from `node_modules/.bin/next` with `Cannot find module '../server/require-hook'`, the `.bin/next` shim is a copied file instead of a symlink; run `npm rebuild next` in the Hermes Office checkout, then rebuild. See `references/hermes-office-claw3d-api-vs-gateway.md` for the diagnostic checklist, proxy verification, and Tailscale/OpenClaw allowlist pitfall; see `references/hermes-office-claw3d-adapter-persistence.md` for LaunchAgent persistence, settings repair, and end-to-end `chat.send` verification.
+
+**API Server no-key 403 pitfall:** if an external/local app gets HTTP 403 while connecting without an API key, first prove whether `API_SERVER_KEY` is actually configured. A no-key gateway can still 403 because of feature gates on `X-Hermes-Session-Id` / `X-Hermes-Session-Key` or browser CORS preflight, not bearer auth. Do not add an API key when the requirement is no-key local use; instead allow local no-key session headers, configure `API_SERVER_CORS_ORIGINS`, include Hermes control headers in CORS, and verify with curl after gateway readiness. See `references/api-server-no-key-local-session-headers.md`.
+
+**Dashboard/gateway auth diagnostics:** the former `hermes-dashboard-gateway-auth` skill is absorbed here as a Hermes-specific troubleshooting lane. For dashboard WebSocket/TUI gateway token mismatches, stale dashboard processes, host-proxy/Tailscale failures, or API-server vs dashboard auth confusion, start from this skill's Gateway and Troubleshooting sections, then consult the preserved package at `references/absorbed/hermes-dashboard-gateway-auth/README.md` for its focused diagnostic checklist and support references.
+
+**TUI fast/priority verification pitfall:** for OpenAI-family models such as `gpt-5.5`, Hermes fast mode means the outbound API kwargs contain `service_tier: "priority"` — not a literal `fast` field. The TUI `config.get fast` / `session.info.fast` status only proves `agent.service_tier == "priority"` or `agent.service_tier` was read from config; it does not by itself prove the provider request includes the override. The definitive no-network check is to instantiate the TUI agent and run `agent.chat_completion_helpers.build_api_kwargs(...)`, then confirm `kwargs.get("service_tier") == "priority"` and/or `agent.request_overrides == {"service_tier": "priority"}`. If `agent.service_tier` is `priority` but `agent.request_overrides` is empty and built kwargs omit `service_tier`, the TUI is displaying fast mode but not sending Priority Processing for that path; live `config.set fast` updates request_overrides, but fresh-session config loading must also seed it.
 
 Platform docs: https://hermes-agent.nousresearch.com/docs/user-guide/messaging/
 
@@ -193,6 +210,10 @@ hermes cron remove ID       Delete a job
 hermes cron status          Scheduler status
 ```
 
+**Wrapper/UI pitfall:** `hermes cron create` takes the prompt as an optional positional argument immediately after the schedule. When implementing schedule creation in Host Companion, desktop, mobile, or dashboard wrappers, build args as `create SCHEDULE PROMPT --name NAME --deliver TARGET`; do **not** append `-- PROMPT` after options, or argparse can fail with `unrecognized arguments: -- <prompt>`. See `references/hermes-runtime-schedules-cron-prompt-argument.md` for the reproduction, affected files, and smoke checks.
+
+**Cron skill/provider pitfall:** Cron jobs load skills only from the installed Hermes skill registry under `$HERMES_HOME/skills`, not arbitrary project folders. For local Ollama/custom endpoints, avoid `provider: custom:<name>` unless that named custom provider exists; otherwise pin `provider: custom`, the actual model id, and `base_url`. See `references/cron-skill-provider-resolution.md` for the diagnostic and verification snippets.
+
 ### Webhooks
 
 ```
@@ -201,9 +222,6 @@ hermes webhook list         List subscriptions
 hermes webhook remove NAME  Remove a subscription
 hermes webhook test NAME    Send a test POST
 ```
-
-Full setup, route config, payload templating, and event-driven agent-run
-patterns: `skill_view(name="hermes-agent", file_path="references/webhooks.md")`.
 
 ### Profiles
 
@@ -247,11 +265,7 @@ hermes uninstall            Uninstall Hermes
 
 ## Slash Commands (In-Session)
 
-Type these during an interactive chat session. New commands land fairly
-often; if something below looks stale, run `/help` in-session for the
-authoritative list or see the [live slash commands reference](https://hermes-agent.nousresearch.com/docs/reference/slash-commands).
-The registry of record is `hermes_cli/commands.py` — every consumer
-(autocomplete, Telegram menu, Slack mapping, `/help`) derives from it.
+Type these during an interactive chat session.
 
 ### Session Control
 ```
@@ -263,15 +277,9 @@ The registry of record is `hermes_cli/commands.py` — every consumer
 /compress            Manually compress context
 /stop                Kill background processes
 /rollback [N]        Restore filesystem checkpoint
-/snapshot [sub]      Create or restore state snapshots of Hermes config/state (CLI)
 /background <prompt> Run prompt in background
 /queue <prompt>      Queue for next turn
-/steer <prompt>      Inject a message after the next tool call without interrupting
-/agents (/tasks)     Show active agents and running tasks
 /resume [name]       Resume a named session
-/goal [text|sub]     Set a standing goal Hermes works on across turns until achieved
-                     (subcommands: status, pause, resume, clear)
-/redraw              Force a full UI repaint (CLI)
 ```
 
 ### Configuration
@@ -283,11 +291,6 @@ The registry of record is `hermes_cli/commands.py` — every consumer
 /verbose             Cycle: off → new → all → verbose
 /voice [on|off|tts]  Voice mode
 /yolo                Toggle approval bypass
-/busy [sub]          Control what Enter does while Hermes is working (CLI)
-                     (subcommands: queue, steer, interrupt, status)
-/indicator [style]   Pick the TUI busy-indicator style (CLI)
-                     (styles: kaomoji, emoji, unicode, ascii)
-/footer [on|off]     Toggle gateway runtime-metadata footer on final replies
 /skin [name]         Change theme (CLI)
 /statusbar           Toggle status bar (CLI)
 ```
@@ -298,12 +301,8 @@ The registry of record is `hermes_cli/commands.py` — every consumer
 /toolsets            List toolsets (CLI)
 /skills              Search/install skills (CLI)
 /skill <name>        Load a skill into session
-/reload-skills       Re-scan ~/.hermes/skills/ for added/removed skills
-/reload              Reload .env variables into the running session (CLI)
-/reload-mcp          Reload MCP servers
 /cron                Manage cron jobs (CLI)
-/curator [sub]       Background skill maintenance (status, run, pin, archive, …)
-/kanban [sub]        Multi-profile collaboration board (tasks, links, comments)
+/reload-mcp          Reload MCP servers
 /plugins             List plugins (CLI)
 ```
 
@@ -314,7 +313,6 @@ The registry of record is `hermes_cli/commands.py` — every consumer
 /restart             Restart gateway (gateway)
 /sethome             Set current chat as home channel (gateway)
 /update              Update Hermes to latest (gateway)
-/topic [sub]         Enable or inspect Telegram DM topic sessions (gateway)
 /platforms (/gateway) Show platform connection status (gateway)
 ```
 
@@ -325,7 +323,6 @@ The registry of record is `hermes_cli/commands.py` — every consumer
 /browser             Open CDP browser connection
 /history             Show conversation history (CLI)
 /save                Save conversation to file (CLI)
-/copy [N]            Copy the last assistant response to clipboard (CLI)
 /paste               Attach clipboard image (CLI)
 /image               Attach local image file (CLI)
 ```
@@ -338,7 +335,6 @@ The registry of record is `hermes_cli/commands.py` — every consumer
 /insights [days]     Usage analytics
 /status              Session info (gateway)
 /profile             Active profile info
-/debug               Upload debug report (system info + logs) and get shareable links
 ```
 
 ### Exit
@@ -352,10 +348,9 @@ The registry of record is `hermes_cli/commands.py` — every consumer
 
 ```
 ~/.hermes/config.yaml       Main configuration
-~/.hermes/.env              API keys and secrets (under $HERMES_HOME if set)
+~/.hermes/.env              API keys and secrets
 $HERMES_HOME/skills/        Installed skills
-~/.hermes/sessions/         Gateway routing index, request dumps, *.jsonl transcripts (and optional per-session JSON snapshots when sessions.write_json_snapshots: true)
-~/.hermes/state.db          Canonical session store (SQLite + FTS5)
+~/.hermes/sessions/         Session transcripts
 ~/.hermes/logs/             Gateway and error logs
 ~/.hermes/auth.json         OAuth tokens and credential pools
 ~/.hermes/hermes-agent/     Source code (if git-installed)
@@ -380,8 +375,51 @@ Edit with `hermes config edit` or `hermes config set section.key value`.
 | `security` | `tirith_enabled`, `website_blocklist` |
 | `delegation` | `model`, `provider`, `base_url`, `api_key`, `max_iterations` (50), `reasoning_effort` |
 | `checkpoints` | `enabled`, `max_snapshots` (50) |
+| `auxiliary` | Per-side-task model routing: `vision`, `web_extract`, `compression`, `session_search`, `skills_hub`, `approval`, `mcp`, `title_generation`, `curator` |
 
 Full config reference: https://hermes-agent.nousresearch.com/docs/user-guide/configuration
+
+### Auxiliary Models
+
+Hermes uses `auxiliary:` model slots for side-task LLM calls. When answering questions about config.yaml auxiliary models, check the live repo/default config if possible (`hermes_cli/config.py` → `DEFAULT_CONFIG["auxiliary"]`) because this list evolves.
+
+Current class-level slots:
+
+| Slot | Purpose / notes |
+|------|-----------------|
+| `vision` | Image, screenshot, browser-vision analysis. Includes `download_timeout` in addition to standard routing fields. |
+| `web_extract` | Web page extraction and summarization. |
+| `compression` | Context compression summaries. Summary model should have a context window large enough for the main model's compressed middle section. |
+| `session_search` | Summaries for past-session search. Includes `max_concurrency` to avoid bursty 429s. |
+| `skills_hub` | Skill hub search/selection helper reasoning. |
+| `approval` | Smart command approval/risk judging (`approvals.mode: smart`). |
+| `mcp` | MCP helper reasoning/routing. |
+| `title_generation` | Automatic session title generation. |
+| `curator` | Skill curator review/consolidation background task; default timeout is longer because reviews can take minutes. |
+
+Standard per-slot shape:
+
+```yaml
+auxiliary:
+  compression:
+    provider: auto      # auto | main | openrouter | nous | anthropic | gemini | openai-codex | custom | named provider
+    model: ""           # empty = provider's default auxiliary model
+    base_url: ""        # direct OpenAI-compatible endpoint; takes precedence when set
+    api_key: ""         # key for base_url, otherwise provider/env auth
+    timeout: 120
+    extra_body: {}
+```
+
+Useful commands:
+```bash
+hermes model                                      # includes Configure auxiliary models UI
+hermes config set auxiliary.vision.provider openrouter
+hermes config set auxiliary.vision.model google/gemini-2.5-flash
+```
+
+Auto-routing notes: `provider: auto` generally tries the user's main provider/model first, then configured/available fallbacks such as OpenRouter, Nous Portal, custom endpoints, Anthropic, and direct API-key providers depending on task capabilities. `provider: main` explicitly resolves to the current main provider. Codex OAuth is used for auxiliary tasks when it is the main provider or when explicitly configured with a model; it is not blindly tried in the generic fallback chain.
+
+**Direct OpenAI API pitfall:** `openai` is not currently a valid `auxiliary.<task>.provider` id. For OpenAI API-key routing, configure the slot as `provider: custom` with `base_url: https://api.openai.com/v1` and an explicit OpenAI model (with `OPENAI_API_KEY` in `.env` or the environment). For ChatGPT/Codex OAuth, use `provider: openai-codex` and always set `auxiliary.<task>.model` explicitly because the Codex endpoint has no stable default allow-list.
 
 ### Providers
 
@@ -390,7 +428,7 @@ Full config reference: https://hermes-agent.nousresearch.com/docs/user-guide/con
 | Provider | Auth | Key env var |
 |----------|------|-------------|
 | OpenRouter | API key | `OPENROUTER_API_KEY` |
-| Anthropic | API key | `ANTHROPIC_API_KEY` |
+| Anthropic | API key or Claude Pro/Max OAuth | `ANTHROPIC_API_KEY`, or `hermes auth add anthropic --type oauth` / `hermes model` |
 | Nous Portal | OAuth | `hermes auth` |
 | OpenAI Codex | OAuth | `hermes auth` |
 | GitHub Copilot | Token | `COPILOT_GITHUB_TOKEN` |
@@ -405,13 +443,40 @@ Full config reference: https://hermes-agent.nousresearch.com/docs/user-guide/con
 | Alibaba / DashScope | API key | `DASHSCOPE_API_KEY` |
 | Xiaomi MiMo | API key | `XIAOMI_API_KEY` |
 | Kilo Code | API key | `KILOCODE_API_KEY` |
+| AI Gateway (Vercel) | API key | `AI_GATEWAY_API_KEY` |
 | OpenCode Zen | API key | `OPENCODE_ZEN_API_KEY` |
 | OpenCode Go | API key | `OPENCODE_GO_API_KEY` |
-| Qwen OAuth | OAuth | `hermes auth add qwen-oauth` |
+| Qwen OAuth | OAuth | `hermes login --provider qwen-oauth` |
 | Custom endpoint | Config | `model.base_url` + `model.api_key` in config.yaml |
 | GitHub Copilot ACP | External | `COPILOT_CLI_PATH` or Copilot CLI |
 
 Full provider docs: https://hermes-agent.nousresearch.com/docs/integrations/providers
+
+#### Anthropic / Claude Pro-Max subscription OAuth
+
+Hermes can use Claude Pro/Max subscription credentials for the `anthropic` provider; it does not require an Anthropic API key. Prefer the interactive path for users asking how to configure this:
+
+```bash
+hermes model
+# choose Anthropic / Claude
+# choose "Claude Pro/Max subscription (OAuth login)"
+# complete browser auth, then pick a model such as claude-sonnet-4-6
+```
+
+Direct credential-pool form:
+```bash
+hermes auth add anthropic --type oauth --label "Claude Max"
+hermes model
+```
+
+If Claude Code is already installed/logged in, Hermes can reuse valid Claude Code credentials or run `claude setup-token` during the Anthropic model flow:
+```bash
+npm install -g @anthropic-ai/claude-code
+claude auth login
+hermes model
+```
+
+Resulting config should have `model.provider: anthropic` and `model.default: <claude-model>`. Do not set `model.base_url` for Anthropic; Hermes' adapter uses the correct Anthropic endpoint and auth headers automatically. Restart long-running gateway/API processes after changing the provider/model: `hermes gateway restart`.
 
 ### Toolsets
 
@@ -420,14 +485,12 @@ Enable/disable via `hermes tools` (interactive) or `hermes tools enable/disable 
 | Toolset | What it provides |
 |---------|-----------------|
 | `web` | Web search and content extraction |
-| `search` | Web search only (subset of `web`) |
 | `browser` | Browser automation (Browserbase, Camofox, or local Chromium) |
 | `terminal` | Shell commands and process management |
 | `file` | File read/write/search/patch |
 | `code_execution` | Sandboxed Python execution |
 | `vision` | Image analysis |
 | `image_gen` | AI image generation |
-| `video` | Video analysis and generation |
 | `tts` | Text-to-speech |
 | `skills` | Skill browsing and management |
 | `memory` | Persistent cross-session memory |
@@ -436,74 +499,15 @@ Enable/disable via `hermes tools` (interactive) or `hermes tools enable/disable 
 | `cronjob` | Scheduled task management |
 | `clarify` | Ask user clarifying questions |
 | `messaging` | Cross-platform message sending |
+| `search` | Web search only (subset of `web`) |
 | `todo` | In-session task planning and tracking |
-| `kanban` | Multi-agent work-queue tools (gated to workers) |
-| `debugging` | Extra introspection/debug tools (off by default) |
-| `safe` | Minimal, low-risk toolset for locked-down sessions |
-| `spotify` | Spotify playback and playlist control |
-| `homeassistant` | Smart home control (off by default) |
-| `discord` | Discord integration tools |
-| `discord_admin` | Discord admin/moderation tools |
-| `feishu_doc` | Feishu (Lark) document tools |
-| `feishu_drive` | Feishu (Lark) drive tools |
-| `yuanbao` | Yuanbao integration tools |
 | `rl` | Reinforcement learning tools (off by default) |
 | `moa` | Mixture of Agents (off by default) |
-
-Full enumeration lives in `toolsets.py` as the `TOOLSETS` dict; `_HERMES_CORE_TOOLS` is the default bundle most platforms inherit from.
+| `homeassistant` | Smart home control (off by default) |
 
 Tool changes take effect on `/reset` (new session). They do NOT apply mid-conversation to preserve prompt caching.
 
 ---
-
-## Project Context Files
-
-Hermes injects project-level instructions into the system prompt by reading context files from the working directory. The discovery order is **first match wins** — only one project context source is loaded per session.
-
-| File (in priority order) | Discovery | Use when |
-|---|---|---|
-| `.hermes.md` / `HERMES.md` | Walks parents up to the git root, stops at git root | You want hierarchical project rules (root + per-package overrides) |
-| `AGENTS.md` / `agents.md` | **Cwd only** — subdirectory and parent copies are ignored | You want portable agent instructions that work the same in Hermes, Claude Code, Codex, etc. |
-| `CLAUDE.md` / `claude.md` | Cwd only | Same as AGENTS.md, Claude-flavored |
-| `.cursorrules` / `.cursor/rules/*.mdc` | Cwd only | Migrating from Cursor |
-
-`SOUL.md` (in `$HERMES_HOME`) is independent and always loaded when present — it sets the agent's identity, not project rules.
-
-### Pick the right one
-
-- **Use `.hermes.md`** when you want Hermes-specific behavior that lives above the cwd (root + subtree), or when you want rules to inherit from a parent directory. The parent walk stops at the git root, so a home-level `.hermes.md` won't leak into every project (a git repo's root is the boundary).
-- **Use `AGENTS.md`** when the same project will also be worked on by other agents (Codex, Claude Code, OpenCode). Those tools all have their own conventions for `AGENTS.md`, and the "cwd only" contract keeps the file portable.
-- **Don't put project rules in `~/.hermes/AGENTS.md`** (or any other home-level location). When Hermes runs with that directory as cwd, the file loads — but only for that one directory. For cross-project context, use `SOUL.md` (in `$HERMES_HOME`, identity-only) or install a skill via `hermes skills install`.
-
-### Size and truncation
-
-Each context file is capped at 20,000 characters. Files longer than that get **head + tail** truncated (the middle is dropped, with a `[...truncated...]` marker). For large project rules, prefer splitting into multiple skills over cramming one file.
-
-### Security
-
-All context files pass through the threat-pattern scanner before reaching the system prompt. Patterns matching prompt injection or promptware are replaced with a `[BLOCKED: ...]` placeholder. This means an `AGENTS.md` containing obvious injection attempts won't reach the model — the scanner blocks the content, not the file, so the rest of the file still loads.
-
-### Disable for one session
-
-`hermes --ignore-rules` skips auto-injection of all project context files (`.hermes.md`, `AGENTS.md`, `CLAUDE.md`, `.cursorrules`) **and** `SOUL.md` identity, plus user config, plugins, and MCP servers. Use it to isolate whether a problem is your setup or Hermes itself.
-
-### Example: a small `.hermes.md`
-
-```markdown
-# My Project
-
-Hermes: when working in this repo, follow these rules.
-
-## Build
-- Always run `make test` before declaring a change done.
-- Use `uv run` for Python, not `pip install`.
-
-## Style
-- Prefer `pathlib.Path` over `os.path`.
-- No `print()` in production code — use the `logger`.
-```
-
-That file at `/home/me/projects/myrepo/.hermes.md` is auto-loaded when Hermes runs in any subdirectory of `/home/me/projects/myrepo`, but not when it runs in `/home/me/other-project`.
 
 ## Security & Privacy Toggles
 
@@ -511,15 +515,15 @@ Common "why is Hermes doing X to my output / tool calls / commands?" toggles —
 
 ### Secret redaction in tool output
 
-Secret redaction is **on by default** — tool output (terminal stdout, `read_file`, web content, subagent summaries, etc.) is scanned for strings that look like API keys, tokens, and secrets before it enters the conversation context and logs. Leave it enabled for normal use:
+Secret redaction is **off by default** — tool output (terminal stdout, `read_file`, web content, subagent summaries, etc.) passes through unmodified. If the user wants Hermes to auto-mask strings that look like API keys, tokens, and secrets before they enter the conversation context and logs:
 
 ```bash
-hermes config set security.redact_secrets true       # keep enabled globally
+hermes config set security.redact_secrets true       # enable globally
 ```
 
-**Restart required.** `security.redact_secrets` is snapshotted at import time — toggling it mid-session (e.g. via `export HERMES_REDACT_SECRETS=false` from a tool call) will NOT take effect for the running process. Tell the user to change it in config from a terminal, then start a new session. This is deliberate — it prevents an LLM from flipping the toggle on itself mid-task.
+**Restart required.** `security.redact_secrets` is snapshotted at import time — toggling it mid-session (e.g. via `export HERMES_REDACT_SECRETS=true` from a tool call) will NOT take effect for the running process. Tell the user to run `hermes config set security.redact_secrets true` in a terminal, then start a new session. This is deliberate — it prevents an LLM from flipping the toggle on itself mid-task.
 
-Disable only when you deliberately need raw credential-like strings for debugging or redactor development:
+Disable again with:
 ```bash
 hermes config set security.redact_secrets false
 ```
@@ -679,197 +683,19 @@ terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_14305
 
 ---
 
-## Durable & Background Systems
-
-Four systems run alongside the main conversation loop. Quick reference
-here; full developer notes live in `AGENTS.md`, user-facing docs under
-`website/docs/user-guide/features/`.
-
-### Delegation (`delegate_task`)
-
-Synchronous subagent spawn — the parent waits for the child's summary
-before continuing its own loop. Isolated context + terminal session.
-
-- **Single:** `delegate_task(goal, context, toolsets)`.
-- **Batch:** `delegate_task(tasks=[{goal, ...}, ...])` runs children in
-  parallel, capped by `delegation.max_concurrent_children` (default 3).
-- **Roles:** `leaf` (default; cannot re-delegate) vs `orchestrator`
-  (can spawn its own workers, bounded by `delegation.max_spawn_depth`).
-- **Not durable.** If the parent is interrupted, the child is
-  cancelled. For work that must outlive the turn, use `cronjob` or
-  `terminal(background=True, notify_on_complete=True)`.
-
-Config: `delegation.*` in `config.yaml`.
-
-### Cron (scheduled jobs)
-
-Durable scheduler — `cron/jobs.py` + `cron/scheduler.py`. Drive it via
-the `cronjob` tool, the `hermes cron` CLI (`list`, `add`, `edit`,
-`pause`, `resume`, `run`, `remove`), or the `/cron` slash command.
-
-- **Schedules:** duration (`"30m"`, `"2h"`), "every" phrase
-  (`"every monday 9am"`), 5-field cron (`"0 9 * * *"`), or ISO timestamp.
-- **Per-job knobs:** `skills`, `model`/`provider` override, `script`
-  (pre-run data collection; `no_agent=True` makes the script the whole
-  job), `context_from` (chain job A's output into job B), `workdir`
-  (run in a specific dir with its `AGENTS.md` / `CLAUDE.md` loaded),
-  multi-platform delivery.
-- **Invariants:** 3-minute hard interrupt per run, `.tick.lock` file
-  prevents duplicate ticks across processes, cron sessions pass
-  `skip_memory=True` by default, and cron deliveries are framed with a
-  header/footer instead of being mirrored into the target gateway
-  session (keeps role alternation intact).
-
-User docs: https://hermes-agent.nousresearch.com/docs/user-guide/features/cron
-
-### Curator (skill lifecycle)
-
-Background maintenance for agent-created skills. Tracks usage, marks
-idle skills stale, archives stale ones, keeps a pre-run tar.gz backup
-so nothing is lost.
-
-- **CLI:** `hermes curator <verb>` — `status`, `run`, `pause`, `resume`,
-  `pin`, `unpin`, `archive`, `restore`, `prune`, `backup`, `rollback`.
-- **Slash:** `/curator <subcommand>` mirrors the CLI.
-- **Scope:** only touches skills with `created_by: "agent"` provenance.
-  Bundled + hub-installed skills are off-limits. **Never deletes** —
-  max destructive action is archive. Pinned skills are exempt from
-  every auto-transition and every LLM review pass.
-- **Telemetry:** sidecar at `~/.hermes/skills/.usage.json` holds
-  per-skill `use_count`, `view_count`, `patch_count`,
-  `last_activity_at`, `state`, `pinned`.
-
-Config: `curator.*` (`enabled`, `interval_hours`, `min_idle_hours`,
-`stale_after_days`, `archive_after_days`, `backup.*`).
-User docs: https://hermes-agent.nousresearch.com/docs/user-guide/features/curator
-
-### Kanban (multi-agent work queue)
-
-Durable SQLite board for multi-profile / multi-worker collaboration.
-Users drive it via `hermes kanban <verb>`; dispatcher-spawned workers
-see a focused `kanban_*` toolset gated by `HERMES_KANBAN_TASK`, and
-orchestrator profiles can opt into the broader `kanban` toolset. Normal
-sessions still have zero `kanban_*` schema footprint unless configured.
-
-- **CLI verbs (common):** `init`, `create`, `list` (alias `ls`),
-  `show`, `assign`, `link`, `unlink`, `comment`, `complete`, `block`,
-  `unblock`, `archive`, `tail`. Less common: `watch`, `stats`, `runs`,
-  `log`, `dispatch`, `daemon`, `gc`.
-- **Worker/orchestrator toolset:** `kanban_show`, `kanban_complete`,
-  `kanban_block`, `kanban_heartbeat`, `kanban_comment`, `kanban_create`,
-  `kanban_link`; profiles that explicitly enable the `kanban` toolset
-  outside a dispatcher-spawned task also get `kanban_list` and
-  `kanban_unblock` for board routing.
-- **Dispatcher** runs inside the gateway by default
-  (`kanban.dispatch_in_gateway: true`) — reclaims stale claims,
-  promotes ready tasks, atomically claims, spawns assigned profiles.
-  Auto-blocks a task after `failure_limit` consecutive spawn failures
-  (default 2; configurable via `kanban.failure_limit` or per-task
-  `max_retries`).
-- **Isolation:** board is the hard boundary (workers get
-  `HERMES_KANBAN_BOARD` pinned in env); tenant is a soft namespace
-  within a board for workspace-path + memory-key isolation.
-
-User docs: https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban
-
----
-
-## Windows-Specific Quirks
-
-Hermes runs natively on Windows (PowerShell, cmd, Windows Terminal, git-bash
-mintty, VS Code integrated terminal). Most of it just works, but a handful
-of differences between Win32 and POSIX have bitten us — document new ones
-here as you hit them so the next person (or the next session) doesn't
-rediscover them from scratch.
-
-### Input / Keybindings
-
-**Alt+Enter doesn't insert a newline.** Windows Terminal intercepts Alt+Enter
-at the terminal layer to toggle fullscreen — the keystroke never reaches
-prompt_toolkit. Use **Ctrl+Enter** instead. Windows Terminal delivers
-Ctrl+Enter as LF (`c-j`), distinct from plain Enter (`c-m` / CR), and the
-CLI binds `c-j` to newline insertion on `win32` only (see
-`_bind_prompt_submit_keys` + the Windows-only `c-j` binding in `cli.py`).
-Side effect: the raw Ctrl+J keystroke also inserts a newline on Windows —
-unavoidable, because Windows Terminal collapses Ctrl+Enter and Ctrl+J to
-the same keycode at the Win32 console API layer. No conflicting binding
-existed for Ctrl+J on Windows, so this is a harmless side effect.
-
-mintty / git-bash behaves the same (fullscreen on Alt+Enter) unless you
-disable Alt+Fn shortcuts in Options → Keys. Easier to just use Ctrl+Enter.
-
-**Diagnosing keybindings.** Run `python scripts/keystroke_diagnostic.py`
-(repo root) to see exactly how prompt_toolkit identifies each keystroke
-in the current terminal. Answers questions like "does Shift+Enter come
-through as a distinct key?" (almost never — most terminals collapse it
-to plain Enter) or "what byte sequence is my terminal sending for
-Ctrl+Enter?" This is how the Ctrl+Enter = c-j fact was established.
-
-### Config / Files
-
-**HTTP 400 "No models provided" on first run.** `config.yaml` was saved
-with a UTF-8 BOM (common when Windows apps write it). Re-save as UTF-8
-without BOM. `hermes config edit` writes without BOM; manual edits in
-Notepad are the usual culprit.
-
-### `execute_code` / Sandbox
-
-**WinError 10106** ("The requested service provider could not be loaded
-or initialized") from the sandbox child process — it can't create an
-`AF_INET` socket, so the loopback-TCP RPC fallback fails before
-`connect()`. Root cause is usually **not** a broken Winsock LSP; it's
-Hermes's own env scrubber dropping `SYSTEMROOT` / `WINDIR` / `COMSPEC`
-from the child env. Python's `socket` module needs `SYSTEMROOT` to locate
-`mswsock.dll`. Fixed via the `_WINDOWS_ESSENTIAL_ENV_VARS` allowlist in
-`tools/code_execution_tool.py`. If you still hit it, echo `os.environ`
-inside an `execute_code` block to confirm `SYSTEMROOT` is set. Full
-diagnostic recipe in `references/execute-code-sandbox-env-windows.md`.
-
-### Testing / Contributing
-
-**`scripts/run_tests.sh` doesn't work as-is on Windows** — it looks for
-POSIX venv layouts (`.venv/bin/activate`). The Hermes-installed venv at
-`venv/Scripts/` has no pip or pytest either (stripped for install size).
-Workaround: install `pytest + pytest-xdist + pyyaml` into a system Python
-3.11 user site, then invoke pytest directly with `PYTHONPATH` set:
-
-```bash
-"/c/Program Files/Python311/python" -m pip install --user pytest pytest-xdist pyyaml
-export PYTHONPATH="$(pwd)"
-"/c/Program Files/Python311/python" -m pytest tests/foo/test_bar.py -v --tb=short -n 0
-```
-
-Use `-n 0`, not `-n 4` — `pyproject.toml`'s default `addopts` already
-includes `-n`, and the wrapper's CI-parity guarantees don't apply off POSIX.
-
-**POSIX-only tests need skip guards.** Common markers already in the codebase:
-- Symlinks — elevated privileges on Windows
-- `0o600` file modes — POSIX mode bits not enforced on NTFS by default
-- `signal.SIGALRM` — Unix-only (see `tests/conftest.py::_enforce_test_timeout`)
-- Winsock / Windows-specific regressions — `@pytest.mark.skipif(sys.platform != "win32", ...)`
-
-Use the existing skip-pattern style (`sys.platform == "win32"` or
-`sys.platform.startswith("win")`) to stay consistent with the rest of the
-suite.
-
-### Path / Filesystem
-
-**Line endings.** Git may warn `LF will be replaced by CRLF the next time
-Git touches it`. Cosmetic — the repo's `.gitattributes` normalizes. Don't
-let editors auto-convert committed POSIX-newline files to CRLF.
-
-**Forward slashes work almost everywhere.** `C:/Users/...` is accepted by
-every Hermes tool and most Windows APIs. Prefer forward slashes in code
-and logs — avoids shell-escaping backslashes in bash.
-
----
-
 ## Troubleshooting
 
 ### Voice not working
 1. Check `stt.enabled: true` in config.yaml
 2. Verify provider: `pip install faster-whisper` or set API key
 3. In gateway: `/restart`. In CLI: exit and relaunch.
+
+### Memory provider selected but shown unavailable/deactivated
+1. Check config first: `hermes config` or `grep -A8 '^memory:' ~/.hermes/config.yaml`; `memory.provider: "supermemory"` means the provider selection persisted.
+2. Run `hermes memory status`. If the provider is active but `Status: not available` and the missing checklist marks the API key as present, check the provider SDK import in the Hermes venv, not just `.env`.
+3. For Supermemory specifically, `SUPERMEMORY_API_KEY` alone is insufficient: the Python package must import in the Hermes runtime venv. Verify with `~/.hermes/hermes-agent/venv/bin/python3 - <<'PY'\nimport supermemory\nprint('ok')\nPY`.
+4. If the venv lacks pip, bootstrap and install: `~/.hermes/hermes-agent/venv/bin/python3 -m ensurepip --upgrade && ~/.hermes/hermes-agent/venv/bin/python3 -m pip install supermemory`.
+5. Re-run `hermes memory status` and expect `Provider: supermemory`, `Plugin: installed ✓`, `Status: available ✓`. Restart any already-running gateway/app/runtime process so it sees the newly installed module.
 
 ### Tool not available
 1. `hermes tools` — check if toolset is enabled for your platform
@@ -878,7 +704,7 @@ and logs — avoids shell-escaping backslashes in bash.
 
 ### Model/provider issues
 1. `hermes doctor` — check config and dependencies
-2. `hermes auth` — re-authenticate OAuth providers (or `hermes auth add <provider>`)
+2. `hermes login` — re-authenticate OAuth providers
 3. Check `.env` has the right API key
 4. **Copilot 403**: `gh auth login` tokens do NOT work for Copilot API. You must use the Copilot-specific OAuth device code flow via `hermes model` → GitHub Copilot.
 
@@ -899,6 +725,9 @@ grep -i "failed to send\|error" ~/.hermes/logs/gateway.log | tail -20
 ```
 
 Common gateway problems:
+- **`service "com.nous.hermesd" not found` when restarting the API/gateway on macOS**: Do not restart Hermes via a hardcoded `launchctl` service label. The supported command is `hermes gateway restart`. If the service has not been installed yet, run `hermes gateway install` first, then `hermes gateway start` or `hermes gateway restart`. The API Server adapter is controlled by the Hermes gateway service.
+- **macOS LaunchAgent says loaded but gateway does not start**: Inspect launchd state and unified logs, not only `gateway.log`: `launchctl print gui/$(id -u)/ai.hermes.gateway` and `log show --last 10m --predicate 'eventMessage CONTAINS[c] "ai.hermes.gateway" OR eventMessage CONTAINS[c] "posix_spawn"' --style compact`. `EX_CONFIG 78` with `posix_spawn(.../venv/bin/python), Operation not permitted` can mean launchd refuses the Python executable behind the Hermes venv (observed with depot_tools Python on an external/dev volume). Recreate the venv with a trusted Homebrew/system Python rather than patching the generated plist by hand. See `references/hermes-macos-gateway-launchd.md`.
+- **API Server adapter refuses to start on `0.0.0.0`**: If logs say binding to `0.0.0.0` requires `API_SERVER_KEY`, check the active `HERMES_HOME/.env` and profile env. Either set `API_SERVER_KEY` or bind to `127.0.0.1` for local-only use.
 - **Gateway dies on SSH logout**: Enable linger: `sudo loginctl enable-linger $USER`
 - **Gateway dies on WSL2 close**: WSL2 requires `systemd=true` in `/etc/wsl.conf` for systemd services to work. Without it, gateway falls back to `nohup` (dies when session closes).
 - **Gateway crash loop**: Reset the failed state: `systemctl --user reset-failed hermes-gateway`
@@ -906,7 +735,7 @@ Common gateway problems:
 ### Platform-specific issues
 - **Discord bot silent**: Must enable **Message Content Intent** in Bot → Privileged Gateway Intents.
 - **Slack bot only works in DMs**: Must subscribe to `message.channels` event. Without it, the bot ignores public channels.
-- **Windows-specific issues** (`Alt+Enter` newline, WinError 10106, UTF-8 BOM config, test suite, line endings): see the dedicated **Windows-Specific Quirks** section above.
+- **Windows HTTP 400 "No models provided"**: Config file encoding issue (BOM). Ensure `config.yaml` is saved as UTF-8 without BOM.
 
 ### Auxiliary models not working
 If `auxiliary` tasks (vision, compression, session_search) fail silently, the `auto` provider can't find a backend. Either set `OPENROUTER_API_KEY` or `GOOGLE_API_KEY`, or explicitly configure each auxiliary task's provider:
@@ -934,7 +763,7 @@ hermes config set auxiliary.vision.model <model_name>
 | Env variables | `hermes config env-path` or [Env vars reference](https://hermes-agent.nousresearch.com/docs/reference/environment-variables) |
 | CLI commands | `hermes --help` or [CLI reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands) |
 | Gateway logs | `~/.hermes/logs/gateway.log` |
-| Session files | `hermes sessions browse` (reads state.db) |
+| Session files | `~/.hermes/sessions/` or `hermes sessions browse` |
 | Source code | `~/.hermes/hermes-agent/` |
 
 ---
@@ -966,7 +795,17 @@ hermes-agent/
 └── website/              # Docusaurus docs site
 ```
 
-Config: `~/.hermes/config.yaml` (settings), `~/.hermes/.env` (API keys) — both under `$HERMES_HOME` when it is set.
+Config: `~/.hermes/config.yaml` (settings), `~/.hermes/.env` (API keys).
+
+### Model catalog vs selected model
+
+When answering questions about `models.json`, model picker contents, or what should be listed for models, distinguish three things:
+
+- The documented **model catalog manifest** is `https://hermes-agent.nousresearch.com/docs/api/model-catalog.json`, sourced from `website/static/api/model-catalog.json` and cached at `~/.hermes/cache/model_catalog.json`.
+- The catalog is a curated menu for `/model` and `hermes model` (currently especially OpenRouter and Nous), not the active runtime selection.
+- The active runtime model/provider live in `~/.hermes/config.yaml` under `model` and are changed with `hermes model`, `/model`, or config edits.
+
+Do not assume `~/.hermes/models.json` is authoritative; verify code/docs references first. See `references/hermes-model-catalog.md` for schema, fetch/fallback behavior, and config overrides.
 
 ### Adding a Tool (3 files)
 
@@ -1025,47 +864,65 @@ python -m pytest tests/ -o 'addopts=' -q   # Full suite
 python -m pytest tests/tools/ -q            # Specific area
 ```
 
+### Hermes Desktop / Electron packaging
+
+When `apps/desktop && npm run pack` fails on macOS with `codesign ... ambiguous` for a duplicate `Developer ID Application` identity, avoid mutating the user's keychain first. In electron-builder 26.8.x, keep/use a `build.mac.sign` custom hook that delegates to `@electron/osx-sign` with the prepared `configuration.identity` SHA-1 hash, then verify with `npm run pack` and `codesign --verify --deep --strict`. See `references/desktop-electron-builder-duplicate-codesign-identity.md`.
+
+### HermesiOS / HermesHostCompanion UI extensions
+
+When adding or rewriting iOS Agent Runtime accordion panels that mirror Hermes Desktop screens, first inspect the desktop renderer screen and main-process implementation, then implement the same actions through `HermesHostCompanion` WebSocket APIs rather than direct iOS file access. Add protocol Codable types, a focused host registry, server dispatch/capabilities, iOS client methods, and the SwiftUI panel. Verify with both `xcodebuild -project HermesiOS.xcodeproj -scheme HermesiOS -destination 'generic/platform=iOS Simulator' build` and `swiftc -parse HermesHostCompanion/*.swift` when no separate companion project/package exists. See `references/ios-companion-runtime-panels.md` for concrete patterns and pitfalls from Providers, Memory, Profiles, Gateway, and runtime model routing; for Agent Runtime → Models specifically, see `references/hermesios-runtime-models-panel.md`.
+
+When debugging the Agent Runtime "Allowlisted Targets" panel, do not assume the path comes from Settings → Host Companion → Hermes workspace path. The target picker displays paths returned by Host Companion's persisted target registry (`~/Library/Application Support/HermesHostCompanion/targets.json`), and the current `list_targets` request does not send the workspace path. `CompanionTargetRegistry.seededDocument()` historically seeded `hermes-config` from the macOS home directory (`~/.hermes/config.toml`), which can be stale/outdated versus a configured workspace such as `/Volumes/WDBlack4TB/Code/HermesiOS/.hermes/config.yaml`. See `references/hermesios-companion-target-registry.md` for the investigation path and fix options.
+
+When HermesiOS Host Companion enrollment fails with a generic TLS error, first verify URL/port ownership before changing cert logic. On Laurent's Mac, stale `wss://...:9113/enroll` values can hit Tailscale/IPNExtension, which presents a Let's Encrypt tailnet cert rather than the pinned HermesHostCompanion cert; the actual companion enrollment listener used `:9212` while API used `:9112`. Check `lsof`, `defaults read fr.dubertrand.HermesHostCompanion`, the PKI cert/fingerprint, and unified logs; migrate stale `:9113/enroll` settings/QR defaults to `:9212/enroll` if needed. See `references/hermesios-companion-enrollment-tls-port-conflict.md` for commands, evidence, and patch pattern.
+
+When implementing YAML validation for Host Companion targets, do not use a naive native Swift fallback parser for real Hermes `config.yaml`; it can flag multiline valid YAML as broken. Prefer PyYAML from the target workspace venv, then default Hermes venv, then system Python; sanitize Xcode preview dynamic-loader environment variables before launching subprocesses; if PyYAML is unavailable everywhere, skip strict validation rather than fabricating syntax diagnostics. See `references/hermesios-companion-yaml-validation.md`.
+
+When modifying HermesiOS Responses API or Chat Completions console bubbles, reuse shared bubble helpers for duplicated bubble visuals. For copy affordances, overlay a tiny bottom-right button that copies the adjacent bubble's real message content via `UIPasteboard`/`NSPasteboard`. For the current API tab selector, prefer Hermes **profile** selection over provider-model selection: populate from `GET /v1/profiles`, send the selected id as `X-Hermes-Profile` on every `/v1/chat/completions` and `/v1/responses` request, keep the request `model` as the API-server compatibility id (`hermes-agent` unless otherwise centralized), and lock the selected profile into session state (`activeProfile`) on first submit. If the user selects a different profile, start a fresh session/clear continuation state before subsequent calls. Use Host Companion `list_models` only for saved provider-model management, not for per-request API context. If `/v1/profiles` only returns `default` while `~/.hermes/profiles/` contains folders such as `Ollama`, check for legacy/manual mixed-case profile directory names; `list_profiles()`, `get_profile_dir()`, and `profile_exists()` should normalize the API id to lowercase while resolving the actual folder case-insensitively. If native Ask Hermes/Profile UI gets a 404 or missing model reasoning properties from the Hermes API, restore `/v1/profiles` metadata including `supported_parameters`, `supports_reasoning`, and a `reasoning` object; resolve support via `agent.models_dev.get_model_capabilities()` with conservative fallback heuristics, then restart the gateway before live verification. See `references/hermes-api-profile-reasoning-metadata.md`. See `references/hermes-profiles-legacy-case-folders.md`. The older model-selector behavior is documented historically in `references/hermesios-console-bubbles-and-model-selection.md`; use `references/hermesios-api-tabs-profile-selection.md` for the current profile-dropdown pattern, migration compatibility, server API changes, and verification checklist.
+
+When HermesiOS cannot connect to `https://mac-studio.tail4d2ab4.ts.net:8642/v1`, first distinguish network reachability from API authentication: unauthenticated `GET /v1/models` returning `401 Invalid API key` means the route/backend is reachable; authenticated with `API_SERVER_KEY` should return `200`. If Tailscale Serve returns `502` while the local API server is healthy, inspect `tailscale serve status`; a backend of `http://localhost:8642` can be ambiguous when Hermes is not listening on `::1`. Repoint Serve explicitly to `http://127.0.0.1:8642` with `/Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg --https 8642 http://127.0.0.1:8642`, then verify `/v1/models` and a small `/v1/chat/completions` smoke test. See `references/hermesios-tailscale-api-server-reachability.md`.
+
+When adding file attachments to HermesiOS Responses API or Chat Completions prompt composers, use a local `fileImporter` paperclip button immediately left of the prompt area, show a removable attachment chip, and pass a `HermesPromptAttachment` through the session submit/build-request path. Send images as inline base64 data URLs in the OpenAI/Hermes multimodal image shapes; for documents and text/source files, append filename/MIME/size metadata plus UTF-8 fenced content or a base64 data URL to prompt text, because the Hermes API server accepts inline images but currently rejects `file`/`input_file` parts. See `references/hermesios-api-tabs-file-attachments.md`.
+
+When debugging or extending HermesiOS handling of generated-image output from Hermes Agent/API streams, support Laurent's JSON contract: rendered base64 image data is in `image_base64`, and that encoded image's MIME type is in `mime_type`; `original_mime_type` describes the original cached/source file and is only a fallback. Patch both structured API decoders and loose/raw assistant JSON extraction, because image payloads may arrive as parsed content parts, Responses final envelopes, or literal JSON text in the assistant bubble. See `references/hermesios-json-base64-image-output.md`.
+
+When gateway delivery of generated images fails with platform text errors such as `Message too long`, do not assume the native file attachment size limit is too low. First compare the source file size with the expanded inline base64 payload: a small PNG can become millions of text characters if `image_base64` or `data:image/...;base64,...` reaches the streaming/text path. Decode embedded base64 images into `$HERMES_HOME/cache/images/`, redact the base64 from streamed/display text, and route the decoded file through normal native attachment delivery. See `references/gateway-base64-image-attachments.md`.
+
+When extending `/v1/chat/completions` streaming for Hermes debug/observability UIs, keep OpenAI assistant text in normal unnamed SSE `data:` chunks and emit non-text debug information as named Hermes SSE events instead of `delta.content`. Current debug events include `hermes.tool.progress`, `Hermes.reasoning.summary`, and `Hermes.tool.output`; wire `reasoning_callback` through `_create_agent`/`_run_agent`, emit tool output from correlated non-internal `tool_complete_callback`, cap large outputs, advertise capability flags, and test that debug events never leak into `chat.completion.chunk` content. For context compression specifically, `run_agent.py` should emit a structured JSON reasoning callback and the API server should expose it on `Hermes.reasoning.summary` as a parsed `message` while preserving `delta`/`summary` strings; see `references/context-compression-reasoning-json.md`. For HermesiOS Chat, raw streamed JSON in the debug modal is not enough: decode named events into readable debug text for debug surfaces, but do not render tools/events/logs in the assistant chat bubble. The visible Chat tab should update the Status pill with short (≤40 char) labels for every streamed event, preferably before raw/debug log processing and with a `Task.yield()` if SwiftUI otherwise batches the repaint. See `references/chat-completions-debug-sse-events.md`.
+
+When changing HermesiOS History search resume controls, treat "Resume in Responses" and "Resume in Chat" as destination-tab actions. Disable the Responses resume controls while `responseSession.isSending` (Ask Hermes streaming) and disable Chat resume controls while `chatSession.isSending` (Chat with Hermes streaming), including both expanded-row buttons and compact menu actions. Also add handler-level guards in `ContentView` to prevent races. See `references/hermesios-history-resume-controls.md`.
+
+When adding iPad sidebar completion/attention indicators for HermesiOS tabs, keep notification state in `ContentView`, set it from the relevant completion signal, pass bindings into `WorkspaceSidebar`, and clear the green state from the sidebar row tap. For Ask Hermes/Chat, use `.onChange` of each session `connectionStatus == "Completed"`; for History search, use `.onChange(of: dashboardHistorySearchSession.isSearching)` and set unread when it transitions from `true` to `false` unless status is `"Cancelled"`. Preserve the existing selected row background; only the icon background should turn green. See `references/hermesios-sidebar-completion-indicators.md`.
+
+When performing Hermes session-hygiene maintenance, such as deleting sessions with no agent/assistant response, scan live stores beyond the primary `state.db`: profile `state.db` files, transcript JSON files (including file-only transcripts absent from SQLite), and `response_store.db` rows whose JSON contains the deleted `session_id`. Skip the currently running cron job's own fresh active session so the maintenance task does not delete its still-open log. See `references/session-hygiene-no-agent-response.md` for the exact identification query, safe deletion order, and verification checklist.
+
+When running Hermes maintenance scripts such as `scripts/backfill_session_titles.py`, prefer the Hermes runtime venv (`.venv`, `venv`, or `~/.hermes/hermes-agent/venv`) over system `python` so auxiliary providers/imports are available. If a direct run shows missing provider imports such as `No module named 'openai'`, rerun with the venv before diagnosing config. If title backfill is long-running, background it and poll until completion. If many `[SILENT]` cron sessions produce duplicate `Silent` titles, expect uniqueness failures after suffix exhaustion; treat this as a low-information-title collision, not necessarily a provider failure. In scheduled-job delivery contexts, report nonzero/partial outcomes succinctly; use `[SILENT]` only when the run genuinely produced nothing new. See `references/session-title-backfill-maintenance.md`.
+
+When debugging HermesiOS Agent Runtime → Memory showing Supermemory as deactivated after startup, do not assume `memory.provider` failed to persist. Check the active workspace config, `.env` key presence without printing secrets, and `hermes memory status`; if it says provider `supermemory` is configured but `Status: not available` while `SUPERMEMORY_API_KEY` is present, verify `import supermemory` in the Hermes venv and install with that exact interpreter if needed. See `references/hermesios-memory-supermemory-availability.md` for the reproduction, fix, and pitfalls.
+
+When debugging or changing HermesMacOS Ask Hermes / Chat with Hermes cancellation, distinguish client-side Swift `Task.cancel()` from actual Hermes Agent interruption. Current explicit-cancel pattern: HermesMacOS sends `X-Hermes-Request-Id` on `/v1/responses` and `/v1/chat/completions`, then posts `POST /v1/requests/{request_id}/cancel` before local cancellation; the API server tracks `agent_ref`/asyncio task, calls `agent.interrupt("Cancel requested via API")`, and cancels the task. Streaming disconnect handling remains useful, but non-streaming paths need this explicit request tracking to avoid invisible continued work. `/v1/runs/{run_id}/stop` remains the strongest structured control-plane API for future run-oriented UX. See `references/hermesmacos-api-cancellation-semantics.md`.
+
+When adding dashboard History/search features or companion-app access to dashboard session data, remember that `SessionDB.search_messages()` is the underlying FTS API and dashboard routes live in `hermes_cli/web_server.py` (not the OpenAI-compatible API server adapter). For full-conversation search, wrap `search_messages()`, group matches by `session_id`, then expand each hit with `db.get_session()` and `db.get_messages()`. For a History/Search “Resume to chat” action, use the persisted Hermes `SessionDB` `session_id` as the universal resume key; do not resume by a TUI runtime id or a Responses API `resp_...` id. Responses-mode sessions can be continued in chat by resuming the stored Hermes `session_id`; chat sessions can be continued in Responses mode only via an explicit bridge (`X-Hermes-Session-Id` support on `/v1/responses`, a synthesized `response_store` row, or client-supplied `conversation_history`). When resuming into HermesiOS Chat or Responses, also propagate a defensive friendly title (`title`/`display_title`/`friendly_name`/`name`/`summary`, including metadata variants) into the destination tab's session pill before falling back to prompt/session-id labels. See `references/history-resume-cross-mode.md`. Dashboard `/api/*` routes require the injected `X-Hermes-Session-Token`; native iOS clients can fetch `/`, extract `window.__HERMES_SESSION_TOKEN__`, then call the JSON endpoint. For local simulator access on port `9119`, check for stale listeners with `lsof -nP -iTCP:9119 -sTCP:LISTEN`, kill the stale PID if needed, and verify the port/dashboard before debugging app code; stale dashboard processes can produce misleading token/API behavior. For Tailscale Serve/Funnel access, distinguish upstream failures (502 when `127.0.0.1:9119` is not serving) from Hermes Host-header protection (400 `Invalid Host header` when a reverse proxy preserves the tailnet hostname while Hermes is bound to loopback); prefer a Host-rewriting local proxy over `--host 0.0.0.0 --insecure`. On Laurent's Mac, `https://mac-studio.tail4d2ab4.ts.net:9119` is served by Tailscale to a Host-rewriting proxy on `127.0.0.1:9120`, installed as LaunchAgent `fr.dubertrand.hermes-dashboard-host-proxy`, forwarding to the Hermes dashboard on `127.0.0.1:9119`; see `references/hermesios-tailscale-dashboard-host-proxy.md` for the exact topology and verification commands. If 9120 returns `Hermes dashboard proxy error: [Errno 61] Connection refused` or HermesMacOS TUI Gateway says the server response is bad, first verify `lsof -nP -iTCP:9119 -sTCP:LISTEN`; on Laurent's Mac the direct dashboard should be kept alive by LaunchAgent `fr.dubertrand.hermes-dashboard` using local wrapper `/Users/laurent/Library/Application Support/HermesDashboard/run_dashboard.sh` and logs under `/Users/laurent/Library/Logs/Hermes/hermes-dashboard*.log`. If this LaunchAgent is loaded but will not start with `EX_CONFIG 78` / `posix_spawn(...), Operation not permitted`, move executable inputs and logs out of symlinked/external-drive `.hermes` paths into `~/Library/Application Support/HermesDashboardHostProxy/` and `~/Library/Logs/Hermes/`; see `references/dashboard-host-proxy-launchd-local-paths.md`. If dashboard search returns 500, reproduce `SessionDB().search_messages(...)` directly and check for SQLite `no such tokenizer: trigram`; some macOS/CI SQLite builds need a unicode61 fallback with the same `messages_fts_trigram` table name. See `references/dashboard-session-search-api.md` for endpoint shape, iOS access notes, stale-port cleanup, reverse-proxy pitfalls, trigram fallback, and test pitfalls. If asked to change the dashboard HTTP API timeout, patch the browser dashboard clients too: `web/src/lib/api.ts` REST `fetchJSON` needs an `AbortController` timeout and `web/src/lib/gatewayClient.ts` JSON-RPC has `DEFAULT_REQUEST_TIMEOUT_MS`; rebuild `web/` so `hermes_cli/web_dist` is updated. See `references/dashboard-api-timeout-2026-05.md`.
+
+When changing or debugging Hermes dashboard API timeouts, distinguish browser/client-side timeouts from FastAPI/uvicorn server behavior. Generic dashboard REST calls are centralized in `web/src/lib/api.ts` (`fetchJSON`), and embedded Chat/TUI WebSocket JSON-RPC request timeouts are in `web/src/lib/gatewayClient.ts` (`DEFAULT_REQUEST_TIMEOUT_MS`). After frontend timeout changes, run `cd web && npm run build` so `hermes_cli/web_dist` is updated, then hard-refresh or restart the dashboard/gateway if an old bundle is still served. See `references/dashboard-api-timeouts.md` for the exact 5-minute timeout pattern and pitfalls.
+
+When adding dashboard indicators for Hermes installation/update state, reuse the existing update-check primitives rather than inventing new git logic: `hermes_cli.banner.check_for_updates()` counts commits behind `origin/main` and writes `$HERMES_HOME/.update_check`. If the dashboard needs a different refresh cadence, extend the helper with an injectable cache window (default unchanged for CLI) and expose a small FastAPI endpoint from `hermes_cli/web_server.py`; keep browser API bindings in `web/src/lib/api.ts`, render in the relevant page, then run `cd web && npm run build` to update `hermes_cli/web_dist`. The dashboard left-panel system action links live in `web/src/App.tsx` in `SidebarSystemActions`; remove/update entries there and clean up now-unused Lucide imports rather than changing backend action handlers or i18n strings unless the action itself is being retired everywhere. Pitfall: `uv run` may rewrite `uv.lock` in this repo because `pyproject.toml` uses a relative `tool.uv.exclude-newer = "7 days"`; for focused local tests prefer the repo `.venv` or Laurent's shared `~/.hermes/hermes-agent/venv` and avoid committing lockfile churn from ad-hoc env creation.
+
+When adding URL-driven Hermes dashboard theme behavior, treat `theme` as a first-class query parameter preserved across all internal page URLs. Read it in the React theme provider before localStorage/server defaults, canonicalize known theme names case-insensitively (`?theme=MONO` → `mono`), replace the current URL once the active theme is known, and update every `Link`/`NavLink`/`Navigate`/`navigate(...)` path including plugin tabs and existing query URLs such as chat resume. See `references/dashboard-theme-query-param.md`.
+
+When adding a built-in Hermes Dashboard visual theme, update both frontend and backend registries: `web/src/themes/presets.ts` (`DashboardTheme` export plus `BUILTIN_THEMES`) and `hermes_cli/web_server.py` (`dashboard.theme` schema options plus `_BUILTIN_DASHBOARD_THEMES`). Then run `cd web && npm run build`, verify `hermes_cli/web_dist` contains the theme id/colors, and smoke-test `/api/dashboard/themes` plus the browser theme switcher. If aligning `solarized-light` with standalone HermesMacOS light mode, use a white canvas with pale blue/grey controls rather than classic warm Solarized paper, and remember `hermes_cli/web_dist` may be gitignored even though it is locally rebuilt; see `references/dashboard-solarized-light-hermesmacos-parity-2026-05.md`. See `references/dashboard-builtin-theme-addition.md`.
+
+When adding HermesiOS Settings → Hermes Installation controls that operate on the host Hermes Agent checkout, route all actions through HermesHostCompanion protocol/client/server layers and isolate git operations in `CompanionGitRegistry`. For local-branch-safe official updates, auto-commit any dirty working-tree changes to the current local branch before fetching official main; require a non-detached branch if dirty, include the auto-commit hash/output in the UI operation result, then fetch `https://github.com/NousResearch/hermes-agent.git` directly into `refs/remotes/hermes-official/main`, probe conflicts with `git merge-tree --write-tree` without merging official main, persist pending review state in local git config, disable the update button while review is pending, and enable a separate merge-after-review action that merges the pinned official commit into the local branch after the working tree is clean. Verify Host Companion with `swiftc -typecheck HermesHostCompanion/*.swift`; verify iOS with an iPhone simulator SDK/target (iOS 26 if Speech APIs require it). See `references/hermesios-settings-installation-update-workflow.md` for protocol files, state keys, UI details, and verification commands.
+
+When the TUI/dashboard resume-session flow appears to open a new chat instead of resuming, inspect `tui_gateway/server.py` `session.resume`: the frontend uses the returned `result.session_id` as the active chat key, so it must be the persisted target SessionDB id, not a fresh short runtime UUID. Keep `result.session_id`, `result.resumed`, `_sessions[...]`, and the agent's `session_id` aligned on the persisted id. See `references/tui-resume-session-id.md` for the root cause, patch pattern, and regression test.
+
 - Tests auto-redirect `HERMES_HOME` to temp dirs — never touch real `~/.hermes/`
 - Run full suite before pushing any change
 - Use `-o 'addopts='` to clear any baked-in pytest flags
 
-**Windows contributors:** `scripts/run_tests.sh` currently looks for POSIX venvs (`.venv/bin/activate` / `venv/bin/activate`) and will error out on Windows where the layout is `venv/Scripts/activate` + `python.exe`. The Hermes-installed venv at `venv/Scripts/` also has no `pip` or `pytest` — it's stripped for end-user install size. Workaround: install pytest + pytest-xdist + pyyaml into a system Python 3.11 user site (`/c/Program Files/Python311/python -m pip install --user pytest pytest-xdist pyyaml`), then run tests directly:
+### Local branch convention for Laurent's Hermes Agent changes
 
-```bash
-export PYTHONPATH="$(pwd)"
-"/c/Program Files/Python311/python" -m pytest tests/tools/test_foo.py -v --tb=short -n 0
-```
-
-Use `-n 0` (not `-n 4`) because `pyproject.toml`'s default `addopts` already includes `-n`, and the wrapper's CI-parity story doesn't apply off-POSIX.
-
-**Cross-platform test guards:** tests that use POSIX-only syscalls need a skip marker. Common ones already in the codebase:
-- Symlink creation → `@pytest.mark.skipif(sys.platform == "win32", reason="Symlinks require elevated privileges on Windows")` (see `tests/cron/test_cron_script.py`)
-- POSIX file modes (0o600, etc.) → `@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX mode bits not enforced on Windows")` (see `tests/hermes_cli/test_auth_toctou_file_modes.py`)
-- `signal.SIGALRM` → Unix-only (see `tests/conftest.py::_enforce_test_timeout`)
-- Live Winsock / Windows-specific regression tests → `@pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific regression")`
-
-**Monkeypatching `sys.platform` is not enough** when the code under test also calls `platform.system()` / `platform.release()` / `platform.mac_ver()`. Those functions re-read the real OS independently, so a test that sets `sys.platform = "linux"` on a Windows runner will still see `platform.system() == "Windows"` and route through the Windows branch. Patch all three together:
-
-```python
-monkeypatch.setattr(sys, "platform", "linux")
-monkeypatch.setattr(platform, "system", lambda: "Linux")
-monkeypatch.setattr(platform, "release", lambda: "6.8.0-generic")
-```
-
-See `tests/agent/test_prompt_builder.py::TestEnvironmentHints` for a worked example.
-
-### Extending the system prompt's execution-environment block
-
-Factual guidance about the host OS, user home, cwd, terminal backend, and shell (bash vs. PowerShell on Windows) is emitted from `agent/prompt_builder.py::build_environment_hints()`. This is also where the WSL hint and per-backend probe logic live. The convention:
-
-- **Local terminal backend** → emit host info (OS, `$HOME`, cwd) + Windows-specific notes (hostname ≠ username, `terminal` uses bash not PowerShell).
-- **Remote terminal backend** (anything in `_REMOTE_TERMINAL_BACKENDS`: `docker, singularity, modal, daytona, ssh, managed_modal`) → **suppress** host info entirely and describe only the backend. A live `uname`/`whoami`/`pwd` probe runs inside the backend via `tools.environments.get_environment(...).execute(...)`, cached per process in `_BACKEND_PROBE_CACHE`, with a static fallback if the probe times out.
-- **Key fact for prompt authoring:** when `TERMINAL_ENV != "local"`, *every* file tool (`read_file`, `write_file`, `patch`, `search_files`) runs inside the backend container, not on the host. The system prompt must never describe the host in that case — the agent can't touch it.
-
-Full design notes, the exact emitted strings, and testing pitfalls:
-`references/prompt-builder-environment-hints.md`.
-
-**Refactor-safety pattern (POSIX-equivalence guard):** when you extract inline logic into a helper that adds Windows/platform-specific behavior, keep a `_legacy_<name>` oracle function in the test file that's a verbatim copy of the old code, then parametrize-diff against it. Example: `tests/tools/test_code_execution_windows_env.py::TestPosixEquivalence`. This locks in the invariant that POSIX behavior is bit-for-bit identical and makes any future drift fail loudly with a clear diff.
+Before modifying Hermes Agent source code for Laurent, check the repo branch/status and avoid editing directly on `main`. Create or reuse a local branch that was created after the latest Hermes Agent update, and keep using that branch for all Hermes Agent source changes until the next update. When touching HermesiOS Settings → Hermes Installation, make sure the current local Hermes Agent branch is visible there so Laurent can tell which local change branch is active.
 
 ### Commit Conventions
 

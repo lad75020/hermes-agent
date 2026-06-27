@@ -7617,6 +7617,47 @@ def _(rid, params: dict) -> dict:
                     db.replace_messages(session["session_key"], truncated)
                 except Exception as exc:
                     print(f"[tui_gateway] prompt.submit: replace_messages failed: {exc}", file=sys.stderr)
+        prompt_model = str(params.get("model") or "").strip()
+        if prompt_model:
+            prompt_provider = str(params.get("provider") or "").strip()
+            existing_override = session.get("model_override")
+            existing_model = (
+                str(existing_override.get("model") or "").strip()
+                if isinstance(existing_override, dict)
+                else str(existing_override or "").strip()
+            )
+            existing_provider = (
+                str(existing_override.get("provider") or "").strip()
+                if isinstance(existing_override, dict)
+                else ""
+            )
+            agent = session.get("agent")
+            agent_model = str(getattr(agent, "model", "") or "").strip() if agent else ""
+            agent_provider = str(getattr(agent, "provider", "") or "").strip() if agent else ""
+            model_differs = prompt_model not in {existing_model, agent_model}
+            provider_differs = bool(prompt_provider) and prompt_provider not in {existing_provider, agent_provider}
+            if model_differs or provider_differs:
+                if agent is None:
+                    session["model_override"] = {
+                        "model": prompt_model,
+                        "provider": prompt_provider or None,
+                    }
+                else:
+                    home_token = None
+                    try:
+                        if profile_home := session.get("profile_home"):
+                            home_token = set_hermes_home_override(profile_home)
+                        _apply_model_switch(
+                            sid,
+                            session,
+                            prompt_model,
+                            confirm_expensive_model=True,
+                            pin_session_override=True,
+                            parsed_flags=(prompt_model, prompt_provider, False, False, True),
+                        )
+                    finally:
+                        if home_token is not None:
+                            reset_hermes_home_override(home_token)
         session["running"] = True
         session["last_active"] = time.time()
         _start_inflight_turn(session, text)
@@ -11095,34 +11136,47 @@ def _(rid, params: dict) -> dict:
 
         session = _sessions.get(params.get("session_id", ""))
         agent = session.get("agent") if session else None
-        # Layer agent-session state on top of disk config — once an agent
-        # is spawned, IT owns the live provider/model/base_url. Empty
-        # agent attributes must NOT clobber disk config (with_overrides
-        # is truthy-only).
-        ctx = load_picker_context().with_overrides(
-            current_provider=getattr(agent, "provider", "") if agent else "",
-            current_model=(
-                (getattr(agent, "model", "") if agent else "") or _resolve_model()
-            ),
-            current_base_url=getattr(agent, "base_url", "") if agent else "",
-        )
-        # picker_hints + canonical_order produce the TUI's required shape:
-        # `authenticated`/`auth_type`/`key_env`/`warning` per row, in
-        # CANONICAL_PROVIDERS declaration order. include_unconfigured=True
-        # so the picker can show the full provider universe (with the
-        # setup-hint warning attached) instead of only authed rows.
-        # Curated model lists are preserved — list_authenticated_providers
-        # populates `models` from the curated catalog, not provider_model_ids
-        # (which would pull non-agentic models like TTS/embeddings/etc.).
-        payload = build_models_payload(
-            ctx,
-            include_unconfigured=True,
-            picker_hints=True,
-            canonical_order=True,
-            pricing=True,
-            capabilities=True,
-            refresh=bool(params.get("refresh")),
-        )
+        home_token = None
+        profile_home = None
+        if session and session.get("profile_home"):
+            profile_home = session.get("profile_home")
+        else:
+            profile_home = _profile_home(params.get("profile") if isinstance(params, dict) else None)
+        if profile_home:
+            home_token = set_hermes_home_override(profile_home)
+        try:
+            ctx = load_picker_context()
+            # Layer agent-session state on top of disk config — once an agent
+            # is spawned, IT owns the live provider/model/base_url. Empty
+            # agent attributes must NOT clobber disk config (with_overrides
+            # is truthy-only).
+            ctx = ctx.with_overrides(
+                current_provider=getattr(agent, "provider", "") if agent else "",
+                current_model=(
+                    (getattr(agent, "model", "") if agent else "") or _resolve_model()
+                ),
+                current_base_url=getattr(agent, "base_url", "") if agent else "",
+            )
+            # picker_hints + canonical_order produce the TUI's required shape:
+            # `authenticated`/`auth_type`/`key_env`/`warning` per row, in
+            # CANONICAL_PROVIDERS declaration order. include_unconfigured=True
+            # so the picker can show the full provider universe (with the
+            # setup-hint warning attached) instead of only authed rows.
+            # Curated model lists are preserved — list_authenticated_providers
+            # populates `models` from the curated catalog, not provider_model_ids
+            # (which would pull non-agentic models like TTS/embeddings/etc.).
+            payload = build_models_payload(
+                ctx,
+                include_unconfigured=True,
+                picker_hints=True,
+                canonical_order=True,
+                pricing=True,
+                capabilities=True,
+                refresh=bool(params.get("refresh")),
+            )
+        finally:
+            if home_token is not None:
+                reset_hermes_home_override(home_token)
         return _ok(rid, payload)
     except Exception as e:
         return _err(rid, 5033, str(e))

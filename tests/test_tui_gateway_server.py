@@ -1775,6 +1775,88 @@ def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_prompt_submit_applies_requested_model_before_turn(monkeypatch):
+    agent = types.SimpleNamespace(model="old/model", provider="openai-codex")
+    server._sessions["sid"] = _session(agent=agent)
+    calls = []
+
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        server.threading,
+        "Thread",
+        lambda *args, **kwargs: types.SimpleNamespace(start=lambda: None),
+    )
+    monkeypatch.setattr(
+        server,
+        "_apply_model_switch",
+        lambda sid, sess, raw, **kw: calls.append((sid, raw, kw)),
+    )
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "hello",
+                    "model": "gpt-5.5",
+                    "provider": "openai-codex",
+                },
+            }
+        )
+        assert resp["result"] == {"status": "streaming"}
+        assert calls == [
+            (
+                "sid",
+                "gpt-5.5",
+                {
+                    "confirm_expensive_model": True,
+                    "pin_session_override": True,
+                    "parsed_flags": ("gpt-5.5", "openai-codex", False, False, True),
+                },
+            )
+        ]
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_model_options_scopes_inventory_to_requested_profile(monkeypatch, tmp_path):
+    import hermes_cli.inventory as inventory
+
+    profile_home = tmp_path / "profiles" / "omlx"
+    profile_home.mkdir(parents=True)
+    events = []
+
+    class FakeContext:
+        def with_overrides(self, **kwargs):
+            events.append(("overrides", kwargs))
+            return self
+
+    monkeypatch.setattr(server, "_profile_home", lambda profile: profile_home if profile == "omlx" else None)
+    monkeypatch.setattr(
+        server,
+        "set_hermes_home_override",
+        lambda home: events.append(("set", Path(home))) or "token",
+    )
+    monkeypatch.setattr(server, "reset_hermes_home_override", lambda token: events.append(("reset", token)))
+    monkeypatch.setattr(inventory, "load_picker_context", lambda: events.append(("load", None)) or FakeContext())
+    monkeypatch.setattr(
+        inventory,
+        "build_models_payload",
+        lambda ctx, **kwargs: events.append(("build", kwargs)) or {"provider": "custom:omlx", "providers": []},
+    )
+
+    resp = server.handle_request({"id": "1", "method": "model.options", "params": {"profile": "omlx"}})
+
+    assert resp["result"]["provider"] == "custom:omlx"
+    assert events[0] == ("set", profile_home)
+    assert events[-1] == ("reset", "token")
+    assert any(name == "load" for name, _ in events)
+    assert any(name == "build" for name, _ in events)
+
+
 def test_ws_orphan_reap_closes_worker_when_session_stays_detached(monkeypatch):
     """A detached WS session past its grace window has its slash_worker closed.
 

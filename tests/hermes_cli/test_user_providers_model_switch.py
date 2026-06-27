@@ -144,7 +144,7 @@ def test_list_authenticated_providers_uses_live_models_for_user_provider(monkeyp
 
     calls = []
 
-    def fake_fetch_api_models(api_key, base_url):
+    def fake_fetch_api_models(api_key, base_url, **_kwargs):
         calls.append((api_key, base_url))
         return ["old-configured-model", "new-live-model"]
 
@@ -1063,7 +1063,7 @@ def test_section3_probes_no_key_endpoint_without_explicit_models(monkeypatch):
 
     probed = {}
 
-    def _fake_fetch(api_key, api_url):
+    def _fake_fetch(api_key, api_url, **_kwargs):
         probed["called"] = True
         probed["api_key"] = api_key
         probed["api_url"] = api_url
@@ -1093,13 +1093,51 @@ def test_section3_probes_no_key_endpoint_without_explicit_models(monkeypatch):
     assert row["total_models"] == 3
 
 
+def test_section3_probes_single_model_local_endpoint_without_key(monkeypatch):
+    """No-key local OpenAI-compatible providers with one saved model should
+    expand from /v1/models instead of showing only the active model.
+
+    This is the Ollama/OMLX profile shape: config has ``default_model`` (or
+    ``model``) plus a loopback ``base_url``, but the endpoint exposes the full
+    catalog without auth.
+    """
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+
+    calls = []
+
+    def _fake_fetch(api_key, api_url, **_kwargs):
+        calls.append((api_key, api_url))
+        return ["Qwen3.6-35B-A3B-4bit", "Llama-4-Scout", "GLM-5.1"]
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", _fake_fetch)
+
+    providers = list_authenticated_providers(
+        current_provider="omlx",
+        user_providers={
+            "omlx": {
+                "name": "OMLX",
+                "base_url": "http://127.0.0.1:17998/v1",
+                "default_model": "Qwen3.6-35B-A3B-4bit",
+            }
+        },
+        custom_providers=[],
+        max_models=50,
+    )
+
+    assert calls == [("", "http://127.0.0.1:17998/v1")]
+    row = next(p for p in providers if p["slug"] == "omlx")
+    assert row["models"] == ["Qwen3.6-35B-A3B-4bit", "Llama-4-Scout", "GLM-5.1"]
+    assert row["total_models"] == 3
+
+
 def test_section3_skips_probe_when_no_key_but_explicit_models(monkeypatch):
     """A no-key endpoint WITH an explicit models: list is the user narrowing a
     public endpoint to a subset — skip live discovery and keep the list."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
     monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
 
-    def _fail_fetch(api_key, api_url):
+    def _fail_fetch(api_key, api_url, **_kwargs):
         raise AssertionError("should not probe when explicit models are set")
 
     monkeypatch.setattr("hermes_cli.models.fetch_api_models", _fail_fetch)
