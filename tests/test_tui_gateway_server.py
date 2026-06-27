@@ -1341,8 +1341,12 @@ def test_tui_memory_sync_helper_calls_agent_after_completed_turn():
 
 def test_tui_memory_sync_helper_does_not_duplicate_run_conversation_sync():
     calls = []
+    flushes = []
     agent = types.SimpleNamespace(
-        _sync_external_memory_for_turn=lambda **kwargs: calls.append(kwargs)
+        _sync_external_memory_for_turn=lambda **kwargs: calls.append(kwargs),
+        _memory_manager=types.SimpleNamespace(
+            flush_pending=lambda timeout=None: flushes.append(timeout) or True
+        ),
     )
 
     server._sync_external_memory_after_tui_turn(
@@ -1355,6 +1359,7 @@ def test_tui_memory_sync_helper_does_not_duplicate_run_conversation_sync():
     )
 
     assert calls == []
+    assert flushes == [1.0]
 
 
 def test_resolve_model_uses_inference_model_env(monkeypatch):

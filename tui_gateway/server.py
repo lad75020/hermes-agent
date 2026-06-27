@@ -1022,7 +1022,21 @@ def _sync_external_memory_after_tui_turn(
     """
     if interrupted or not final_response or not original_user_message:
         return
+
+    def _flush_memory_manager() -> None:
+        manager = getattr(agent, "_memory_manager", None)
+        flush = getattr(manager, "flush_pending", None)
+        if callable(flush):
+            try:
+                flush(timeout=1.0)
+            except Exception:
+                logger.debug("TUI external memory flush failed", exc_info=True)
+
     if result and result.get("external_memory_synced"):
+        # run_conversation already enqueued the provider sync asynchronously.
+        # The TUI turn boundary still needs a short barrier so local providers
+        # (notably local_memory raw_turn capture) become visible by completion.
+        _flush_memory_manager()
         return
     sync = getattr(agent, "_sync_external_memory_for_turn", None)
     if not callable(sync):
@@ -1034,13 +1048,7 @@ def _sync_external_memory_after_tui_turn(
             interrupted=bool(interrupted),
             messages=messages,
         )
-        manager = getattr(agent, "_memory_manager", None)
-        flush = getattr(manager, "flush_pending", None)
-        if callable(flush):
-            try:
-                flush(timeout=1.0)
-            except Exception:
-                logger.debug("TUI external memory flush failed", exc_info=True)
+        _flush_memory_manager()
         if result is not None:
             result["external_memory_synced"] = True
     except Exception:
