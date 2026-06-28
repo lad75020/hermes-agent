@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional
@@ -672,15 +673,42 @@ class MemoryManager:
             self._background_futures.pop(future, None)
 
     def flush_pending(self, timeout: Optional[float] = None) -> bool:
-        """Block until queued sync/prefetch work has drained (False on timeout).
-        With a single worker, a sentinel task completing proves every earlier task ran."""
+        """Block until queued sync/prefetch work has drained.
+
+        Single-worker executor means submitting a sentinel and waiting on
+        it guarantees every previously-submitted manager task has run. Some
+        providers (notably Hindsight) enqueue their own internal writer work
+        inside ``sync_turn()``, so after the manager barrier completes we also
+        call provider-level ``flush_pending`` hooks when present.
+
+        Returns True only if every barrier completed within ``timeout`` (or no
+        executor/provider work exists). Used at real session boundaries and by
+        tests that need to assert provider state deterministically.
+        """
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
         executor = self._sync_executor
-        if executor is None:
-            return True
-        try:
-            executor.submit(lambda: None).result(timeout=timeout)
-        except Exception as e:
-            return isinstance(e, RuntimeError)  # executor already shut down — nothing pending
+        if executor is not None:
+            try:
+                fut = executor.submit(lambda: None)
+            except RuntimeError:
+                fut = None
+            if fut is not None:
+                try:
+                    wait_timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+                    fut.result(timeout=wait_timeout)
+                except Exception:
+                    return False
+
+        for provider in self._providers:
+            flush = getattr(provider, "flush_pending", None)
+            if not callable(flush):
+                continue
+            try:
+                wait_timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+                if not flush(timeout=wait_timeout):
+                    return False
+            except Exception:
+                return False
         return True
 
     def get_all_tool_schemas(self) -> list[dict[str, Any]]:

@@ -51,6 +51,7 @@ class _RecordingProvider(MemoryProvider):
         self.prefetched = []
         self.queued = []
         self.synced = []
+        self.flushed = []
 
     @property
     def name(self) -> str:
@@ -77,6 +78,10 @@ class _RecordingProvider(MemoryProvider):
 
     def get_tool_schemas(self):
         return []
+
+    def flush_pending(self, timeout=None):
+        self.flushed.append(timeout)
+        return True
 
 
 def _manager_with_recorder():
@@ -125,3 +130,9 @@ class TestMemoryManagerStripsScaffolding:
         mgr.flush_pending(timeout=5.0)
         assert provider.synced == []
 
+    def test_flush_pending_waits_for_provider_internal_queue(self):
+        mgr, provider = _manager_with_recorder()
+        mgr.sync_all("remember this", "Done.")
+        assert mgr.flush_pending(timeout=5.0) is True
+        assert provider.synced == ["remember this"]
+        assert provider.flushed
