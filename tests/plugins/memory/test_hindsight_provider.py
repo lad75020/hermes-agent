@@ -941,6 +941,34 @@ class TestSyncTurn:
         assert len(call_kwargs["items"]) == 1
         assert call_kwargs["items"][0]["context"] == "conversation between Hermes Agent and the User"
 
+    def test_sync_turn_waits_for_async_operation_before_queue_drains(self, provider, monkeypatch):
+        """Async retain is not durable until Hindsight reports the operation completed."""
+        provider._retain_async_wait_timeout = 5
+        provider._client.aretain_batch = AsyncMock(
+            return_value=SimpleNamespace(operation_id="op-1", operation_ids=None)
+        )
+        provider._client.operations = SimpleNamespace(
+            get_operation_status=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(status="processing"),
+                    SimpleNamespace(status="completed"),
+                ]
+            )
+        )
+        monkeypatch.setattr("plugins.memory.hindsight.time.sleep", lambda *_: None)
+
+        provider.sync_turn("hello", "hi")
+        assert provider.flush_pending(timeout=5.0) is True
+
+        provider._client.aretain_batch.assert_called_once()
+        assert provider._client.operations.get_operation_status.await_count == 2
+
+    def test_flush_pending_times_out_while_writer_still_busy(self, provider):
+        provider._ensure_writer()
+        provider._retain_queue.put(lambda: __import__("time").sleep(0.2))
+        assert provider.flush_pending(timeout=0.01) is False
+        provider._retain_queue.join()
+
     def test_sync_turn_custom_context(self, provider_with_config):
         p = provider_with_config(retain_context="my-agent")
         p.sync_turn("hello", "hi")

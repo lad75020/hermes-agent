@@ -39,6 +39,7 @@ import os
 import queue
 import sys
 import threading
+import time
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -1127,6 +1128,87 @@ class HindsightMemoryProvider(MemoryProvider):
             finally:
                 self._retain_queue.task_done()
 
+    def flush_pending(self, timeout: float | None = None) -> bool:
+        """Block until the provider's retain queue has drained.
+
+        MemoryManager.flush_pending() proves only that sync_turn() ran.  The
+        Hindsight provider then hands the actual write to its own single-writer
+        queue, so expose this second barrier for deterministic tests, TUI turn
+        boundaries, and session shutdown.
+        """
+        if self._writer_thread is None:
+            return True
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        while self._retain_queue.unfinished_tasks:
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+        return True
+
+    @staticmethod
+    def _operation_ids_from_response(response: Any) -> list[str]:
+        ids: list[str] = []
+        operation_ids = getattr(response, "operation_ids", None)
+        if isinstance(operation_ids, list):
+            ids.extend(str(op_id) for op_id in operation_ids if op_id)
+        operation_id = getattr(response, "operation_id", None)
+        if isinstance(operation_id, str) and operation_id:
+            op = operation_id
+            if op not in ids:
+                ids.append(op)
+        return ids
+
+    def _wait_for_operations(self, client: Any, operation_ids: list[str], *, bank_id: str) -> None:
+        """Wait for async Hindsight retain operations to become durable."""
+        if not operation_ids:
+            return
+        timeout = max(0, int(self._retain_async_wait_timeout or 0))
+        if timeout <= 0:
+            return
+        operations = getattr(client, "operations", None)
+        get_status = getattr(operations, "get_operation_status", None)
+        if not callable(get_status):
+            logger.debug(
+                "Hindsight async retain returned operations but client has no status API: %s",
+                operation_ids,
+            )
+            return
+        deadline = time.monotonic() + timeout
+        remaining = set(operation_ids)
+        while remaining:
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "Timed out waiting for Hindsight async retain operation(s): %s",
+                    sorted(remaining),
+                )
+                return
+            for op_id in list(remaining):
+                try:
+                    status_resp = self._run_sync(
+                        get_status(bank_id=bank_id, operation_id=op_id)
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Failed to poll Hindsight operation %s: %s",
+                        op_id,
+                        exc,
+                        exc_info=True,
+                    )
+                    continue
+                status = str(getattr(status_resp, "status", "") or "").lower()
+                if status in {"completed", "not_found"}:
+                    # Some Hindsight backends remove completed operation rows;
+                    # the status endpoint documents not_found/completed as
+                    # terminal for callers polling async jobs.
+                    remaining.discard(op_id)
+                elif status in {"failed", "cancelled"}:
+                    error = getattr(status_resp, "error_message", "") or ""
+                    raise RuntimeError(
+                        f"Hindsight async retain operation {op_id} {status}: {error}"
+                    )
+            if remaining:
+                time.sleep(0.5)
+
     def _register_atexit(self) -> None:
         """Register an idempotent atexit hook to drain the writer.
 
@@ -1258,6 +1340,12 @@ class HindsightMemoryProvider(MemoryProvider):
         self._timeout = _parse_int_setting(
             self._config.get("timeout") if self._config.get("timeout") is not None else os.environ.get("HINDSIGHT_TIMEOUT"),
             _DEFAULT_TIMEOUT,
+        )
+        self._retain_async_wait_timeout = _parse_int_setting(
+            self._config.get("retain_async_wait_timeout")
+            if self._config.get("retain_async_wait_timeout") is not None
+            else os.environ.get("HINDSIGHT_RETAIN_ASYNC_WAIT_TIMEOUT"),
+            self._timeout,
         )
         self._idle_timeout = _parse_int_setting(
             self._config.get("idle_timeout") if self._config.get("idle_timeout") is not None else os.environ.get("HINDSIGHT_IDLE_TIMEOUT"),
@@ -1677,7 +1765,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 item["update_mode"] = update_mode
             logger.debug("Hindsight retain: bank=%s, doc=%s, mode=%s, async=%s, content_len=%d, num_turns=%d",
                          bank_id, document_id, update_mode, retain_async_flag, len(content), num_turns)
-            self._run_hindsight_operation(
+            response = self._run_hindsight_operation(
                 lambda client: client.aretain_batch(
                     bank_id=bank_id,
                     items=[item],
@@ -1685,6 +1773,11 @@ class HindsightMemoryProvider(MemoryProvider):
                     retain_async=retain_async_flag,
                 )
             )
+            if retain_async_flag:
+                operation_ids = self._operation_ids_from_response(response)
+                if operation_ids:
+                    client = self._get_client()
+                    self._wait_for_operations(client, operation_ids, bank_id=bank_id)
             logger.debug("Hindsight retain succeeded")
 
         self._ensure_writer()
@@ -1858,7 +1951,7 @@ class HindsightMemoryProvider(MemoryProvider):
                         "Hindsight flush-on-switch: bank=%s, doc=%s, mode=%s, num_turns=%d",
                         self._bank_id, old_document_id, old_update_mode, len(old_turns),
                     )
-                    self._run_hindsight_operation(
+                    response = self._run_hindsight_operation(
                         lambda client: client.aretain_batch(
                             bank_id=self._bank_id,
                             items=[item],
@@ -1866,6 +1959,11 @@ class HindsightMemoryProvider(MemoryProvider):
                             retain_async=self._retain_async,
                         )
                     )
+                    if self._retain_async:
+                        operation_ids = self._operation_ids_from_response(response)
+                        if operation_ids:
+                            client = self._get_client()
+                            self._wait_for_operations(client, operation_ids, bank_id=self._bank_id)
                 except Exception as e:
                     logger.warning("Hindsight flush-on-switch failed: %s", e, exc_info=True)
 
@@ -1916,11 +2014,13 @@ class HindsightMemoryProvider(MemoryProvider):
                 self._retain_queue.put(_WRITER_SENTINEL)
             except Exception:
                 pass
-            writer.join(timeout=10.0)
+            join_timeout = max(10.0, float(self._retain_async_wait_timeout or 0) + 5.0)
+            writer.join(timeout=join_timeout)
             if writer.is_alive():
                 logger.warning(
-                    "Hindsight writer did not stop within 10s; "
+                    "Hindsight writer did not stop within %.0fs; "
                     "abandoning %d pending retain(s)",
+                    join_timeout,
                     self._retain_queue.qsize(),
                 )
         if self._prefetch_thread and self._prefetch_thread.is_alive():
