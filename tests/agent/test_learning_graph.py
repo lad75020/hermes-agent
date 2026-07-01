@@ -66,6 +66,39 @@ def test_skill_node_timestamp_uses_iso_usage_activity(tmp_path, monkeypatch):
     assert nodes["iso-skill"].timestamp == 1_777_550_400
 
 
+def test_skill_node_tolerates_non_mapping_metadata_from_fallback_parser(tmp_path, monkeypatch):
+    """Malformed-but-installed skills must not crash the journey graph.
+
+    Some imported skills have unquoted colons in YAML frontmatter. The shared
+    frontmatter parser then falls back to simple key:value parsing, which turns
+    nested ``metadata:`` into the string ``""``. The learning graph should still
+    render the rest of the skill catalog instead of assuming metadata is a dict.
+    """
+    skill_dir = tmp_path / "skills" / "openclaw-imports" / "homebrew"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: homebrew\n"
+        "description: Manage packages safely: install/upgrade/list/search/info\n"
+        "metadata:\n"
+        "  openclaw:\n"
+        "    emoji: \"🍺\"\n"
+        "---\n"
+        "# Homebrew\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        learning_graph,
+        "_load_usage",
+        lambda: {"homebrew": {"created_by": "agent", "use_count": 1}},
+    )
+
+    nodes = learning_graph.build_skill_nodes([("profile", tmp_path / "skills")])
+
+    assert nodes["homebrew"].category == "openclaw-imports"
+    assert nodes["homebrew"].related == []
+
+
 def test_memory_is_cards_split_on_separator(tmp_path):
     home = tmp_path / ".hermes"
     (home / "memories").mkdir(parents=True)
