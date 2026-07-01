@@ -223,3 +223,6 @@ native/fts5_cjk/*.so
 
 # Separate linked checkout used for Atropos experiments.
 tinker-atropos/
+.codebase-memory/.gitattributes
+.codebase-memory/graph.db.zst
+.codebase-memory/artifact.json
