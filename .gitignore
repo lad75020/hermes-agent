@@ -327,3 +327,7 @@ native/fts5_cjk/*.so
 apps/desktop/.dist-build*
 tinker-atropos/
 nohup.out
+.codebase-memory/.gitattributes
+.gitignore
+.codebase-memory/graph.db.zst
+.codebase-memory/artifact.json
