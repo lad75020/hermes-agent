@@ -31,7 +31,10 @@ def test_compress_context_emits_reasoning_json_message():
     agent._cached_system_prompt = None
     agent._vprint = MagicMock()
     agent._emit_warning = MagicMock()
+    agent.status_callback = None
+    agent.log_prefix = ""
     agent.commit_memory_session = MagicMock()
+    agent._compression_feasibility_checked = True
     agent.reasoning_callback = emitted.append
 
     compressed, system_prompt = agent._compress_context(
