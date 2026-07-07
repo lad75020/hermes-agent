@@ -48,6 +48,14 @@ def _frontmatter(text: str) -> dict[str, Any]:
         return {}
 
 
+def _hermes_meta(fm: dict[str, Any]) -> dict[str, Any]:
+    """``metadata.hermes`` as a dict, tolerant of the string-valued frontmatter
+    that ``parse_frontmatter``'s malformed-YAML fallback produces."""
+    meta = fm.get("metadata")
+    hermes = meta.get("hermes") if isinstance(meta, dict) else None
+    return hermes if isinstance(hermes, dict) else {}
+
+
 def _related(fm: dict[str, Any]) -> list[str]:
     raw = fm.get("related_skills")
     if raw is None:

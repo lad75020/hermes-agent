@@ -46,6 +46,73 @@ def test_list_authenticated_providers_includes_custom_providers(monkeypatch):
     )
 
 
+def test_list_authenticated_providers_can_skip_custom_provider_live_probe(monkeypatch):
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
+    fetch = lambda *a, **k: (_ for _ in ()).throw(AssertionError("unexpected probe"))
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", fetch)
+
+    providers = list_authenticated_providers(
+        user_providers={},
+        custom_providers=[
+            {
+                "name": "Slow Local",
+                "base_url": "http://127.0.0.1:8080/v1",
+                "api_key": "sk-local",
+                "model": "local-model",
+            }
+        ],
+        probe_custom_providers=False,
+    )
+
+    row = next(p for p in providers if p["slug"] == "custom:slow-local")
+    assert row["models"] == ["local-model"]
+    assert row["total_models"] == 1
+
+
+def test_list_authenticated_providers_can_probe_only_current_custom_provider(monkeypatch):
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
+
+    calls = []
+
+    def fetch(api_key, api_url, **kwargs):
+        calls.append(api_url)
+        if api_url == "http://active.local/v1":
+            return ["active-a", "active-b"]
+        raise AssertionError(f"unexpected probe for {api_url}")
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", fetch)
+
+    providers = list_authenticated_providers(
+        current_provider="custom:active-proxy",
+        user_providers={},
+        custom_providers=[
+            {
+                "name": "Active Proxy",
+                "base_url": "http://active.local/v1",
+                "api_key": "sk-active",
+                "model": "configured-active",
+            },
+            {
+                "name": "Offline Proxy",
+                "base_url": "http://offline.local/v1",
+                "api_key": "sk-offline",
+                "model": "configured-offline",
+            },
+        ],
+        probe_custom_providers=False,
+        probe_current_custom_provider=True,
+    )
+
+    active = next(p for p in providers if p["slug"] == "custom:active-proxy")
+    offline = next(p for p in providers if p["slug"] == "custom:offline-proxy")
+    assert calls == ["http://active.local/v1"]
+    assert active["is_current"] is True
+    assert active["models"] == ["active-a", "active-b"]
+    assert offline["models"] == ["configured-offline"]
+
+
 def test_resolve_provider_full_finds_named_custom_provider():
     """Explicit /model --provider should resolve saved custom_providers entries."""
     resolved = resolve_provider_full(
@@ -128,6 +195,29 @@ def test_active_bare_local_custom_endpoint_uses_live_models(monkeypatch):
     assert calls == [("", "http://localhost:11434/v1")]
     assert bare_custom["models"] == ["gemma4:e4b", "qwen3-coder", "llama3.2"]
     assert bare_custom["total_models"] == 3
+
+
+def test_list_authenticated_providers_can_probe_active_bare_custom_endpoint(monkeypatch):
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
+    monkeypatch.setattr(
+        "hermes_cli.models.fetch_api_models",
+        lambda api_key, api_url, **kwargs: ["gpt-4o", "gpt-4o-mini"],
+    )
+
+    providers = list_authenticated_providers(
+        current_provider="custom",
+        current_base_url="https://www.ccsub.net/v1",
+        current_model="gpt-4o",
+        user_providers={},
+        custom_providers=[],
+        probe_custom_providers=False,
+        probe_current_custom_provider=True,
+    )
+
+    bare_custom = next(p for p in providers if p["slug"] == "custom")
+    assert bare_custom["is_current"] is True
+    assert bare_custom["models"] == ["gpt-4o", "gpt-4o-mini"]
 
 
 def test_switch_model_accepts_explicit_bare_custom_current_endpoint(monkeypatch):
@@ -683,8 +773,8 @@ def test_custom_providers_uses_live_models_for_multi_model_endpoint(monkeypatch)
 
     calls = []
 
-    def fake_fetch_api_models(api_key, base_url, **_kwargs):
-        calls.append((api_key, base_url))
+    def fake_fetch_api_models(api_key, base_url, **_kwargs, **kwargs):
+        calls.append((api_key, base_url, kwargs))
         return ["gateway-model-a", "gateway-model-b", "gateway-model-c"]
 
     monkeypatch.setattr("hermes_cli.models.fetch_api_models", fake_fetch_api_models)
@@ -719,9 +809,9 @@ def test_custom_providers_uses_live_models_for_multi_model_endpoint(monkeypatch)
     )
 
     assert gateway_prov is not None, "Custom provider group not found in results"
-    assert calls == [("sk-gateway-key", "https://gateway.example.com/v1")], (
-        "fetch_api_models must be called with the custom provider's credentials"
-    )
+    assert calls == [
+        ("sk-gateway-key", "https://gateway.example.com/v1", {"headers": None})
+    ], "fetch_api_models must be called with the custom provider's credentials"
     assert gateway_prov["models"] == [
         "gateway-model-a",
         "gateway-model-b",
@@ -766,6 +856,115 @@ def test_custom_providers_probes_single_model_local_endpoint_without_key(monkeyp
     assert row["total_models"] == 3
 
 
+def test_custom_provider_live_model_probe_uses_extra_headers(monkeypatch):
+    """custom_providers[].extra_headers must apply to live /models probes."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+
+    calls = []
+
+    def fake_fetch_api_models(api_key, base_url, **kwargs):
+        calls.append((api_key, base_url, kwargs))
+        return ["gateway-model"]
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", fake_fetch_api_models)
+
+    providers = list_authenticated_providers(
+        current_provider="openrouter",
+        current_base_url="https://openrouter.ai/api/v1",
+        custom_providers=[
+            {
+                "name": "LLM Proxy",
+                "api_key": "local-key",
+                "base_url": "http://localhost:8081/v1",
+                "extra_headers": {
+                    "sleeve-harness": "hermes",
+                    "sleeve-base-url": "http://localhost:8081/v1",
+                },
+            }
+        ],
+        max_models=50,
+    )
+
+    gateway_prov = next(
+        (
+            p
+            for p in providers
+            if p.get("api_url") == "http://localhost:8081/v1"
+        ),
+        None,
+    )
+
+    assert gateway_prov is not None
+    assert calls == [
+        (
+            "local-key",
+            "http://localhost:8081/v1",
+            {
+                "headers": {
+                    "sleeve-harness": "hermes",
+                    "sleeve-base-url": "http://localhost:8081/v1",
+                }
+            },
+        )
+    ]
+    assert gateway_prov["models"] == ["gateway-model"]
+
+
+def test_same_endpoint_different_extra_headers_not_collapsed(monkeypatch):
+    """Entries sharing (api_url, credential, api_mode) but declaring different
+    extra_headers must NOT collapse into one picker row — each is a distinct
+    header-authenticated endpoint (e.g. per-tenant routing behind one proxy)
+    and must probe /models with its own headers."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+
+    calls = []
+
+    def fake_fetch_api_models(api_key, base_url, **kwargs):
+        calls.append((api_key, base_url, kwargs.get("headers")))
+        # Return a per-tenant model list keyed by the routing header so we can
+        # assert each row got its OWN probe rather than a shared one.
+        tenant = (kwargs.get("headers") or {}).get("X-Tenant", "none")
+        return [f"model-{tenant}"]
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", fake_fetch_api_models)
+
+    providers = list_authenticated_providers(
+        current_provider="openrouter",
+        current_base_url="https://openrouter.ai/api/v1",
+        custom_providers=[
+            {
+                "name": "Proxy Tenant A",
+                "api_key": "shared-key",
+                "base_url": "http://localhost:8081/v1",
+                "extra_headers": {"X-Tenant": "a"},
+            },
+            {
+                "name": "Proxy Tenant B",
+                "api_key": "shared-key",
+                "base_url": "http://localhost:8081/v1",
+                "extra_headers": {"X-Tenant": "b"},
+            },
+        ],
+        max_models=50,
+    )
+
+    rows = [
+        p for p in providers if p.get("api_url") == "http://localhost:8081/v1"
+    ]
+    # Two distinct rows, not one collapsed row.
+    assert len(rows) == 2, f"expected 2 rows, got {len(rows)}: {rows}"
+
+    # Each tenant was probed with its OWN header set (order-independent).
+    assert ("shared-key", "http://localhost:8081/v1", {"X-Tenant": "a"}) in calls
+    assert ("shared-key", "http://localhost:8081/v1", {"X-Tenant": "b"}) in calls
+
+    # Each row surfaces the model list its own headers unlocked.
+    models_by_row = {tuple(r["models"]) for r in rows}
+    assert models_by_row == {("model-a",), ("model-b",)}
+
+
 def test_custom_providers_discover_models_false_keeps_explicit_subset(monkeypatch):
     """Custom providers (section 4) with ``discover_models: false`` must keep
     their explicit ``models:`` subset instead of replacing it with live
@@ -780,8 +979,8 @@ def test_custom_providers_discover_models_false_keeps_explicit_subset(monkeypatc
 
     calls = []
 
-    def fake_fetch_api_models(api_key, base_url, **_kwargs):
-        calls.append((api_key, base_url))
+    def fake_fetch_api_models(api_key, base_url, **_kwargs, **kwargs):
+        calls.append((api_key, base_url, kwargs))
         return ["gateway-model-a", "gateway-model-b", "gateway-model-c"]
 
     monkeypatch.setattr("hermes_cli.models.fetch_api_models", fake_fetch_api_models)
@@ -836,8 +1035,8 @@ def test_custom_providers_discover_models_false_string_is_normalised(monkeypatch
 
     calls = []
 
-    def fake_fetch_api_models(api_key, base_url, **_kwargs):
-        calls.append((api_key, base_url))
+    def fake_fetch_api_models(api_key, base_url, **_kwargs, **kwargs):
+        calls.append((api_key, base_url, kwargs))
         return ["live-a", "live-b"]
 
     monkeypatch.setattr("hermes_cli.models.fetch_api_models", fake_fetch_api_models)
@@ -868,6 +1067,79 @@ def test_custom_providers_discover_models_false_string_is_normalised(monkeypatch
     assert gateway_prov is not None
     assert calls == [], "string 'false' must disable live discovery"
     assert gateway_prov["models"] == ["only-model"]
+
+
+def test_custom_providers_discover_models_false_list_of_dict_ids(monkeypatch):
+    """List-of-dicts ``models: [{id: ...}]`` must be preserved as configured
+    model IDs when discovery is disabled."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+
+    calls = []
+
+    def fake_fetch_api_models(api_key, base_url, **kwargs):
+        calls.append((api_key, base_url, kwargs))
+        return ["live-a", "live-b"]
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", fake_fetch_api_models)
+
+    custom_providers = [
+        {
+            "name": "static-gateway",
+            "api_key": "***",
+            "base_url": "https://router.example.com/v1",
+            "discover_models": False,
+            "model": "claude-3-7-sonnet",
+            "models": [
+                {"id": "claude-3-7-sonnet"},
+                {"id": "claude-sonnet-4"},
+            ],
+        }
+    ]
+
+    providers = list_authenticated_providers(
+        current_provider="openrouter",
+        current_base_url="https://openrouter.ai/api/v1",
+        custom_providers=custom_providers,
+        max_models=50,
+    )
+
+    gateway_prov = next(
+        (p for p in providers if p.get("api_url") == "https://router.example.com/v1"),
+        None,
+    )
+
+    assert gateway_prov is not None
+    assert calls == [], "discover_models: false must skip live discovery"
+    assert gateway_prov["models"] == ["claude-3-7-sonnet", "claude-sonnet-4"]
+    assert gateway_prov["total_models"] == 2
+
+
+def test_list_of_dict_models_prefers_id_over_label(monkeypatch):
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+
+    providers = list_authenticated_providers(
+        current_provider="openrouter",
+        current_base_url="https://openrouter.ai/api/v1",
+        custom_providers=[
+            {
+                "name": "static-gateway",
+                "base_url": "https://router.example.com/v1",
+                "discover_models": False,
+                "models": [{"id": "real-model-id", "name": "Friendly Label"}],
+            }
+        ],
+        max_models=50,
+    )
+
+    gateway_prov = next(
+        (p for p in providers if p.get("api_url") == "https://router.example.com/v1"),
+        None,
+    )
+
+    assert gateway_prov is not None
+    assert gateway_prov["models"] == ["real-model-id"]
 
 
 def test_resolve_custom_provider_passes_key_env():
