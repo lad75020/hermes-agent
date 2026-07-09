@@ -1564,6 +1564,17 @@ def anthropic_prompt_cache_policy(
     model_lower = eff_model.lower()
     provider_lower = eff_provider.lower()
     is_claude = "claude" in model_lower
+    # Kimi / Moonshot family via OpenRouter: same cache_control wire format
+    # as Claude on OpenRouter (envelope layout).  Without this branch
+    # moonshotai/kimi-k2.6 falls through to (False, False), serving ~1%
+    # cache hits on 64K-token prompts and re-billing the full prompt on
+    # every turn.  Observed within-turn progression with cache enabled:
+    # 1% → 67% → 84% → 97% (#25970).  Reuses the canonical family matcher
+    # (covers bare k1./k2./k25 release slugs the substring check missed).
+    from agent.anthropic_adapter import _model_name_is_kimi_family
+    is_kimi = (
+        _model_name_is_kimi_family(eff_model) or "moonshot" in model_lower
+    )
     is_openrouter = base_url_host_matches(eff_base_url, "openrouter.ai")
     # Nous Portal proxies to OpenRouter behind the scenes — identical
     # OpenAI-wire envelope cache_control semantics. Treat it as an
@@ -1577,7 +1588,7 @@ def anthropic_prompt_cache_policy(
 
     if is_native_anthropic:
         return True, True
-    if (is_openrouter or is_nous_portal) and is_claude:
+    if (is_openrouter or is_nous_portal) and (is_claude or is_kimi):
         return True, False
     # Nous Portal Qwen (e.g. qwen3.6-plus) takes the same envelope-layout
     # cache_control path as Portal Claude. Portal proxies to OpenRouter
@@ -2115,12 +2126,12 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     except Exception as _mw_err:
         logger.debug("tool_request middleware error: %s", _mw_err)
 
-    # Check plugin hooks for a block directive before executing anything.
+    # Check plugin hooks for a block or approval directive before executing.
     block_message: Optional[str] = None
     if not pre_tool_block_checked:
         try:
-            from hermes_cli.plugins import get_pre_tool_call_block_message
-            block_message = get_pre_tool_call_block_message(
+            from hermes_cli.plugins import resolve_pre_tool_block
+            block_message = resolve_pre_tool_block(
                 function_name,
                 function_args,
                 task_id=effective_task_id or "",
@@ -2131,7 +2142,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 middleware_trace=list(_tool_middleware_trace),
             )
         except Exception:
-            pass
+            block_message = None
     if block_message is not None:
         result = json.dumps({"error": block_message}, ensure_ascii=False)
         try:
