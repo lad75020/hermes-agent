@@ -2063,7 +2063,6 @@ def list_authenticated_providers(
             discover = ep_cfg.get("discover_models", True)
             if isinstance(discover, str):
                 discover = discover.lower() not in {"false", "no", "0"}
-            has_explicit_models = bool(models_list)
             _ep_url_norm = str(api_url).strip().rstrip("/").lower()
             _ep_slug_norm = str(ep_name).strip().lower()
             _ep_custom_slug_norm = custom_provider_slug(display_name).lower()
@@ -2076,8 +2075,13 @@ def list_authenticated_providers(
                     and _ep_url_norm == _current_base_url_norm
                 )
             )
-            should_probe = _can_probe_custom_provider(row_is_current=_ep_is_current) and bool(api_url) and discover and (
-                bool(api_key) or not has_explicit_models
+            should_probe = _can_probe_custom_provider(
+                row_is_current=_ep_is_current
+            ) and _should_probe_custom_models(
+                api_url,
+                api_key=api_key,
+                explicit_model_count=len(models_list),
+                discover=discover,
             )
             if should_probe:
                 try:
@@ -2338,14 +2342,16 @@ def list_authenticated_providers(
             #   the (possibly partial) ``models:`` subset configured for
             #   context-length overrides with the full live catalog.
             #   This is the Bifrost / aggregator-gateway case.
-            # - Without an api_key but with an explicit ``models:`` list
-            #   (or top-level ``model:``), the user is narrowing a public
-            #   endpoint to a specific subset (e.g. ollama.com /v1/models
-            #   returns 35 models but the user only wants 4). Preserve the
-            #   explicit list and skip live discovery.
             # - Without an api_key AND no explicit models, fall through to
             #   live discovery so bare-endpoint custom providers (local
             #   llama.cpp / Ollama servers) still appear populated.
+            # - Without an api_key and exactly one saved model on a loopback
+            #   endpoint, probe too: local Ollama/OMLX profiles commonly save
+            #   only the active model while /models exposes the full catalog.
+            # - Without an api_key and a multi-model explicit list, preserve
+            #   the list and skip discovery; the user is narrowing a public
+            #   endpoint to a specific subset (e.g. ollama.com /v1/models
+            #   returns 35 models but the user only wants 4).
             # - When discover_models: false is set, skip live discovery and
             #   keep the explicit ``models:`` list regardless of whether an
             #   api_key is present. This supports endpoints that expose a
@@ -2359,9 +2365,12 @@ def list_authenticated_providers(
             )
             should_probe = (
                 _can_probe_custom_provider(row_is_current=_grp_is_current)
-                and bool(api_url)
-                and (bool(api_key) or not grp["models"])
-                and grp.get("discover_models", True)
+                and _should_probe_custom_models(
+                    api_url,
+                    api_key=api_key,
+                    explicit_model_count=len(grp["models"]),
+                    discover=grp.get("discover_models", True),
+                )
             )
             if should_probe:
                 try:
@@ -2370,8 +2379,9 @@ def list_authenticated_providers(
                     live_models = fetch_api_models(
                         api_key,
                         api_url,
+                        timeout=1.5,
                         headers=grp.get("extra_headers") or None,
-                    , timeout=1.5)
+                    )
                     if live_models:
                         grp["models"] = live_models
                         grp["total_models"] = len(live_models)

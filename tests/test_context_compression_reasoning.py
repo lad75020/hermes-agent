@@ -29,6 +29,9 @@ def test_compress_context_emits_reasoning_json_message():
     agent._invalidate_system_prompt = MagicMock()
     agent._build_system_prompt = MagicMock(return_value="system prompt")
     agent._cached_system_prompt = None
+    agent.compression_enabled = False
+    agent.status_callback = None
+    agent.log_prefix = ""
     agent._vprint = MagicMock()
     agent._emit_warning = MagicMock()
     agent.commit_memory_session = MagicMock()

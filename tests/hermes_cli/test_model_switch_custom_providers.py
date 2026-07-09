@@ -773,7 +773,7 @@ def test_custom_providers_uses_live_models_for_multi_model_endpoint(monkeypatch)
 
     calls = []
 
-    def fake_fetch_api_models(api_key, base_url, **_kwargs, **kwargs):
+    def fake_fetch_api_models(api_key, base_url, **kwargs):
         calls.append((api_key, base_url, kwargs))
         return ["gateway-model-a", "gateway-model-b", "gateway-model-c"]
 
@@ -810,7 +810,11 @@ def test_custom_providers_uses_live_models_for_multi_model_endpoint(monkeypatch)
 
     assert gateway_prov is not None, "Custom provider group not found in results"
     assert calls == [
-        ("sk-gateway-key", "https://gateway.example.com/v1", {"headers": None})
+        (
+            custom_providers[0]["api_key"],
+            "https://gateway.example.com/v1",
+            {"timeout": 1.5, "headers": None},
+        )
     ], "fetch_api_models must be called with the custom provider's credentials"
     assert gateway_prov["models"] == [
         "gateway-model-a",
@@ -901,10 +905,11 @@ def test_custom_provider_live_model_probe_uses_extra_headers(monkeypatch):
             "local-key",
             "http://localhost:8081/v1",
             {
+                "timeout": 1.5,
                 "headers": {
                     "sleeve-harness": "hermes",
                     "sleeve-base-url": "http://localhost:8081/v1",
-                }
+                },
             },
         )
     ]
@@ -979,7 +984,7 @@ def test_custom_providers_discover_models_false_keeps_explicit_subset(monkeypatc
 
     calls = []
 
-    def fake_fetch_api_models(api_key, base_url, **_kwargs, **kwargs):
+    def fake_fetch_api_models(api_key, base_url, **kwargs):
         calls.append((api_key, base_url, kwargs))
         return ["gateway-model-a", "gateway-model-b", "gateway-model-c"]
 
@@ -1035,7 +1040,7 @@ def test_custom_providers_discover_models_false_string_is_normalised(monkeypatch
 
     calls = []
 
-    def fake_fetch_api_models(api_key, base_url, **_kwargs, **kwargs):
+    def fake_fetch_api_models(api_key, base_url, **kwargs):
         calls.append((api_key, base_url, kwargs))
         return ["live-a", "live-b"]
 
