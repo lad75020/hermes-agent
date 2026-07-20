@@ -1004,6 +1004,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self._session_db_lock: Optional[asyncio.Lock] = None  # Single-flight for lazy init
         # Concurrency cap shared across all agent-serving endpoints
         # (/v1/chat/completions, /v1/responses, /v1/runs). Read from
         # config.yaml gateway.api_server.max_concurrent_runs; 0 disables
@@ -1764,44 +1765,81 @@ class APIServerAdapter(BasePlatformAdapter):
     # Session DB helper
     # ------------------------------------------------------------------
 
+    def _open_and_cache_session_db(self, home) -> Optional[Any]:
+        """Sync core: return the cached SessionDB for ``home``, opening it once.
+
+        Shared by the sync (``_ensure_session_db``) and async
+        (``_ensure_session_db_async``) entry points so both honor the same
+        per-profile cache. Deliberately does NOT write into ``self._session_db``
+        — that stays reserved for an explicit test/manual override, so the first
+        profile served can't pin every later request to its DB.
+        """
+        from hermes_state import SessionDB
+
+        key = str(home)
+        cache = getattr(self, "_session_dbs", None)
+        if cache is None:
+            cache = {}
+            self._session_dbs = cache
+        db = cache.get(key)
+        if db is None:
+            db = SessionDB(db_path=home / "state.db")
+            cache[key] = db
+        return db
+
     def _ensure_session_db(self):
         """Lazily initialise and return the SessionDB for the active profile home.
 
         Sessions are persisted to ``state.db`` so that ``hermes sessions list``
         shows API-server conversations alongside CLI and gateway ones.
-        """
-        if self._session_db is None:
-            try:
-                from hermes_state import SessionDB
-                self._session_db = SessionDB()
-            except Exception as e:
-                logger.debug("SessionDB unavailable for API server: %s", e)
-        return self._session_db
 
-    def _maybe_auto_title_api_session(
-        self,
-        session_id: Optional[str],
-        assistant_response: str,
-        conversation_history: Optional[List[Dict[str, Any]]] = None,
-    ) -> None:
-        """Name an API-created session from its first assistant response.
-
-        Runs in a fire-and-forget background thread via title_generator so the
-        API response path is never delayed.  The title is stored in the
-        existing SessionDB ``title`` column; no schema changes are needed.
+        Under multiplex ``/p/<profile>/`` requests the profile runtime scope
+        redirects ``get_hermes_home()``, so each profile gets its own DB —
+        never the default profile's file. Synchronous: used by ``_create_agent``
+        (itself sync, and run in both loop and worker contexts). Request
+        handlers use ``_ensure_session_db_async`` to keep the SQLite open off
+        the event loop.
         """
-        if not session_id or not assistant_response:
-            return
+        # Explicit override (tests / manual wiring) wins.
+        if self._session_db is not None:
+            return self._session_db
         try:
-            from agent.title_generator import maybe_auto_title_from_response
-            maybe_auto_title_from_response(
-                self._ensure_session_db(),
-                session_id,
-                assistant_response,
-                conversation_history or [],
-            )
-        except Exception:
-            logger.debug("Failed to schedule API session auto-title", exc_info=True)
+            from hermes_constants import get_hermes_home
+
+            return self._open_and_cache_session_db(get_hermes_home())
+        except Exception as e:
+            logger.debug("SessionDB unavailable for API server: %s", e)
+            return None
+
+    async def _ensure_session_db_async(self):
+        """Async variant for request handlers: offload the SQLite open/schema
+        init off the single aiohttp event-loop thread.
+
+        The active profile home is captured on the loop thread (its runtime
+        scope is not visible inside ``asyncio.to_thread``); only the blocking
+        construction runs in the worker. A single-flight lock prevents duplicate
+        concurrent construction for the same home.
+        """
+        if self._session_db is not None:
+            return self._session_db
+        try:
+            from hermes_constants import get_hermes_home
+
+            home = get_hermes_home()
+            key = str(home)
+            cache = getattr(self, "_session_dbs", None)
+            if cache is not None and cache.get(key) is not None:
+                return cache[key]
+            if self._session_db_lock is None:
+                self._session_db_lock = asyncio.Lock()
+            async with self._session_db_lock:
+                cache = getattr(self, "_session_dbs", None)
+                if cache is not None and cache.get(key) is not None:
+                    return cache[key]
+                return await asyncio.to_thread(self._open_and_cache_session_db, home)
+        except Exception as e:
+            logger.debug("SessionDB unavailable for API server: %s", e)
+            return None
 
     # ------------------------------------------------------------------
     # Agent creation helper
@@ -1914,6 +1952,7 @@ class APIServerAdapter(BasePlatformAdapter):
         """
         from run_agent import AIAgent
         from gateway.run import (
+            _checkpoint_agent_kwargs,
             _current_max_iterations,
             _resolve_runtime_agent_kwargs,
             _resolve_gateway_model,
@@ -1995,6 +2034,7 @@ class APIServerAdapter(BasePlatformAdapter):
         agent = AIAgent(
             model=model,
             **runtime_kwargs,
+            **_checkpoint_agent_kwargs(user_config),
             max_iterations=max_iterations,
             quiet_mode=True,
             verbose_logging=False,
@@ -2353,21 +2393,25 @@ class APIServerAdapter(BasePlatformAdapter):
             return {}, web.json_response(_openai_error("Request body must be a JSON object"), status=400)
         return body, None
 
-    def _get_existing_session_or_404(self, session_id: str) -> tuple[Optional[Dict[str, Any]], Optional["web.Response"]]:
-        db = self._ensure_session_db()
+    async def _get_existing_session_or_404(self, session_id: str) -> tuple[Optional[Dict[str, Any]], Optional["web.Response"]]:
+        db = await self._ensure_session_db_async()
         if db is None:
             return None, web.json_response(_openai_error("Session database unavailable", code="session_db_unavailable"), status=503)
-        session = db.get_session(session_id)
+        # Offload the blocking SQLite read off the event loop (CWE/perf: the
+        # API server is single-threaded aiohttp; a sync SessionDB call here
+        # freezes every in-flight request, see PR discussion on event-loop
+        # blocking SQLite in the gateway surface).
+        session = await asyncio.to_thread(db.get_session, session_id)
         if not session:
             return None, web.json_response(_openai_error(f"Session not found: {session_id}", code="session_not_found"), status=404)
         return session, None
 
-    def _conversation_history_for_session(self, session_id: str) -> List[Dict[str, Any]]:
-        db = self._ensure_session_db()
+    async def _conversation_history_for_session(self, session_id: str) -> List[Dict[str, Any]]:
+        db = await self._ensure_session_db_async()
         if db is None:
             return []
         try:
-            return db.get_messages_as_conversation(session_id)
+            return await asyncio.to_thread(db.get_messages_as_conversation, session_id)
         except Exception as exc:
             logger.warning("Failed to load session history for %s: %s", session_id, exc)
             return []
@@ -2378,7 +2422,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if auth_err:
             return auth_err
 
-        db = self._ensure_session_db()
+        db = await self._ensure_session_db_async()
         if db is None:
             return web.json_response(_openai_error("Session database unavailable", code="session_db_unavailable"), status=503)
 
@@ -2386,7 +2430,7 @@ class APIServerAdapter(BasePlatformAdapter):
         offset = self._parse_nonnegative_int(request.query.get("offset"), default=0, maximum=1_000_000)
         source = request.query.get("source") or None
         include_children = _coerce_request_bool(request.query.get("include_children"), default=False)
-        sessions = db.list_sessions_rich(
+        sessions = await asyncio.to_thread(db.list_sessions_rich,
             source=source,
             limit=limit,
             offset=offset,
@@ -2402,7 +2446,14 @@ class APIServerAdapter(BasePlatformAdapter):
         })
 
     async def _handle_create_session(self, request: "web.Request") -> "web.Response":
-        """POST /api/sessions — create an empty Hermes session row."""
+        """POST /api/sessions -- create an empty Hermes session row.
+
+        The existence check, insert, title handling, and invalid-title
+        rollback run as a single off-loop operation to avoid a TOCTOU
+        window between the duplicate check and the insert (concurrent
+        same-ID creates could otherwise both pass the check and both
+        return 201 via the ON CONFLICT enrichment upsert).
+        """
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -2410,7 +2461,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if err:
             return err
 
-        db = self._ensure_session_db()
+        db = await self._ensure_session_db_async()
         if db is None:
             return web.json_response(_openai_error("Session database unavailable", code="session_db_unavailable"), status=503)
 
@@ -2421,22 +2472,68 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.json_response(_openai_error("Invalid session ID", code="invalid_session_id"), status=400)
         if len(session_id) > self._MAX_SESSION_HEADER_LEN:
             return web.json_response(_openai_error("Session ID too long", code="invalid_session_id"), status=400)
-        if db.get_session(session_id):
-            return web.json_response(_openai_error(f"Session already exists: {session_id}", code="session_exists"), status=409)
 
         model = body.get("model") or self._model_name
         system_prompt = body.get("system_prompt")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_prompt must be a string", code="invalid_system_prompt"), status=400)
-        db.create_session(session_id, "api_server", model=str(model) if model else None, system_prompt=system_prompt)
         title = body.get("title")
-        if title is not None:
-            try:
-                db.set_session_title(session_id, str(title))
-            except ValueError as exc:
-                db.delete_session(session_id)
-                return web.json_response(_openai_error(str(exc), code="invalid_title"), status=400)
-        session = db.get_session(session_id) or {"id": session_id, "source": "api_server", "model": model, "title": title}
+
+        # Run the entire check-insert-title sequence inside a single
+        # _execute_write call (BEGIN IMMEDIATE + commit) so the existence
+        # check and the insert are atomic at the SQLite level.  Two
+        # concurrent requests for the same ID serialize here: the second
+        # one blocks on the write lock and sees the row the first inserted.
+        def _do_create():
+            def _atomic(conn):
+                row = conn.execute(
+                    "SELECT id FROM sessions WHERE id = ?", (session_id,)
+                ).fetchone()
+                if row:
+                    return None, "exists"
+                import time as _time
+                conn.execute(
+                    """INSERT INTO sessions (
+                       id, source, model, system_prompt, started_at
+                    ) VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        session_id,
+                        "api_server",
+                        str(model) if model else None,
+                        system_prompt,
+                        _time.time(),
+                    ),
+                )
+                if title is not None:
+                    clean_title = db.sanitize_title(str(title))
+                    if clean_title:
+                        conflict = conn.execute(
+                            "SELECT id FROM sessions WHERE title = ? AND id != ?",
+                            (clean_title, session_id),
+                        ).fetchone()
+                        if conflict:
+                            conn.execute(
+                                "DELETE FROM sessions WHERE id = ?", (session_id,)
+                            )
+                            return None, f"title:Title already in use by session {conflict['id']}"
+                    conn.execute(
+                        "UPDATE sessions SET title = ? WHERE id = ?",
+                        (clean_title, session_id),
+                    )
+                session_row = conn.execute(
+                    "SELECT * FROM sessions WHERE id = ?", (session_id,)
+                ).fetchone()
+                return (dict(session_row) if session_row else {
+                    "id": session_id, "source": "api_server",
+                    "model": model, "title": title,
+                }), None
+            return db._execute_write(_atomic)
+
+        session, err = await asyncio.to_thread(_do_create)
+        if err == "exists":
+            return web.json_response(_openai_error(f"Session already exists: {session_id}", code="session_exists"), status=409)
+        if err and err.startswith("title:"):
+            return web.json_response(_openai_error(err[len("title:"):], code="invalid_title"), status=400)
         return web.json_response({"object": "hermes.session", "session": self._session_response(session)}, status=201)
 
     async def _handle_get_session(self, request: "web.Request") -> "web.Response":
@@ -2444,7 +2541,7 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
-        session, err = self._get_existing_session_or_404(request.match_info["session_id"])
+        session, err = await self._get_existing_session_or_404(request.match_info["session_id"])
         if err:
             return err
         return web.json_response({"object": "hermes.session", "session": self._session_response(session)})
@@ -2455,7 +2552,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if auth_err:
             return auth_err
         session_id = request.match_info["session_id"]
-        session, err = self._get_existing_session_or_404(session_id)
+        session, err = await self._get_existing_session_or_404(session_id)
         if err:
             return err
         body, err = await self._read_json_body(request)
@@ -2466,15 +2563,15 @@ class APIServerAdapter(BasePlatformAdapter):
         if unknown:
             return web.json_response(_openai_error(f"Unsupported session fields: {', '.join(unknown)}", code="unsupported_session_field"), status=400)
 
-        db = self._ensure_session_db()
+        db = await self._ensure_session_db_async()
         if "title" in body:
             try:
-                db.set_session_title(session_id, "" if body["title"] is None else str(body["title"]))
+                await asyncio.to_thread(db.set_session_title, session_id, "" if body["title"] is None else str(body["title"]))
             except ValueError as exc:
                 return web.json_response(_openai_error(str(exc), code="invalid_title"), status=400)
         if body.get("end_reason"):
-            db.end_session(session_id, str(body["end_reason"]))
-        session = db.get_session(session_id) or session
+            await asyncio.to_thread(db.end_session, session_id, str(body["end_reason"]))
+        session = await asyncio.to_thread(db.get_session, session_id) or session
         return web.json_response({"object": "hermes.session", "session": self._session_response(session)})
 
     async def _handle_delete_session(self, request: "web.Request") -> "web.Response":
@@ -2483,11 +2580,11 @@ class APIServerAdapter(BasePlatformAdapter):
         if auth_err:
             return auth_err
         session_id = request.match_info["session_id"]
-        session, err = self._get_existing_session_or_404(session_id)
+        session, err = await self._get_existing_session_or_404(session_id)
         if err:
             return err
-        db = self._ensure_session_db()
-        deleted = db.delete_session(session_id)
+        db = await self._ensure_session_db_async()
+        deleted = await asyncio.to_thread(db.delete_session, session_id)
         return web.json_response({"object": "hermes.session.deleted", "id": session_id, "deleted": bool(deleted)})
 
     async def _handle_session_messages(self, request: "web.Request") -> "web.Response":
@@ -2496,12 +2593,12 @@ class APIServerAdapter(BasePlatformAdapter):
         if auth_err:
             return auth_err
         session_id = request.match_info["session_id"]
-        _, err = self._get_existing_session_or_404(session_id)
+        _, err = await self._get_existing_session_or_404(session_id)
         if err:
             return err
-        db = self._ensure_session_db()
-        resolved_id = db.resolve_resume_session_id(session_id)
-        messages = db.get_messages(resolved_id)
+        db = await self._ensure_session_db_async()
+        resolved_id = await asyncio.to_thread(db.resolve_resume_session_id, session_id)
+        messages = await asyncio.to_thread(db.get_messages, resolved_id)
         return web.json_response({
             "object": "list",
             "session_id": resolved_id,
@@ -2514,45 +2611,45 @@ class APIServerAdapter(BasePlatformAdapter):
         if auth_err:
             return auth_err
         source_id = request.match_info["session_id"]
-        source, err = self._get_existing_session_or_404(source_id)
+        source, err = await self._get_existing_session_or_404(source_id)
         if err:
             return err
         body, err = await self._read_json_body(request)
         if err:
             return err
-        db = self._ensure_session_db()
+        db = await self._ensure_session_db_async()
         fork_id = str(body.get("id") or body.get("session_id") or f"api_{int(time.time())}_{uuid.uuid4().hex[:8]}").strip()
         if not fork_id or re.search(r'[\r\n\x00]', fork_id):
             return web.json_response(_openai_error("Invalid session ID", code="invalid_session_id"), status=400)
-        if db.get_session(fork_id):
+        if await asyncio.to_thread(db.get_session, fork_id):
             return web.json_response(_openai_error(f"Session already exists: {fork_id}", code="session_exists"), status=409)
 
         # Match the CLI /branch semantics: mark the original as branched, then
         # create a child session that carries the transcript forward. This uses
         # SessionDB's native parent_session_id/end_reason visibility model rather
         # than inventing a parallel fork store.
-        db.end_session(source_id, "branched")
-        db.create_session(
+        await asyncio.to_thread(db.end_session, source_id, "branched")
+        await asyncio.to_thread(db.create_session,
             fork_id,
             "api_server",
             model=source.get("model"),
             system_prompt=source.get("system_prompt"),
             parent_session_id=source_id,
         )
-        messages = db.get_messages(source_id)
-        db.replace_messages(fork_id, messages)
+        messages = await asyncio.to_thread(db.get_messages, source_id)
+        await asyncio.to_thread(db.replace_messages, fork_id, messages)
         title = body.get("title")
         if title is None:
             base = source.get("title") or "fork"
             try:
-                title = db.get_next_title_in_lineage(base)
+                title = await asyncio.to_thread(db.get_next_title_in_lineage, base)
             except Exception:
                 title = f"{base} fork"
         try:
-            db.set_session_title(fork_id, str(title))
+            await asyncio.to_thread(db.set_session_title, fork_id, str(title))
         except ValueError as exc:
             return web.json_response(_openai_error(str(exc), code="invalid_title"), status=400)
-        fork = db.get_session(fork_id) or {"id": fork_id, "parent_session_id": source_id}
+        fork = await asyncio.to_thread(db.get_session, fork_id) or {"id": fork_id, "parent_session_id": source_id}
         return web.json_response({"object": "hermes.session", "session": self._session_response(fork)}, status=201)
 
     @_admit_api_agent_request
@@ -2562,7 +2659,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if key_err is not None:
             return key_err
         session_id = request.match_info["session_id"]
-        _, err = self._get_existing_session_or_404(session_id)
+        _, err = await self._get_existing_session_or_404(session_id)
         if err:
             return err
         body, err = await self._read_json_body(request)
@@ -2574,7 +2671,7 @@ class APIServerAdapter(BasePlatformAdapter):
         system_prompt = body.get("system_message") or body.get("instructions")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
-        history = self._conversation_history_for_session(session_id)
+        history = await self._conversation_history_for_session(session_id)
         result, usage = await self._run_agent(
             user_message=user_message,
             conversation_history=history,
@@ -2604,7 +2701,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if key_err is not None:
             return key_err
         session_id = request.match_info["session_id"]
-        _, err = self._get_existing_session_or_404(session_id)
+        _, err = await self._get_existing_session_or_404(session_id)
         if err:
             return err
         body, err = await self._read_json_body(request)
@@ -2661,7 +2758,7 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 await queue.put(_event_payload("run.started", {"user_message": {"role": "user", "content": user_message}}))
                 await queue.put(_event_payload("message.started", {"message": {"id": message_id, "role": "assistant"}}))
-                history = self._conversation_history_for_session(session_id)
+                history = await self._conversation_history_for_session(session_id)
                 result, usage = await self._run_agent(
                     user_message=user_message,
                     conversation_history=history,
@@ -2692,6 +2789,585 @@ class APIServerAdapter(BasePlatformAdapter):
             except Exception as exc:
                 logger.exception("[api_server] session chat stream failed")
                 await queue.put(_event_payload("error", {"message": _redact_api_error_text(exc)}))
+            finally:
+                await queue.put(_event_payload("done", {}))
+                await queue.put(None)
+
+        task = asyncio.create_task(_run_and_signal())
+        try:
+            self._background_tasks.add(task)
+        except TypeError:
+            pass
+        if hasattr(task, "add_done_callback"):
+            task.add_done_callback(self._background_tasks.discard)
+
+        headers = {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Hermes-Session-Id": session_id,
+        }
+        if gateway_session_key:
+            headers["X-Hermes-Session-Key"] = gateway_session_key
+        response = web.StreamResponse(status=200, headers=headers)
+        await response.prepare(request)
+        last_write = time.monotonic()
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS)
+                except asyncio.TimeoutError:
+                    await response.write(b": keepalive\n\n")
+                    last_write = time.monotonic()
+                    continue
+                if item is None:
+                    break
+                name, payload = item
+                data = json.dumps(payload, ensure_ascii=False)
+                await response.write(f"event: {name}\ndata: {data}\n\n".encode("utf-8"))
+                last_write = time.monotonic()
+        except (asyncio.CancelledError, ConnectionResetError):
+            task.cancel()
+            raise
+        except Exception as exc:
+            logger.debug("[api_server] session SSE stream error: %s", exc)
+        return response
+
+    async def _handle_skills(self, request: "web.Request") -> "web.Response":
+        """GET /v1/skills — list installed skills visible to the API-server agent.
+
+        Read-only listing intended for external clients that need to know
+        which skills are available without sending a chat message and asking
+        the model. Mirrors what the gateway/CLI surfaces through
+        ``/skills list``, but as a deterministic JSON payload.
+
+        Returns the same skill metadata (name, description, category) the
+        skills hub uses internally. Disabled skills are excluded so the
+        listing matches what the agent actually loads.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            from tools.skills_tool import _find_all_skills, _sort_skills
+            skills = _sort_skills(_find_all_skills(skip_disabled=False))
+        except Exception:
+            logger.exception("GET /v1/skills failed")
+            return web.json_response(
+                _openai_error("Failed to enumerate skills", err_type="server_error"),
+                status=500,
+            )
+
+        return web.json_response({
+            "object": "list",
+            "data": skills,
+        })
+
+    async def _handle_toolsets(self, request: "web.Request") -> "web.Response":
+        """GET /v1/toolsets — list toolsets and their resolved tools.
+
+        Returns the toolset surface the api_server platform actually exposes
+        to its agent: each toolset's enabled/configured state plus the
+        concrete tool names it expands to. This is the deterministic
+        equivalent of what a client would otherwise have to recover by
+        asking the model what tools it can call.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            from hermes_cli.config import load_config
+            from hermes_cli.tools_config import (
+                _get_effective_configurable_toolsets,
+                _get_platform_tools,
+                _toolset_has_keys,
+            )
+            from toolsets import resolve_toolset
+
+            config = load_config()
+            enabled_toolsets = _get_platform_tools(
+                config,
+                "api_server",
+                include_default_mcp_servers=False,
+            )
+            data: List[Dict[str, Any]] = []
+            for name, label, desc in _get_effective_configurable_toolsets():
+                try:
+                    tools = sorted(set(resolve_toolset(name)))
+                except Exception:
+                    tools = []
+                is_enabled = name in enabled_toolsets
+                data.append({
+                    "name": name,
+                    "label": label,
+                    "description": desc,
+                    "enabled": is_enabled,
+                    "configured": _toolset_has_keys(name, config),
+                    "tools": tools,
+                })
+        except Exception:
+            logger.exception("GET /v1/toolsets failed")
+            return web.json_response(
+                _openai_error("Failed to enumerate toolsets", err_type="server_error"),
+                status=500,
+            )
+
+        return web.json_response({
+            "object": "list",
+            "platform": "api_server",
+            "data": data,
+        })
+
+    # ------------------------------------------------------------------
+    # /api/sessions — thin client/session resource API
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_nonnegative_int(value: Any, default: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        if parsed < 0:
+            return default
+        return min(parsed, maximum)
+
+    @staticmethod
+    def _session_response(session: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a stable, client-safe session representation."""
+        safe_keys = (
+            "id", "source", "user_id", "model", "title", "started_at", "ended_at",
+            "end_reason", "message_count", "tool_call_count", "input_tokens",
+            "output_tokens", "cache_read_tokens", "cache_write_tokens",
+            "reasoning_tokens", "estimated_cost_usd", "actual_cost_usd",
+            "api_call_count", "parent_session_id", "last_active", "preview",
+            "_lineage_root_id",
+        )
+        payload = {key: session.get(key) for key in safe_keys if key in session}
+        # Avoid exposing full system prompts/model_config through the client API;
+        # callers only need to know whether those snapshots exist.
+        payload["has_system_prompt"] = bool(session.get("system_prompt"))
+        payload["has_model_config"] = bool(session.get("model_config"))
+        return payload
+
+    @staticmethod
+    def _message_response(message: Dict[str, Any]) -> Dict[str, Any]:
+        safe_keys = (
+            "id", "session_id", "role", "content", "tool_call_id", "tool_calls",
+            "tool_name", "timestamp", "token_count", "finish_reason", "reasoning",
+            "reasoning_content",
+        )
+        return {key: message.get(key) for key in safe_keys if key in message}
+
+    async def _read_json_body(self, request: "web.Request") -> tuple[Dict[str, Any], Optional["web.Response"]]:
+        try:
+            body = await request.json()
+        except Exception:
+            return {}, web.json_response(_openai_error("Invalid JSON in request body"), status=400)
+        if not isinstance(body, dict):
+            return {}, web.json_response(_openai_error("Request body must be a JSON object"), status=400)
+        return body, None
+
+    async def _get_existing_session_or_404(self, session_id: str) -> tuple[Optional[Dict[str, Any]], Optional["web.Response"]]:
+        db = await self._ensure_session_db_async()
+        if db is None:
+            return None, web.json_response(_openai_error("Session database unavailable", code="session_db_unavailable"), status=503)
+        # Offload the blocking SQLite read off the event loop (CWE/perf: the
+        # API server is single-threaded aiohttp; a sync SessionDB call here
+        # freezes every in-flight request, see PR discussion on event-loop
+        # blocking SQLite in the gateway surface).
+        session = await asyncio.to_thread(db.get_session, session_id)
+        if not session:
+            return None, web.json_response(_openai_error(f"Session not found: {session_id}", code="session_not_found"), status=404)
+        return session, None
+
+    async def _conversation_history_for_session(self, session_id: str) -> List[Dict[str, Any]]:
+        db = await self._ensure_session_db_async()
+        if db is None:
+            return []
+        try:
+            return await asyncio.to_thread(db.get_messages_as_conversation, session_id)
+        except Exception as exc:
+            logger.warning("Failed to load session history for %s: %s", session_id, exc)
+            return []
+
+    async def _handle_list_sessions(self, request: "web.Request") -> "web.Response":
+        """GET /api/sessions — list persisted Hermes sessions."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        db = await self._ensure_session_db_async()
+        if db is None:
+            return web.json_response(_openai_error("Session database unavailable", code="session_db_unavailable"), status=503)
+
+        limit = self._parse_nonnegative_int(request.query.get("limit"), default=50, maximum=200)
+        offset = self._parse_nonnegative_int(request.query.get("offset"), default=0, maximum=1_000_000)
+        source = request.query.get("source") or None
+        include_children = _coerce_request_bool(request.query.get("include_children"), default=False)
+        sessions = await asyncio.to_thread(db.list_sessions_rich,
+            source=source,
+            limit=limit,
+            offset=offset,
+            include_children=include_children,
+            order_by_last_active=True,
+        )
+        return web.json_response({
+            "object": "list",
+            "data": [self._session_response(s) for s in sessions],
+            "limit": limit,
+            "offset": offset,
+            "has_more": len(sessions) == limit,
+        })
+
+    async def _handle_create_session(self, request: "web.Request") -> "web.Response":
+        """POST /api/sessions -- create an empty Hermes session row.
+
+        The existence check, insert, title handling, and invalid-title
+        rollback run as a single off-loop operation to avoid a TOCTOU
+        window between the duplicate check and the insert (concurrent
+        same-ID creates could otherwise both pass the check and both
+        return 201 via the ON CONFLICT enrichment upsert).
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        body, err = await self._read_json_body(request)
+        if err:
+            return err
+
+        db = await self._ensure_session_db_async()
+        if db is None:
+            return web.json_response(_openai_error("Session database unavailable", code="session_db_unavailable"), status=503)
+
+        raw_id = body.get("id") or body.get("session_id")
+        session_id = str(raw_id).strip() if raw_id else f"api_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        if not session_id or re.search(r'[\r\n\x00]', session_id):
+            return web.json_response(_openai_error("Invalid session ID", code="invalid_session_id"), status=400)
+        if len(session_id) > self._MAX_SESSION_HEADER_LEN:
+            return web.json_response(_openai_error("Session ID too long", code="invalid_session_id"), status=400)
+        if db.get_session(session_id):
+            return web.json_response(_openai_error(f"Session already exists: {session_id}", code="session_exists"), status=409)
+
+        model = body.get("model") or self._model_name
+        system_prompt = body.get("system_prompt")
+        if system_prompt is not None and not isinstance(system_prompt, str):
+            return web.json_response(_openai_error("system_prompt must be a string", code="invalid_system_prompt"), status=400)
+        title = body.get("title")
+
+        # Run the entire check-insert-title sequence inside a single
+        # _execute_write call (BEGIN IMMEDIATE + commit) so the existence
+        # check and the insert are atomic at the SQLite level.  Two
+        # concurrent requests for the same ID serialize here: the second
+        # one blocks on the write lock and sees the row the first inserted.
+        def _do_create():
+            def _atomic(conn):
+                row = conn.execute(
+                    "SELECT id FROM sessions WHERE id = ?", (session_id,)
+                ).fetchone()
+                if row:
+                    return None, "exists"
+                import time as _time
+                conn.execute(
+                    """INSERT INTO sessions (
+                       id, source, model, system_prompt, started_at
+                    ) VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        session_id,
+                        "api_server",
+                        str(model) if model else None,
+                        system_prompt,
+                        _time.time(),
+                    ),
+                )
+                if title is not None:
+                    clean_title = db.sanitize_title(str(title))
+                    if clean_title:
+                        conflict = conn.execute(
+                            "SELECT id FROM sessions WHERE title = ? AND id != ?",
+                            (clean_title, session_id),
+                        ).fetchone()
+                        if conflict:
+                            conn.execute(
+                                "DELETE FROM sessions WHERE id = ?", (session_id,)
+                            )
+                            return None, f"title:Title already in use by session {conflict['id']}"
+                    conn.execute(
+                        "UPDATE sessions SET title = ? WHERE id = ?",
+                        (clean_title, session_id),
+                    )
+                session_row = conn.execute(
+                    "SELECT * FROM sessions WHERE id = ?", (session_id,)
+                ).fetchone()
+                return (dict(session_row) if session_row else {
+                    "id": session_id, "source": "api_server",
+                    "model": model, "title": title,
+                }), None
+            return db._execute_write(_atomic)
+
+        session, err = await asyncio.to_thread(_do_create)
+        if err == "exists":
+            return web.json_response(_openai_error(f"Session already exists: {session_id}", code="session_exists"), status=409)
+        if err and err.startswith("title:"):
+            return web.json_response(_openai_error(err[len("title:"):], code="invalid_title"), status=400)
+        return web.json_response({"object": "hermes.session", "session": self._session_response(session)}, status=201)
+
+    async def _handle_get_session(self, request: "web.Request") -> "web.Response":
+        """GET /api/sessions/{session_id}."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session, err = await self._get_existing_session_or_404(request.match_info["session_id"])
+        if err:
+            return err
+        return web.json_response({"object": "hermes.session", "session": self._session_response(session)})
+
+    async def _handle_patch_session(self, request: "web.Request") -> "web.Response":
+        """PATCH /api/sessions/{session_id} — update client-safe session metadata."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        session, err = await self._get_existing_session_or_404(session_id)
+        if err:
+            return err
+        body, err = await self._read_json_body(request)
+        if err:
+            return err
+        allowed = {"title", "end_reason"}
+        unknown = sorted(set(body) - allowed)
+        if unknown:
+            return web.json_response(_openai_error(f"Unsupported session fields: {', '.join(unknown)}", code="unsupported_session_field"), status=400)
+
+        db = await self._ensure_session_db_async()
+        if "title" in body:
+            try:
+                await asyncio.to_thread(db.set_session_title, session_id, "" if body["title"] is None else str(body["title"]))
+            except ValueError as exc:
+                return web.json_response(_openai_error(str(exc), code="invalid_title"), status=400)
+        if body.get("end_reason"):
+            await asyncio.to_thread(db.end_session, session_id, str(body["end_reason"]))
+        session = await asyncio.to_thread(db.get_session, session_id) or session
+        return web.json_response({"object": "hermes.session", "session": self._session_response(session)})
+
+    async def _handle_delete_session(self, request: "web.Request") -> "web.Response":
+        """DELETE /api/sessions/{session_id}."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        session, err = await self._get_existing_session_or_404(session_id)
+        if err:
+            return err
+        db = await self._ensure_session_db_async()
+        deleted = await asyncio.to_thread(db.delete_session, session_id)
+        return web.json_response({"object": "hermes.session.deleted", "id": session_id, "deleted": bool(deleted)})
+
+    async def _handle_session_messages(self, request: "web.Request") -> "web.Response":
+        """GET /api/sessions/{session_id}/messages."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        _, err = await self._get_existing_session_or_404(session_id)
+        if err:
+            return err
+       db = await self._ensure_session_db_async()
+        messages = await asyncio.to_thread(db.get_messages, session_id)
+        return web.json_response({
+            "object": "list",
+            "session_id": session_id,
+            "data": [self._message_response(m) for m in messages],
+        })
+
+    async def _handle_fork_session(self, request: "web.Request") -> "web.Response":
+        """POST /api/sessions/{session_id}/fork — branch via current SessionDB primitives."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        source_id = request.match_info["session_id"]
+        source, err = await self._get_existing_session_or_404(source_id)
+        if err:
+            return err
+        body, err = await self._read_json_body(request)
+        if err:
+            return err
+        db = await self._ensure_session_db_async()
+        fork_id = str(body.get("id") or body.get("session_id") or f"api_{int(time.time())}_{uuid.uuid4().hex[:8]}").strip()
+        if not fork_id or re.search(r'[\r\n\x00]', fork_id):
+            return web.json_response(_openai_error("Invalid session ID", code="invalid_session_id"), status=400)
+        if await asyncio.to_thread(db.get_session, fork_id):
+            return web.json_response(_openai_error(f"Session already exists: {fork_id}", code="session_exists"), status=409)
+
+        # Match the CLI /branch semantics: mark the original as branched, then
+        # create a child session that carries the transcript forward. This uses
+        # SessionDB's native parent_session_id/end_reason visibility model rather
+        # than inventing a parallel fork store.
+        await asyncio.to_thread(db.end_session, source_id, "branched")
+        await asyncio.to_thread(db.create_session,
+            fork_id,
+            "api_server",
+            model=source.get("model"),
+            system_prompt=source.get("system_prompt"),
+            parent_session_id=source_id,
+        )
+        messages = await asyncio.to_thread(db.get_messages, source_id)
+        await asyncio.to_thread(db.replace_messages, fork_id, messages)
+        title = body.get("title")
+        if title is None:
+            base = source.get("title") or "fork"
+            try:
+                title = await asyncio.to_thread(db.get_next_title_in_lineage, base)
+            except Exception:
+                title = f"{base} fork"
+        try:
+            await asyncio.to_thread(db.set_session_title, fork_id, str(title))
+        except ValueError as exc:
+            return web.json_response(_openai_error(str(exc), code="invalid_title"), status=400)
+        fork = await asyncio.to_thread(db.get_session, fork_id) or {"id": fork_id, "parent_session_id": source_id}
+        return web.json_response({"object": "hermes.session", "session": self._session_response(fork)}, status=201)
+
+    async def _handle_session_chat(self, request: "web.Request") -> "web.Response":
+        """POST /api/sessions/{session_id}/chat — one synchronous agent turn."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        gateway_session_key, key_err = self._parse_session_key_header(request)
+        if key_err is not None:
+            return key_err
+        session_id = request.match_info["session_id"]
+        _, err = await self._get_existing_session_or_404(session_id)
+        if err:
+            return err
+        body, err = await self._read_json_body(request)
+        if err:
+            return err
+        user_message, err = _session_chat_user_message(body)
+        if err is not None:
+            return err
+        system_prompt = body.get("system_message") or body.get("instructions")
+        if system_prompt is not None and not isinstance(system_prompt, str):
+            return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
+        history = await self._conversation_history_for_session(session_id)
+        result, usage = await self._run_agent(
+            user_message=user_message,
+            conversation_history=history,
+            ephemeral_system_prompt=system_prompt,
+            session_id=session_id,
+            gateway_session_key=gateway_session_key,
+        )
+        effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
+        final_response = result.get("final_response", "") if isinstance(result, dict) else ""
+        headers = {"X-Hermes-Session-Id": effective_session_id or session_id}
+        if gateway_session_key:
+            headers["X-Hermes-Session-Key"] = gateway_session_key
+        return web.json_response(
+            {
+                "object": "hermes.session.chat.completion",
+                "session_id": effective_session_id or session_id,
+                "message": {"role": "assistant", "content": final_response},
+                "usage": usage,
+            },
+            headers=headers,
+        )
+
+    async def _handle_session_chat_stream(self, request: "web.Request") -> "web.StreamResponse":
+        """POST /api/sessions/{session_id}/chat/stream — SSE wrapper over _run_agent."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        gateway_session_key, key_err = self._parse_session_key_header(request)
+        if key_err is not None:
+            return key_err
+        session_id = request.match_info["session_id"]
+        _, err = await self._get_existing_session_or_404(session_id)
+        if err:
+            return err
+        body, err = await self._read_json_body(request)
+        if err:
+            return err
+        user_message, err = _session_chat_user_message(body)
+        if err is not None:
+            return err
+        system_prompt = body.get("system_message") or body.get("instructions")
+        if system_prompt is not None and not isinstance(system_prompt, str):
+            return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
+
+        loop = asyncio.get_running_loop()
+        queue: "asyncio.Queue[Optional[tuple[str, Dict[str, Any]]]]" = asyncio.Queue()
+        message_id = f"msg_{uuid.uuid4().hex}"
+        run_id = f"run_{uuid.uuid4().hex}"
+        seq = 0
+
+        def _event_payload(name: str, payload: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+            nonlocal seq
+            seq += 1
+            payload.setdefault("session_id", session_id)
+            payload.setdefault("run_id", run_id)
+            payload.setdefault("seq", seq)
+            payload.setdefault("ts", time.time())
+            return name, payload
+
+        def _enqueue(name: str, payload: Dict[str, Any]) -> None:
+            event = _event_payload(name, payload)
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            try:
+                if running_loop is loop:
+                    queue.put_nowait(event)
+                else:
+                    loop.call_soon_threadsafe(queue.put_nowait, event)
+            except RuntimeError:
+                pass
+
+        def _delta(delta: str) -> None:
+            if delta:
+                _enqueue("assistant.delta", {"message_id": message_id, "delta": delta})
+
+        def _tool_progress(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs) -> None:
+            if event_type == "reasoning.available":
+                _enqueue("tool.progress", {"message_id": message_id, "tool_name": tool_name or "_thinking", "delta": preview or ""})
+            elif event_type in {"tool.started", "tool.completed", "tool.failed"}:
+                event_name = event_type.replace("tool.", "tool.")
+                _enqueue(event_name, {"message_id": message_id, "tool_name": tool_name, "preview": preview, "args": args})
+
+        async def _run_and_signal() -> None:
+            try:
+                await queue.put(_event_payload("run.started", {"user_message": {"role": "user", "content": user_message}}))
+                await queue.put(_event_payload("message.started", {"message": {"id": message_id, "role": "assistant"}}))
+                history = await self._conversation_history_for_session(session_id)
+                result, usage = await self._run_agent(
+                    user_message=user_message,
+                    conversation_history=history,
+                    ephemeral_system_prompt=system_prompt,
+                    session_id=session_id,
+                    stream_delta_callback=_delta,
+                    tool_progress_callback=_tool_progress,
+                    gateway_session_key=gateway_session_key,
+                )
+                final_response = result.get("final_response", "") if isinstance(result, dict) else ""
+                effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
+                await queue.put(_event_payload("assistant.completed", {
+                    "session_id": effective_session_id,
+                    "message_id": message_id,
+                    "content": final_response,
+                    "completed": True,
+                    "partial": False,
+                    "interrupted": False,
+                }))
+                await queue.put(_event_payload("run.completed", {
+                    "session_id": effective_session_id,
+                    "message_id": message_id,
+                    "completed": True,
+                    "usage": usage,
+                }))
+            except Exception as exc:
+                logger.exception("[api_server] session chat stream failed")
+                await queue.put(_event_payload("error", {"message": str(exc)}))
             finally:
                 await queue.put(_event_payload("done", {}))
                 await queue.put(None)
@@ -3352,9 +4028,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
             session_id = provided_session_id
             try:
-                db = self._ensure_session_db()
+                db = await self._ensure_session_db_async()
                 if db is not None:
-                    history = db.get_messages_as_conversation(session_id)
+                    history = await asyncio.to_thread(db.get_messages_as_conversation, session_id)
             except Exception as e:
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
                 history = []
