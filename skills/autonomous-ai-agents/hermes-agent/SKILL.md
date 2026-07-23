@@ -38,9 +38,6 @@ People use Hermes for software development, research, system administration, dat
 # Install
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 
-# Or via PyPI (ships the TUI bundle + shell launcher)
-pip install hermes-agent       # or: uv pip install hermes-agent
-
 # Interactive chat (default surface; set display.interface: tui to launch the Ink TUI instead)
 hermes
 
