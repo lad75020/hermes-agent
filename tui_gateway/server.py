@@ -14766,37 +14766,27 @@ def _(rid, params: dict) -> dict:
         if profile_home:
             home_token = set_hermes_home_override(profile_home)
         try:
-            ctx = load_picker_context()
-            # Layer agent-session state on top of disk config — once an agent
-            # is spawned, IT owns the live provider/model/base_url. Empty
-            # agent attributes must NOT clobber disk config (with_overrides
-            # is truthy-only).
-            ctx = ctx.with_overrides(
-                current_provider=getattr(agent, "provider", "") if agent else "",
-                current_model=(
-                    (getattr(agent, "model", "") if agent else "") or _resolve_model()
-                ),
-                current_base_url=getattr(agent, "base_url", "") if agent else "",
-            )
-            # picker_hints + canonical_order produce the TUI's required shape:
+            ctx = _model_picker_context(agent)
+            # picker_hints + canonical_order produce the TUI/desktop picker shape:
             # `authenticated`/`auth_type`/`key_env`/`warning` per row, in
-            # CANONICAL_PROVIDERS declaration order. include_unconfigured=True
-            # so the picker can show the full provider universe (with the
-            # setup-hint warning attached) instead of only authed rows.
+            # CANONICAL_PROVIDERS declaration order. Desktop pickers default to the
+            # configured subset; callers that need setup affordances can pass
+            # include_unconfigured=true explicitly.
             # Curated model lists are preserved — list_authenticated_providers
             # populates `models` from the curated catalog, not provider_model_ids
             # (which would pull non-agentic models like TTS/embeddings/etc.).
             payload = build_models_payload(
                 ctx,
-                include_unconfigured=True,
+                explicit_only=bool(params.get("explicit_only")),
+                include_unconfigured=bool(params.get("include_unconfigured")),
                 picker_hints=True,
                 canonical_order=True,
                 pricing=True,
                 capabilities=True,
                 refresh=bool(params.get("refresh")),
                 probe_custom_providers=bool(params.get("refresh")),
-            probe_current_custom_provider=not bool(params.get("refresh")),
-        )
+                probe_current_custom_provider=not bool(params.get("refresh")),
+            )
         finally:
             if home_token is not None:
                 reset_hermes_home_override(home_token)
