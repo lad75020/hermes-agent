@@ -23,18 +23,75 @@ from gateway.config import (
     StreamingConfig,
     _apply_env_overrides,
     load_gateway_config,
+    persist_home_channel,
 )
 
 
 class TestHomeChannelRoundtrip:
     def test_to_dict_from_dict(self):
-        hc = HomeChannel(platform=Platform.DISCORD, chat_id="999", name="general")
+        hc = HomeChannel(
+            platform=Platform.DISCORD,
+            chat_id="999",
+            name="general",
+            user_id="user-123",
+            scope_id="guild-456",
+        )
         d = hc.to_dict()
         restored = HomeChannel.from_dict(d)
 
         assert restored.platform == Platform.DISCORD
         assert restored.chat_id == "999"
         assert restored.name == "general"
+        assert restored.user_id == "user-123"
+        assert restored.scope_id == "guild-456"
+
+    def test_relay_only_slack_home_hydrates_disabled_with_provenance(self):
+        config = GatewayConfig(
+            platforms={
+                Platform.SLACK: PlatformConfig(
+                    enabled=False,
+                    home_channel=HomeChannel(
+                        platform=Platform.SLACK,
+                        chat_id="D123",
+                        name="Owner DM",
+                        user_id="U123",
+                    ),
+                )
+            }
+        )
+
+        with patch.dict(os.environ, {"SLACK_HOME_CHANNEL": "D123"}, clear=False):
+            _apply_env_overrides(config)
+
+        slack = config.platforms[Platform.SLACK]
+        assert slack.enabled is False
+        assert slack.home_channel is not None
+        assert slack.home_channel.chat_id == "D123"
+        assert slack.home_channel.user_id == "U123"
+
+    def test_persisted_relay_home_survives_real_config_reload(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SLACK_HOME_CHANNEL", "D123")
+        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+        home_token = set_hermes_home_override(str(tmp_path))
+        try:
+            persist_home_channel(
+                HomeChannel(
+                    platform=Platform.SLACK,
+                    chat_id="D123",
+                    name="Owner DM",
+                    user_id="U123",
+                )
+            )
+            config = load_gateway_config()
+        finally:
+            reset_hermes_home_override(home_token)
+
+        slack = config.platforms[Platform.SLACK]
+        assert slack.enabled is False
+        assert slack.token is None
+        assert slack.home_channel is not None
+        assert slack.home_channel.chat_id == "D123"
+        assert slack.home_channel.user_id == "U123"
 
 
 class TestPlatformConfigRoundtrip:
@@ -574,6 +631,59 @@ class TestLoadGatewayConfig:
         config = load_gateway_config()
 
         assert config.quick_commands == {"limits": {"type": "exec", "command": "echo ok"}}
+
+    def test_slack_disable_dms_config_sets_env_bridge(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "slack:\n"
+            "  disable_dms: true\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("SLACK_DISABLE_DMS", raising=False)
+
+        load_gateway_config()
+
+        assert os.getenv("SLACK_DISABLE_DMS") == "true"
+
+    def test_slack_ignored_channels_config_sets_env_bridge(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "slack:\n"
+            "  ignored_channels:\n"
+            "    - C0123456789\n"
+            "    - C0987654321\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("SLACK_IGNORED_CHANNELS", raising=False)
+
+        load_gateway_config()
+
+        assert os.getenv("SLACK_IGNORED_CHANNELS") == "C0123456789,C0987654321"
+
+    def test_slack_ignored_channels_env_takes_precedence(self, tmp_path, monkeypatch):
+        """An explicit SLACK_IGNORED_CHANNELS env var must not be overwritten
+        by the config.yaml bridge."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "slack:\n"
+            "  ignored_channels: C_FROM_YAML\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("SLACK_IGNORED_CHANNELS", "C_FROM_ENV")
+
+        load_gateway_config()
+
+        assert os.getenv("SLACK_IGNORED_CHANNELS") == "C_FROM_ENV"
 
     def test_typing_status_text_from_toplevel_platform_block(self, tmp_path, monkeypatch):
         """A top-level ``slack:`` block reaches PlatformConfig via the
@@ -2419,10 +2529,11 @@ class TestApiServerEnvOverride:
             },
         )
 
-        with patch.dict(os.environ, {"API_SERVER_KEY": "secret-key"}, clear=True):
+        api_server_key = "secret-key-at-least-16"
+        with patch.dict(os.environ, {"API_SERVER_KEY": api_server_key}, clear=True):
             _apply_env_overrides(config)
 
         # Explicit disable wins over the env-var presence.
         assert config.platforms[Platform.API_SERVER].enabled is False
         # The key is still wired through for the shared listener.
-        assert config.platforms[Platform.API_SERVER].extra.get("key") == "secret-key"
+        assert config.platforms[Platform.API_SERVER].extra.get("key") == api_server_key

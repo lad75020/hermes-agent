@@ -29,6 +29,7 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
     SUPPORTED_VIDEO_TYPES,
+    SendResult,
     is_host_excluded_by_no_proxy,
 )
 
@@ -106,6 +107,85 @@ def test_slack_mock_bootstrap_preserves_installed_packages():
             assert isinstance(sys.modules[package], ModuleType)
     if PathFinder.find_spec("slack_sdk") is not None:
         assert isinstance(importlib.import_module("slack_sdk.errors"), ModuleType)
+
+# ---------------------------------------------------------------------------
+# TestIgnoredChannelOutboundSuppression
+# ---------------------------------------------------------------------------
+
+
+class TestIgnoredChannelOutboundSuppression:
+    """Ignored Slack channels must be a hard generic-gateway kill switch."""
+
+    def _ignored_adapter(self):
+        config = PlatformConfig(
+            enabled=True,
+            token="***",
+            extra={"ignored_channels": ["C_PRD"]},
+        )
+        adapter = SlackAdapter(config)
+        adapter._app = MagicMock()
+        adapter._app.client = AsyncMock()
+        adapter._bot_user_id = "U_BOT"
+        adapter._running = True
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_send_suppressed_for_ignored_channel(self):
+        adapter = self._ignored_adapter()
+
+        result = await adapter.send("C_PRD", "Acknowledged", reply_to="123.456")
+
+        assert result.success is False
+        assert result.error == "ignored_channel"
+        adapter._app.client.chat_postMessage.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_private_notice_suppressed_for_ignored_channel(self):
+        adapter = self._ignored_adapter()
+
+        result = await adapter.send_private_notice(
+            "C_PRD", "U_USER", "No home channel is set", reply_to="123.456"
+        )
+
+        assert result.success is False
+        assert result.error == "ignored_channel"
+        adapter._app.client.chat_postEphemeral.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_edit_status_and_media_paths_suppressed(self, tmp_path):
+        adapter = self._ignored_adapter()
+        adapter._active_status_threads["C_PRD"] = "123.456"
+        file_path = tmp_path / "note.txt"
+        file_path.write_text("secret")
+
+        edit = await adapter.edit_message("C_PRD", "123.999", "updated", finalize=True)
+        await adapter.send_typing("C_PRD", {"thread_ts": "123.456"})
+        await adapter.stop_typing("C_PRD")
+        upload = await adapter._upload_file("C_PRD", str(file_path))
+        await adapter.send_multiple_images("C_PRD", [("https://example.com/image.png", "alt")])
+
+        assert edit.success is False
+        assert upload.success is False
+        assert edit.error == "ignored_channel"
+        assert upload.error == "ignored_channel"
+        adapter._app.client.chat_update.assert_not_awaited()
+        adapter._app.client.assistant_threads_setStatus.assert_not_awaited()
+        adapter._app.client.files_upload_v2.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_inbound_message_suppressed_for_ignored_channel(self):
+        adapter = self._ignored_adapter()
+        adapter.handle_message = AsyncMock()
+
+        await adapter._handle_slack_message({
+            "text": "<@U_BOT> review this",
+            "user": "U_USER",
+            "channel": "C_PRD",
+            "channel_type": "channel",
+            "ts": "123.456",
+        })
+
+        adapter.handle_message.assert_not_awaited()
 
 
 async def _pending_for_fake_task():
@@ -285,6 +365,101 @@ class TestSlashCommandSessionIsolation:
         assert event.source.chat_id == "C123"
         assert event.source.user_id == "U123"
         assert event.source.thread_id == "1700000000.123456"
+
+    @pytest.mark.asyncio
+    async def test_disable_dms_drops_dm_slash_command(self, adapter):
+        adapter.config.extra["disable_dms"] = True
+        command = {
+            "text": "hello",
+            "user_id": "U123",
+            "channel_id": "D123",
+            "team_id": "T123",
+        }
+
+        await adapter._handle_slash_command(command)
+
+        adapter.handle_message.assert_not_awaited()
+
+
+class TestSlackWorkspaceCollisionIsolation:
+    @pytest.mark.asyncio
+    async def test_same_ids_in_two_workspaces_are_both_delivered(self, adapter):
+        from gateway.session import build_session_key
+
+        team_one, team_two = AsyncMock(), AsyncMock()
+        team_one.users_info = AsyncMock(
+            return_value={"user": {"profile": {"display_name": "Alice"}}}
+        )
+        team_two.users_info = AsyncMock(
+            return_value={"user": {"profile": {"display_name": "Bob"}}}
+        )
+        adapter._team_clients.update({"T_ONE": team_one, "T_TWO": team_two})
+
+        event = {
+            "text": "same Slack-local ids",
+            "user": "U_SHARED",
+            "channel": "D_SHARED",
+            "channel_type": "im",
+            "ts": "171.000",
+        }
+        await adapter._handle_slack_message(event, {"team_id": "T_ONE"})
+        await adapter._handle_slack_message(event, {"team_id": "T_TWO"})
+
+        assert adapter.handle_message.await_count == 2
+        first = adapter.handle_message.await_args_list[0].args[0]
+        second = adapter.handle_message.await_args_list[1].args[0]
+        assert first.source.scope_id == "T_ONE"
+        assert second.source.scope_id == "T_TWO"
+        assert build_session_key(first.source) != build_session_key(second.source)
+        assert adapter._channel_teams["D_SHARED"] == {"T_ONE", "T_TWO"}
+        assert "D_SHARED" not in adapter._channel_team
+
+    @pytest.mark.asyncio
+    async def test_same_ids_route_outbound_through_each_workspace_client(self, adapter):
+        one, two = AsyncMock(), AsyncMock()
+        one.chat_postMessage = AsyncMock(return_value={"ts": "171.000"})
+        two.chat_postMessage = AsyncMock(return_value={"ts": "171.000"})
+        adapter._team_clients.update({"T_ONE": one, "T_TWO": two})
+
+        await adapter.send(
+            "D_SHARED", "one", metadata={"scope_id": "T_ONE"}
+        )
+        await adapter.send(
+            "D_SHARED", "two", metadata={"slack_team_id": "T_TWO"}
+        )
+
+        one.chat_postMessage.assert_awaited_once_with(
+            channel="D_SHARED", text="one", mrkdwn=True
+        )
+        two.chat_postMessage.assert_awaited_once_with(
+            channel="D_SHARED", text="two", mrkdwn=True
+        )
+        assert ("T_ONE", "171.000") in adapter._bot_message_ts
+        assert ("T_TWO", "171.000") in adapter._bot_message_ts
+
+    @pytest.mark.asyncio
+    async def test_same_ids_keep_slash_contexts_workspace_scoped(self, adapter):
+        import time
+        from plugins.platforms.slack.adapter import _slash_user_id
+
+        for team_id in ("T_ONE", "T_TWO"):
+            adapter._slash_command_contexts[
+                (team_id, "C_SHARED", "U_SHARED")
+            ] = {
+                "response_url": f"https://hooks.slack.com/{team_id}",
+                "ts": time.monotonic(),
+            }
+
+        token = _slash_user_id.set("U_SHARED")
+        try:
+            first = adapter._pop_slash_context("C_SHARED", "T_ONE")
+            second = adapter._pop_slash_context("C_SHARED", "T_TWO")
+        finally:
+            _slash_user_id.reset(token)
+
+        assert first["response_url"].endswith("T_ONE")
+        assert second["response_url"].endswith("T_TWO")
+        assert adapter._slash_command_contexts == {}
 
 
 # ---------------------------------------------------------------------------
@@ -1123,7 +1298,8 @@ class TestSlackProxyBehavior:
         created_clients = []
 
         class FakeWebClient:
-            def __init__(self, token):
+            # **_kwargs absorbs adapter kwargs we don't model here (e.g. user_agent_prefix).
+            def __init__(self, token, **_kwargs):
                 self.token = token
                 self.proxy = "constructor-default"
                 suffix = token.split("-")[-1]
@@ -1138,9 +1314,13 @@ class TestSlackProxyBehavior:
                 created_clients.append(self)
 
         class FakeApp:
-            def __init__(self, token):
+            # **_kwargs absorbs adapter kwargs we don't model here.
+            def __init__(self, token, client=None, **_kwargs):
                 self.token = token
-                self.client = FakeWebClient(token)
+                # Honor the ``client=`` kwarg the production adapter passes
+                # (so the User-Agent prefix sticks on ``self._app.client``).
+                # Fall back to building our own fake client when not provided.
+                self.client = client if client is not None else FakeWebClient(token)
                 self.registered_events = []
                 self.registered_commands = []
                 self.registered_actions = []
@@ -1232,7 +1412,8 @@ class TestSlackProxyBehavior:
         created_clients = []
 
         class FakeWebClient:
-            def __init__(self, token):
+            # **_kwargs absorbs adapter kwargs we don't model here (e.g. user_agent_prefix).
+            def __init__(self, token, **_kwargs):
                 self.token = token
                 self.proxy = "constructor-default"
                 suffix = token.split("-")[-1]
@@ -1247,9 +1428,13 @@ class TestSlackProxyBehavior:
                 created_clients.append(self)
 
         class FakeApp:
-            def __init__(self, token):
+            # **_kwargs absorbs adapter kwargs we don't model here.
+            def __init__(self, token, client=None, **_kwargs):
                 self.token = token
-                self.client = FakeWebClient(token)
+                # Honor the ``client=`` kwarg the production adapter passes
+                # (so the User-Agent prefix sticks on ``self._app.client``).
+                # Fall back to building our own fake client when not provided.
+                self.client = client if client is not None else FakeWebClient(token)
                 self.registered_events = []
                 self.registered_commands = []
                 self.registered_actions = []
@@ -2223,6 +2408,31 @@ class TestBangPrefixCommands:
         assert msg_event.text == "/model"
         assert "quoted context" not in msg_event.text
         assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_disable_dms_drops_text_dm(self, adapter):
+        adapter.config.extra["disable_dms"] = True
+
+        await adapter._handle_slack_message(self._make_event("hello from DM"))
+
+        adapter.handle_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_disable_dms_does_not_drop_channel_mentions(self, adapter):
+        adapter.config.extra["disable_dms"] = True
+
+        await adapter._handle_slack_message(
+            self._make_event(
+                "<@U_BOT> hello from channel",
+                channel_type="channel",
+                channel="C123",
+            )
+        )
+
+        adapter.handle_message.assert_awaited_once()
+        msg_event = adapter.handle_message.await_args.args[0]
+        assert msg_event.source.chat_type == "group"
+        assert msg_event.source.chat_id == "C123"
 
 
 # ---------------------------------------------------------------------------
@@ -4797,7 +5007,7 @@ class TestThreadReplyHandling:
     ):
         """Thread replies without mention should be processed if there's an active session."""
         # Simulate an active session for this thread
-        session_key = "agent:main:slack:group:C123:123.000:U_USER"
+        session_key = "agent:main:slack:group:T_TEAM:C123:123.000:U_USER"
         mock_session_store._entries = {session_key: MagicMock()}
 
         event = {
@@ -4898,7 +5108,13 @@ class TestThreadReplyHandling:
         })
 
         adapter_with_session_store.handle_message.assert_called_once()
-        assert "555.000" in adapter_with_session_store._mentioned_threads
+        # Workspace-scoped marker (#20583): the event carries team T_TEAM, so
+        # the registered marker is (team_id, ts) — identical thread ts values
+        # in two workspaces must never wake each other's bot.
+        assert (
+            "T_TEAM",
+            "555.000",
+        ) in adapter_with_session_store._mentioned_threads
 
     @pytest.mark.asyncio
     async def test_thread_reply_with_mention_strips_bot_id(
@@ -4906,7 +5122,7 @@ class TestThreadReplyHandling:
     ):
         """Thread replies with @mention should still strip the bot ID."""
         # Even with a session, mentions should be stripped
-        session_key = "agent:main:slack:group:C123:123.000:U_USER"
+        session_key = "agent:main:slack:group:T_TEAM:C123:123.000:U_USER"
         mock_session_store._entries = {session_key: MagicMock()}
 
         event = {
@@ -7634,8 +7850,9 @@ class TestTrackingStructureBounds:
             respond = AsyncMock()  # noqa: F841 — kept for shape clarity
             await adapter._handle_slash_command(command)
         assert len(adapter._slash_command_contexts) <= adapter._SLASH_CTX_MAX
-        # Newest stash survives.
-        assert ("C1", "U9") in adapter._slash_command_contexts
+        # Newest stash survives. Keys are workspace-scoped 3-tuples (#20583)
+        # because the slash payload carries team_id.
+        assert ("T1", "C1", "U9") in adapter._slash_command_contexts
 
     def test_bot_message_ts_active_thread_survives_churn(self, adapter):
         """#51019 regression: an active thread registered early must survive
@@ -7651,6 +7868,86 @@ class TestTrackingStructureBounds:
         # can never remove a newer entry while an older one remains).
         for i in range(450, 500):
             assert f"{2000 + i}.000000" in adapter._bot_message_ts
+
+
+# ---------------------------------------------------------------------------
+# TestDownloadTokenWorkspaceRouting — file downloads must use the OWNING
+# workspace's bot token in multi-workspace installs (#59742; file events were
+# covered by #30456). A wrong-workspace token makes Slack return an HTML
+# login page instead of file bytes.
+# ---------------------------------------------------------------------------
+
+
+class TestDownloadTokenWorkspaceRouting:
+    def _adapter_with_teams(self, adapter):
+        one, two = MagicMock(), MagicMock()
+        one.token = "xoxb-team-one"
+        two.token = "xoxb-team-two"
+        adapter._team_clients = {"T0ONE": one, "T0TWO": two}
+        return adapter
+
+    def test_explicit_team_id_wins(self, adapter):
+        adapter = self._adapter_with_teams(adapter)
+        token = adapter._resolve_download_token(
+            "https://files.slack.com/files-pri/T0TWO-F123/x.png", "T0ONE"
+        )
+        assert token == "xoxb-team-one"
+
+    def test_url_embedded_team_id_routes_to_owning_workspace(self, adapter):
+        adapter = self._adapter_with_teams(adapter)
+        token = adapter._resolve_download_token(
+            "https://files.slack.com/files-pri/T0TWO-F123/download/x.png", ""
+        )
+        assert token == "xoxb-team-two"
+
+    def test_unknown_team_falls_back_to_primary_token(self, adapter):
+        adapter = self._adapter_with_teams(adapter)
+        token = adapter._resolve_download_token(
+            "https://files.slack.com/files-pri/T0OTHER-F123/x.png", ""
+        )
+        assert token == adapter.config.token
+
+    def test_no_url_match_falls_back_to_primary_token(self, adapter):
+        adapter = self._adapter_with_teams(adapter)
+        assert (
+            adapter._resolve_download_token("https://example.com/nofiles", "")
+            == adapter.config.token
+        )
+
+    @pytest.mark.asyncio
+    async def test_download_uses_owning_workspace_token(self, adapter, monkeypatch):
+        adapter = self._adapter_with_teams(adapter)
+        captured = {}
+
+        class _Resp:
+            content = b"bytes"
+            headers = {"content-type": "image/png"}
+
+            def raise_for_status(self):
+                return None
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, headers=None):
+                captured["auth"] = (headers or {}).get("Authorization", "")
+                return _Resp()
+
+        import httpx
+
+        monkeypatch.setattr(httpx, "AsyncClient", _Client)
+        data = await adapter._download_slack_file_bytes(
+            "https://files.slack.com/files-pri/T0TWO-F42/secret.png"
+        )
+        assert data == b"bytes"
+        assert captured["auth"] == "Bearer xoxb-team-two"
 
 
 # ---------------------------------------------------------------------------
@@ -8448,3 +8745,95 @@ class TestFormatMessageTableIntegration:
             ln for ln in out.split("\n") if ln.startswith("```")
         )
         assert first_fence_line == "```"
+
+# TestSlackUserAgent
+# ---------------------------------------------------------------------------
+
+
+class TestSlackUserAgent:
+    """Pin the User-Agent attribution wired in connect().
+
+    Slack platform partners (analytics, abuse-detection, etc.) attribute
+    outbound API traffic by ``User-Agent``. The Slack adapter sets
+    ``user_agent_prefix=_HERMES_SLACK_USER_AGENT_PREFIX`` on every
+    ``AsyncWebClient`` it builds and threads the primary client into
+    ``AsyncApp(client=...)`` so the prefix sticks on the app-owned client too.
+    Pin both behaviors at the actual call sites — a future refactor that
+    drops either kwarg would silently break attribution otherwise.
+    """
+
+    def test_hermes_slack_user_agent_prefix_format(self):
+        """Module constant matches the HermesAgent/<version> convention used
+        elsewhere in the codebase for platform-partner attribution."""
+        assert _slack_mod._HERMES_SLACK_USER_AGENT_PREFIX.startswith("HermesAgent/")
+
+    @pytest.mark.asyncio
+    async def test_async_web_client_constructed_with_hermes_user_agent_prefix(self):
+        """Every AsyncWebClient built by ``connect()`` carries the prefix, and
+        ``AsyncApp`` receives a pre-built ``client=`` so the prefix sticks."""
+        # Multi-token config exercises both construction sites:
+        # the primary AsyncApp client AND the per-token loop.
+        config = PlatformConfig(
+            enabled=True, token="xoxb-fake-1,xoxb-fake-2"
+        )
+        adapter = SlackAdapter(config)
+
+        mock_app = MagicMock()
+        mock_app.event = lambda *a, **kw: (lambda fn: fn)
+        mock_app.command = lambda *a, **kw: (lambda fn: fn)
+        mock_app.client = AsyncMock()
+
+        mock_web_client = MagicMock()
+        mock_web_client.auth_test = AsyncMock(
+            return_value={
+                "user_id": "U_BOT",
+                "user": "testbot",
+                "team_id": "T_FAKE",
+                "team": "FakeTeam",
+            }
+        )
+
+        socket_mode_handler = MagicMock()
+        socket_mode_handler.start_async = AsyncMock(return_value=None)
+
+        with (
+            patch.object(_slack_mod, "AsyncApp", return_value=mock_app) as async_app_mock,
+            patch.object(
+                _slack_mod, "AsyncWebClient", return_value=mock_web_client
+            ) as web_client_mock,
+            patch.object(
+                _slack_mod,
+                "AsyncSocketModeHandler",
+                return_value=socket_mode_handler,
+            ),
+            patch.dict(os.environ, {"SLACK_APP_TOKEN": "xapp-fake"}),
+            patch(
+                "gateway.status.acquire_scoped_lock", return_value=(True, None)
+            ),
+            patch("asyncio.create_task", side_effect=_fake_create_task),
+        ):
+            await adapter.connect()
+
+        expected_prefix = _slack_mod._HERMES_SLACK_USER_AGENT_PREFIX
+
+        # AsyncWebClient must be constructed at least once (primary) and
+        # every construction must pass user_agent_prefix.
+        assert web_client_mock.call_count >= 1, (
+            "AsyncWebClient was never constructed during connect()"
+        )
+        for idx, call_args in enumerate(web_client_mock.call_args_list):
+            assert call_args.kwargs.get("user_agent_prefix") == expected_prefix, (
+                f"AsyncWebClient call #{idx} missing "
+                f"user_agent_prefix={expected_prefix!r}: {call_args}"
+            )
+
+        # AsyncApp must be wired with the pre-built primary client. Without
+        # the ``client=`` kwarg, the bolt SDK would build its own client and
+        # the User-Agent prefix would not stick on ``self._app.client``,
+        # which the rest of the adapter uses for app-scoped API calls.
+        async_app_kwargs = async_app_mock.call_args.kwargs
+        assert "client" in async_app_kwargs, (
+            "AsyncApp must receive a pre-built client= so the "
+            "user_agent_prefix sticks on the app-owned client; got "
+            f"kwargs={async_app_kwargs}"
+        )

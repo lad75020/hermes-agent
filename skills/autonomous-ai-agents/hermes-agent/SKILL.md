@@ -1,12 +1,12 @@
 ---
 name: hermes-agent
-description: "Configure, extend, or contribute to Hermes Agent."
-version: 2.3.0
+description: "Use, configure, theme, extend, and orchestrate Hermes Agent."
+version: 3.1.0
 author: Hermes Agent + Teknium
 license: MIT
 metadata:
   hermes:
-    tags: [hermes, setup, configuration, multi-agent, spawning, cli, gateway, development]
+    tags: [hermes, setup, configuration, multi-agent, spawning, cli, gateway, themes, skins, desktop-plugins, tui-widgets, petdex, development]
     homepage: https://github.com/NousResearch/hermes-agent
     related_skills: [claude-code, codex, opencode]
 ---
@@ -17,17 +17,15 @@ Hermes Agent is an open-source AI agent framework by Nous Research that runs in 
 
 What makes Hermes different:
 
-- **Self-improving through skills** — Hermes learns from experience by saving reusable procedures as skills. When it solves a complex problem, discovers a workflow, or gets corrected, it can persist that knowledge as a skill document that loads into future sessions. Skills accumulate over time, making the agent better at your specific tasks and environment.
-- **Persistent memory across sessions** — remembers who you are, your preferences, environment details, and lessons learned. Pluggable memory backends (built-in, Honcho, Mem0, and more) let you choose how memory works.
+- **Self-improving through skills** — Hermes learns from experience by saving reusable procedures as skills that load into future sessions.
+- **Persistent memory across sessions** — remembers who you are, your preferences, environment details, and lessons learned. Pluggable memory backends.
 - **Multi-platform gateway** — the same agent runs on Telegram, Discord, Slack, WhatsApp, iMessage, Signal, Matrix, Teams, Email, and a dozen more platforms with full tool access, not just chat.
 - **Many surfaces** — the same agent core drives the CLI, the Ink TUI, a native Electron desktop app, a web dashboard, and an ACP server for IDEs (VS Code / Zed / JetBrains).
-- **Provider-agnostic** — swap models and providers mid-workflow without changing anything else. Credential pools rotate across multiple API keys automatically.
+- **Provider-agnostic** — swap models and providers mid-workflow; credential pools rotate across multiple API keys automatically.
 - **Profiles** — run multiple independent Hermes instances with isolated configs, sessions, skills, and memory.
-- **Extensible** — plugins, MCP servers, custom tools, webhook triggers, cron scheduling, and the full Python ecosystem.
+- **Extensible & themeable** — plugins, MCP servers, custom tools, webhook triggers, cron scheduling, skins that theme every surface, desktop UI plugins, TUI widgets, and pet mascots.
 
-People use Hermes for software development, research, system administration, data analysis, content creation, home automation, and anything else that benefits from an AI agent with persistent context and full system access.
-
-**This skill helps you work with Hermes Agent effectively** — setting it up, configuring features, spawning additional agent instances, troubleshooting issues, finding the right commands and settings, and understanding how the system works when you need to extend or contribute to it.
+**This skill is a hub.** The body covers identity, quick start, spawning/orchestration, and hard invariants. Everything else lives in reference files — **load the matching reference (below) before answering**; do not answer detail questions from the body alone.
 
 **Docs:** Preferred `/Volumes/WDBlack4TB/.hermes/docs/HERMES-AGENT.md`
 **Docs:** Also available at https://hermes-agent.nousresearch.com/docs/
@@ -357,256 +355,43 @@ Type these during an interactive chat session.
 ~/.hermes/config.yaml       Main configuration
 ~/.hermes/.env              API keys and secrets
 $HERMES_HOME/skills/        Installed skills
-~/.hermes/sessions/         Session transcripts
+~/.hermes/skins/            Custom themes (see references/themes.md)
+~/.hermes/desktop-plugins/  Desktop app UI plugins (see references/desktop-plugins.md)
+~/.hermes/tui-widgets/      TUI widget apps (see references/tui-widgets.md)
+~/.hermes/pets/             Installed pet mascots (see references/petdex.md)
+~/.hermes/state.db          Canonical session store (SQLite + FTS5)
+~/.hermes/sessions/         Gateway routing index, request dumps, *.jsonl transcripts
 ~/.hermes/logs/             Gateway and error logs
 ~/.hermes/auth.json         OAuth tokens and credential pools
 ~/.hermes/hermes-agent/     Source code (if git-installed)
 ```
 
-Profiles use `~/.hermes/profiles/<name>/` with the same layout.
+Profiles use `~/.hermes/profiles/<name>/` with the same layout. When a profile is active, resolve the real home from `$HERMES_HOME` — never hardcode `~/.hermes`.
 
-### Config Sections
+## Routing Table — load the reference for the task
 
-Edit with `hermes config edit` or `hermes config set section.key value`.
+| User wants... | Load |
+|---|---|
+| CLI commands, subcommands, flags, "how do I run X" | `references/cli-reference.md` |
+| In-session slash commands | `references/slash-commands.md` |
+| Provider setup, API keys, OAuth | `references/providers-and-models.md` |
+| config.yaml sections, toolsets, voice/STT/TTS | `references/configuration.md` |
+| AGENTS.md / .hermes.md / CLAUDE.md project rules | `references/project-context-files.md` |
+| Secret redaction, PII, approval modes, "reset permissions" | `references/security-privacy.md` |
+| Delegation, cron, curator, kanban | `references/background-systems.md` |
+| MCP servers (add, catalog, `hermes mcp`) | `references/native-mcp.md` |
+| Webhook routes and event-driven runs | `references/webhooks.md` |
+| A custom theme/skin ("synthwave theme", "change the gold ●") | `references/themes.md` + `templates/skin.yaml` |
+| A desktop app UI element (pane, widget, ⌘K command, page) | `references/desktop-plugins.md` + `templates/plugin.js` |
+| A live TUI panel or modal widget (ticker, clock, dashboard) | `references/tui-widgets.md` + `templates/clock.mjs` |
+| Pet mascots — install, select, scale, diagnose | `references/petdex.md` |
+| Windows-specific issues (keybinds, WinError 10106, BOM) | `references/windows-quirks.md` |
+| Debugging: voice, tools missing, gateway, aux models | `references/troubleshooting.md` |
+| Contributing code: adding tools, slash commands, tests | `references/contributor-guide.md` |
+| delegate_task "capped at N" reports | `references/delegate-task-concurrency-diagnosis.md` |
+| "Can app X use my Nous Portal subscription/OAuth?" | `references/portal-auth-for-third-party-apps.md` |
 
-| Section | Key options |
-|---------|-------------|
-| `model` | `default`, `provider`, `base_url`, `api_key`, `context_length` |
-| `agent` | `max_turns` (90), `tool_use_enforcement` |
-| `terminal` | `backend` (local/docker/ssh/modal), `cwd`, `timeout` (180) |
-| `compression` | `enabled`, `threshold` (0.50), `target_ratio` (0.20) |
-| `display` | `skin`, `interface` (cli/tui), `tool_progress`, `show_reasoning`, `show_cost`, `language` |
-| `stt` | `enabled`, `provider` (local/groq/openai/mistral) |
-| `tts` | `provider` (edge/elevenlabs/openai/minimax/mistral/neutts) |
-| `memory` | `memory_enabled`, `user_profile_enabled`, `provider` |
-| `security` | `tirith_enabled`, `website_blocklist` |
-| `delegation` | `model`, `provider`, `base_url`, `api_key`, `max_iterations` (50), `reasoning_effort` |
-| `checkpoints` | `enabled`, `max_snapshots` (50) |
-
-Full config reference: https://hermes-agent.nousresearch.com/docs/user-guide/configuration
-
-### Auxiliary Models
-
-Hermes uses `auxiliary:` model slots for side-task LLM calls. When answering questions about config.yaml auxiliary models, check the live repo/default config if possible (`hermes_cli/config.py` → `DEFAULT_CONFIG["auxiliary"]`) because this list evolves.
-
-Current class-level slots:
-
-| Slot | Purpose / notes |
-|------|-----------------|
-| `vision` | Image, screenshot, browser-vision analysis. Includes `download_timeout` in addition to standard routing fields. |
-| `web_extract` | Web page extraction and summarization. |
-| `compression` | Context compression summaries. Summary model should have a context window large enough for the main model's compressed middle section. |
-| `session_search` | Summaries for past-session search. Includes `max_concurrency` to avoid bursty 429s. |
-| `skills_hub` | Skill hub search/selection helper reasoning. |
-| `approval` | Smart command approval/risk judging (`approvals.mode: smart`). |
-| `mcp` | MCP helper reasoning/routing. |
-| `title_generation` | Automatic session title generation. |
-| `curator` | Skill curator review/consolidation background task; default timeout is longer because reviews can take minutes. |
-
-Standard per-slot shape:
-
-```yaml
-auxiliary:
-  compression:
-    provider: auto      # auto | main | openrouter | nous | anthropic | gemini | openai-codex | custom | named provider
-    model: ""           # empty = provider's default auxiliary model
-    base_url: ""        # direct OpenAI-compatible endpoint; takes precedence when set
-    api_key: ""         # key for base_url, otherwise provider/env auth
-    timeout: 120
-    extra_body: {}
-```
-
-Useful commands:
-```bash
-hermes model                                      # includes Configure auxiliary models UI
-hermes config set auxiliary.vision.provider openrouter
-hermes config set auxiliary.vision.model google/gemini-2.5-flash
-```
-
-Auto-routing notes: `provider: auto` generally tries the user's main provider/model first, then configured/available fallbacks such as OpenRouter, Nous Portal, custom endpoints, Anthropic, and direct API-key providers depending on task capabilities. `provider: main` explicitly resolves to the current main provider. Codex OAuth is used for auxiliary tasks when it is the main provider or when explicitly configured with a model; it is not blindly tried in the generic fallback chain.
-
-**Direct OpenAI API pitfall:** `openai` is not currently a valid `auxiliary.<task>.provider` id. For OpenAI API-key routing, configure the slot as `provider: custom` with `base_url: https://api.openai.com/v1` and an explicit OpenAI model (with `OPENAI_API_KEY` in `.env` or the environment). For ChatGPT/Codex OAuth, use `provider: openai-codex` and always set `auxiliary.<task>.model` explicitly because the Codex endpoint has no stable default allow-list.
-
-### Providers
-
-20+ providers supported. Set via `hermes model` or `hermes setup`.
-
-| Provider | Auth | Key env var |
-|----------|------|-------------|
-| OpenRouter | API key | `OPENROUTER_API_KEY` |
-| Anthropic | API key or Claude Pro/Max OAuth | `ANTHROPIC_API_KEY`, or `hermes auth add anthropic --type oauth` / `hermes model` |
-| Nous Portal | OAuth | `hermes auth` |
-| OpenAI Codex | OAuth | `hermes auth` |
-| GitHub Copilot | Token | `COPILOT_GITHUB_TOKEN` |
-| Google Gemini | API key | `GOOGLE_API_KEY` or `GEMINI_API_KEY` |
-| DeepSeek | API key | `DEEPSEEK_API_KEY` |
-| xAI / Grok | API key | `XAI_API_KEY` |
-| Hugging Face | Token | `HF_TOKEN` |
-| Z.AI / GLM | API key | `GLM_API_KEY` |
-| MiniMax | API key | `MINIMAX_API_KEY` |
-| MiniMax CN | API key | `MINIMAX_CN_API_KEY` |
-| Kimi / Moonshot | API key | `KIMI_API_KEY` |
-| Alibaba / DashScope | API key | `DASHSCOPE_API_KEY` |
-| Xiaomi MiMo | API key | `XIAOMI_API_KEY` |
-| Kilo Code | API key | `KILOCODE_API_KEY` |
-| AI Gateway (Vercel) | API key | `AI_GATEWAY_API_KEY` |
-| OpenCode Zen | API key | `OPENCODE_ZEN_API_KEY` |
-| OpenCode Go | API key | `OPENCODE_GO_API_KEY` |
-| Qwen OAuth | OAuth | `hermes login --provider qwen-oauth` |
-| Custom endpoint | Config | `model.base_url` + `model.api_key` in config.yaml |
-| GitHub Copilot ACP | External | `COPILOT_CLI_PATH` or Copilot CLI |
-
-Full provider docs: https://hermes-agent.nousresearch.com/docs/integrations/providers
-
-#### Anthropic / Claude Pro-Max subscription OAuth
-
-Hermes can use Claude Pro/Max subscription credentials for the `anthropic` provider; it does not require an Anthropic API key. Prefer the interactive path for users asking how to configure this:
-
-```bash
-hermes model
-# choose Anthropic / Claude
-# choose "Claude Pro/Max subscription (OAuth login)"
-# complete browser auth, then pick a model such as claude-sonnet-4-6
-```
-
-Direct credential-pool form:
-```bash
-hermes auth add anthropic --type oauth --label "Claude Max"
-hermes model
-```
-
-If Claude Code is already installed/logged in, Hermes can reuse valid Claude Code credentials or run `claude setup-token` during the Anthropic model flow:
-```bash
-npm install -g @anthropic-ai/claude-code
-claude auth login
-hermes model
-```
-
-Resulting config should have `model.provider: anthropic` and `model.default: <claude-model>`. Do not set `model.base_url` for Anthropic; Hermes' adapter uses the correct Anthropic endpoint and auth headers automatically. Restart long-running gateway/API processes after changing the provider/model: `hermes gateway restart`.
-
-### Toolsets
-
-Enable/disable via `hermes tools` (interactive) or `hermes tools enable/disable NAME`.
-
-| Toolset | What it provides |
-|---------|-----------------|
-| `web` | Web search and content extraction |
-| `browser` | Browser automation (Browserbase, Camofox, or local Chromium) |
-| `terminal` | Shell commands and process management |
-| `file` | File read/write/search/patch |
-| `code_execution` | Sandboxed Python execution |
-| `vision` | Image analysis |
-| `image_gen` | AI image generation |
-| `video` | Video analysis and generation |
-| `tts` | Text-to-speech |
-| `skills` | Skill browsing and management |
-| `memory` | Persistent cross-session memory |
-| `session_search` | Search past conversations |
-| `delegation` | Subagent task delegation |
-| `cronjob` | Scheduled task management |
-| `clarify` | Ask user clarifying questions |
-| `messaging` | Cross-platform message sending |
-| `search` | Web search only (subset of `web`) |
-| `todo` | In-session task planning and tracking |
-| `rl` | Reinforcement learning tools (off by default) |
-| `homeassistant` | Smart home control (off by default) |
-
-Tool changes take effect on `/reset` (new session). They do NOT apply mid-conversation to preserve prompt caching.
-
----
-
-## Security & Privacy Toggles
-
-Common "why is Hermes doing X to my output / tool calls / commands?" toggles — and the exact commands to change them. Most of these need a fresh session (`/reset` in chat, or start a new `hermes` invocation) because they're read once at startup.
-
-### Secret redaction in tool output
-
-Secret redaction is **off by default** — tool output (terminal stdout, `read_file`, web content, subagent summaries, etc.) passes through unmodified. If the user wants Hermes to auto-mask strings that look like API keys, tokens, and secrets before they enter the conversation context and logs:
-
-```bash
-hermes config set security.redact_secrets true       # enable globally
-```
-
-**Restart required.** `security.redact_secrets` is snapshotted at import time — toggling it mid-session (e.g. via `export HERMES_REDACT_SECRETS=true` from a tool call) will NOT take effect for the running process. Tell the user to run `hermes config set security.redact_secrets true` in a terminal, then start a new session. This is deliberate — it prevents an LLM from flipping the toggle on itself mid-task.
-
-Disable again with:
-```bash
-hermes config set security.redact_secrets false
-```
-
-### PII redaction in gateway messages
-
-Separate from secret redaction. When enabled, the gateway hashes user IDs and strips phone numbers from the session context before it reaches the model:
-
-```bash
-hermes config set privacy.redact_pii true    # enable
-hermes config set privacy.redact_pii false   # disable (default)
-```
-
-### Command approval prompts
-
-By default (`approvals.mode: smart`), Hermes asks an auxiliary LLM to assess shell commands flagged as destructive (`rm -rf`, `git reset --hard`, etc.). The modes are:
-
-- `smart` — auto-approve a low-risk command once, deny high-risk commands, and prompt when uncertain (default)
-- `manual` — always prompt
-- `off` — skip all approval prompts (equivalent to `--yolo`)
-
-```bash
-hermes config set approvals.mode smart       # recommended middle ground
-hermes config set approvals.mode off         # bypass everything (not recommended)
-```
-
-Per-invocation bypass without changing config:
-- `hermes --yolo …`
-- `export HERMES_YOLO_MODE=1`
-
-Note: YOLO / `approvals.mode: off` does NOT turn off secret redaction. They are independent.
-
-### Shell hooks allowlist
-
-Some shell-hook integrations require explicit allowlisting before they fire. Managed via `~/.hermes/shell-hooks-allowlist.json` — prompted interactively the first time a hook wants to run.
-
-### Disabling the web/browser/image-gen tools
-
-To keep the model away from network or media tools entirely, open `hermes tools` and toggle per-platform. Takes effect on next session (`/reset`). See the Tools & Skills section above.
-
----
-
-## Voice & Transcription
-
-### STT (Voice → Text)
-
-Voice messages from messaging platforms are auto-transcribed.
-
-Provider priority (auto-detected):
-1. **Local faster-whisper** — free, no API key: `pip install faster-whisper`
-2. **Groq Whisper** — free tier: set `GROQ_API_KEY`
-3. **OpenAI Whisper** — paid: set `VOICE_TOOLS_OPENAI_KEY`
-4. **Mistral Voxtral** — set `MISTRAL_API_KEY`
-
-Config:
-```yaml
-stt:
-  enabled: true
-  provider: local        # local, groq, openai, mistral
-  local:
-    model: base          # tiny, base, small, medium, large-v3
-```
-
-### TTS (Text → Voice)
-
-| Provider | Env var | Free? |
-|----------|---------|-------|
-| Edge TTS | None | Yes (default) |
-| ElevenLabs | `ELEVENLABS_API_KEY` | Free tier |
-| OpenAI | `VOICE_TOOLS_OPENAI_KEY` | Paid |
-| MiniMax | `MINIMAX_API_KEY` | Paid |
-| Mistral (Voxtral) | `MISTRAL_API_KEY` | Paid |
-| NeuTTS (local) | None (`pip install neutts[all]` + `espeak-ng`) | Free |
-
-Voice commands: `/voice on` (voice-to-voice), `/voice tts` (always voice), `/voice off`.
-
----
+Two theming rules that hold even without loading the reference: **you apply skins yourself** (`hermes config set display.skin <name>` — every surface repaints live within ~a second; don't tell the user to run `/skin`), and **to tweak one color, edit the ACTIVE skin** (`hermes skin set <key> <hex>`) — never fork `default`, which drops the palette and resets the background.
 
 ## Spawning Additional Hermes Instances
 

@@ -434,6 +434,17 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=(),
         base_url_env_var="BEDROCK_BASE_URL",
     ),
+    "vertex": ProviderConfig(
+        id="vertex",
+        name="Google Vertex AI",
+        auth_type="vertex",
+        # No static inference_base_url: Vertex's endpoint is computed per
+        # request from project_id + region (agent/vertex_adapter.py's
+        # build_vertex_base_url), not a fixed host like the other entries.
+        inference_base_url="",
+        api_key_env_vars=(),  # OAuth2 (service-account JSON / ADC), not a key
+        base_url_env_var="",
+    ),
     "azure-foundry": ProviderConfig(
         id="azure-foundry",
         name="Azure Foundry",
@@ -1112,7 +1123,7 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
         return {"version": AUTH_STORE_VERSION, "providers": {}}
 
     try:
-        raw = json.loads(auth_file.read_text())
+        raw = json.loads(auth_file.read_text(encoding="utf-8"))
     except Exception as exc:
         corrupt_path = auth_file.with_suffix(".json.corrupt")
         try:
@@ -3815,7 +3826,7 @@ def _import_codex_cli_tokens() -> Optional[Dict[str, str]]:
     if not auth_path.is_file():
         return None
     try:
-        payload = json.loads(auth_path.read_text())
+        payload = json.loads(auth_path.read_text(encoding="utf-8"))
         tokens = payload.get("tokens")
         if not isinstance(tokens, dict):
             return None
@@ -4441,7 +4452,16 @@ def _save_xai_oauth_tokens(
     redirect_uri: str = "",
     last_refresh: Optional[str] = None,
     auth_mode: str = "oauth_device_code",
+    set_active: bool = True,
 ) -> None:
+    """Persist xAI OAuth tokens into the auth store.
+
+    When *set_active* is True (default), also promote ``xai-oauth`` to
+    ``active_provider`` — appropriate for intentional model/auth login.
+    Pass ``set_active=False`` for side-tool credential bootstrap (TTS/setup,
+    tools config, dashboard token save, token refresh) so inference routing
+    is unchanged.
+    """
     if last_refresh is None:
         last_refresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     with _auth_store_lock():
@@ -4459,7 +4479,9 @@ def _save_xai_oauth_tokens(
             state["discovery"] = discovery
         if redirect_uri:
             state["redirect_uri"] = redirect_uri
-        _save_provider_state(auth_store, "xai-oauth", state)
+        _store_provider_state(
+            auth_store, "xai-oauth", state, set_active=set_active
+        )
         _save_auth_store(auth_store)
         if write_through_to_root:
             _write_through_xai_oauth_to_global_root(state)
@@ -4797,6 +4819,9 @@ def _refresh_xai_oauth_tokens(
         redirect_uri=redirect_uri,
         last_refresh=refreshed["last_refresh"],
         auth_mode=auth_mode,
+        # Refresh must not flip active_provider — TTS/side tools can refresh
+        # xAI tokens while chat still routes through another provider.
+        set_active=False,
     )
     return updated_tokens
 
@@ -5250,7 +5275,7 @@ def _read_shared_nous_state() -> Optional[Dict[str, Any]]:
     if not path.is_file():
         return None
     try:
-        payload = json.loads(path.read_text())
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         logger.debug("Shared Nous auth store at %s is unreadable: %s", path, exc)
         return None
@@ -7330,6 +7355,22 @@ def _prompt_model_selection(
             desc_lines.append(f"  ── {unavailable_footer} ──")
         description = "\n".join(desc_lines) if desc_lines else None
 
+        # Search haystacks keep pricing labels visible while adding aliases
+        # for brand-less wire ids (e.g. Kimi Coding `k3` ↔ query "kimi").
+        from hermes_cli.model_search import model_search_text
+
+        model_search_labels = []
+        for mid in ordered:
+            label = _label(mid)
+            haystack = model_search_text(mid)
+            # model_search_text always starts with the wire id; only append when
+            # aliases add tokens beyond the bare id already in the label.
+            model_search_labels.append(
+                label if haystack == mid else f"{label} {haystack}"
+            )
+        model_search_labels.append("Enter custom model name")
+        model_search_labels.append("Skip (keep current)")
+
         idx = curses_radiolist(
             "Select default model:",
             choices,
@@ -7337,6 +7378,7 @@ def _prompt_model_selection(
             cancel_returns=-1,
             description=description,
             searchable=True,
+            search_labels=model_search_labels,
         )
         if idx < 0:
             return None
