@@ -2166,6 +2166,32 @@ class APIServerAdapter(BasePlatformAdapter):
             logger.debug("SessionDB unavailable for API server: %s", e)
             return None
 
+    def _maybe_auto_title_api_session(
+        self,
+        session_id: Optional[str],
+        assistant_response: str,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Name an API-created session from its first assistant response.
+
+        Runs in a fire-and-forget background thread via title_generator so the
+        API response path is never delayed. The title is stored in the existing
+        SessionDB ``title`` column; no schema changes are needed.
+        """
+        if not session_id or not assistant_response:
+            return
+        try:
+            from agent.title_generator import maybe_auto_title_from_response
+
+            maybe_auto_title_from_response(
+                self._ensure_session_db(),
+                session_id,
+                assistant_response,
+                conversation_history or [],
+            )
+        except Exception:
+            logger.debug("Failed to schedule API session auto-title", exc_info=True)
+
     # ------------------------------------------------------------------
     # Agent creation helper
     # ------------------------------------------------------------------
@@ -2808,22 +2834,40 @@ class APIServerAdapter(BasePlatformAdapter):
             "model": model,
             **runtime_kwargs,
             **_checkpoint_agent_kwargs(user_config),
-            max_iterations=max_iterations,
-            quiet_mode=True,
-            verbose_logging=False,
-            ephemeral_system_prompt=ephemeral_system_prompt or None,
-            enabled_toolsets=enabled_toolsets,
-            session_id=session_id,
-            platform="api_server",
-            stream_delta_callback=stream_delta_callback,
-            tool_progress_callback=tool_progress_callback,
-            tool_start_callback=tool_start_callback,
-            tool_complete_callback=tool_complete_callback,
-            session_db=self._ensure_session_db(),
-            fallback_model=fallback_model,
-            reasoning_config=reasoning_config,
-            gateway_session_key=gateway_session_key,
-        )
+            "max_iterations": max_iterations,
+            "quiet_mode": True,
+            "verbose_logging": False,
+            "ephemeral_system_prompt": ephemeral_system_prompt or None,
+            "enabled_toolsets": enabled_toolsets,
+            "session_id": session_id,
+            "platform": "api_server",
+            "stream_delta_callback": stream_delta_callback,
+            "tool_progress_callback": tool_progress_callback,
+            "tool_start_callback": tool_start_callback,
+            "tool_complete_callback": tool_complete_callback,
+            "reasoning_callback": reasoning_callback,
+            "session_db": self._ensure_session_db(),
+            "fallback_model": fallback_model,
+            "reasoning_config": reasoning_config,
+            "gateway_session_key": gateway_session_key,
+        }
+        if request_service_tier is not _REQUEST_OPTION_MISSING:
+            agent_kwargs["service_tier"] = request_service_tier
+
+        agent = AIAgent(**agent_kwargs)
+        agent._hermes_api_runtime = {
+            "provider": runtime_kwargs.get("provider") or getattr(agent, "provider", "") or "",
+            "model": getattr(agent, "model", None) or model,
+            "route_source": (
+                "session_model_lock"
+                if confirmed_runtime_lock
+                else "session_model_override"
+                if session_override
+                else "raw_request"
+                if route or request_model or request_provider
+                else "global"
+            ),
+        }
         return agent
 
     # ------------------------------------------------------------------
@@ -2943,6 +2987,60 @@ class APIServerAdapter(BasePlatformAdapter):
 
         return web.json_response({
             "object": "list",
+            "data": models,
+        })
+
+    async def _handle_profiles(self, request: "web.Request") -> "web.Response":
+        """GET /v1/profiles — return Hermes profiles available to X-Hermes-Profile."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            from hermes_cli.profiles import list_profiles
+
+            profiles = list_profiles()
+        except Exception as e:
+            logger.error("Error listing Hermes profiles: %s", e, exc_info=True)
+            return web.json_response(
+                _openai_error(
+                    f"Unable to list Hermes profiles: {e}",
+                    err_type="server_error",
+                ),
+                status=500,
+            )
+
+        data = []
+        for profile in profiles:
+            supported_parameters = self._profile_supported_parameters(
+                profile.model,
+                profile.provider,
+            )
+            supports_reasoning = any(
+                parameter in {"reasoning", "reasoning_effort"}
+                for parameter in supported_parameters
+            )
+            data.append({
+                "id": profile.name,
+                "object": "hermes.profile",
+                "name": profile.name,
+                "is_default": profile.is_default,
+                "model": profile.model,
+                "provider": profile.provider,
+                "gateway_running": profile.gateway_running,
+                "skill_count": profile.skill_count,
+                "supported_parameters": supported_parameters,
+                "supports_reasoning": supports_reasoning,
+                "reasoning": {
+                    "supported": supports_reasoning,
+                    "effort_levels": (
+                        ["low", "medium", "high"] if supports_reasoning else []
+                    ),
+                },
+            })
+
+        return web.json_response({
+            "object": "list",
             "data": data,
         })
 
@@ -3045,6 +3143,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "health": {"method": "GET", "path": "/health"},
                 "health_detailed": {"method": "GET", "path": "/health/detailed"},
                 "models": {"method": "GET", "path": "/v1/models"},
+                "model_options": {"method": "GET", "path": "/api/model/options"},
                 "chat_completions": {"method": "POST", "path": "/v1/chat/completions"},
                 "responses": {"method": "POST", "path": "/v1/responses"},
                 "runs": {"method": "POST", "path": "/v1/runs"},
@@ -4065,6 +4164,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 reasoning_callback=_on_reasoning_summary,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                profile_name=profile_name,
+                **agent_overrides,
                 route=route,
             ))
             self._track_api_request(api_request_id, agent_ref, agent_task)
@@ -4088,6 +4189,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                profile_name=profile_name,
+                agent_ref=agent_ref,
+                **agent_overrides,
                 route=route,
             )
 
@@ -5144,7 +5248,31 @@ class APIServerAdapter(BasePlatformAdapter):
         # groups the entire conversation under one session entry.
         session_id = stored_session_id or str(uuid.uuid4())
 
+        # Per-client model routing for /v1/responses (see model_routes).
+        route = self._resolve_route(body.get("model"))
+        agent_overrides = _request_agent_overrides(
+            body,
+            virtual_model=self._model_name,
+            allow_bare_model=self._direct_model_requests,
+        )
+        selection_error = self._request_route_conflict_error(
+            session_id=session_id,
+            gateway_session_key=gateway_session_key,
+            requested_model=agent_overrides.get("requested_model"),
+            requested_provider=agent_overrides.get("requested_provider"),
+            route=route,
+        )
+        if selection_error:
+            return web.json_response(_openai_error(selection_error), status=400)
+
         stream = _coerce_request_bool(body.get("stream"), default=False)
+        raw_api_request_id = request.headers.get("X-Hermes-Request-Id", "")
+        api_request_id = self._normalize_api_request_id(raw_api_request_id)
+        if raw_api_request_id and not api_request_id:
+            return web.json_response(
+                _openai_error("Invalid X-Hermes-Request-Id", code="invalid_request_id"),
+                status=400,
+            )
         if stream:
             # Streaming branch — emit OpenAI Responses SSE events as the
             # agent runs so frontends can render text deltas and tool
@@ -5236,6 +5364,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=instructions,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                agent_ref=agent_ref,
+                profile_name=profile_name,
+                **agent_overrides,
                 route=route,
             )
 
@@ -5973,6 +6104,10 @@ class APIServerAdapter(BasePlatformAdapter):
         reasoning_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        profile_name: Optional[str] = None,
+        requested_model: Optional[str] = None,
+        requested_provider: Optional[str] = None,
+        model_options: Optional[Dict[str, Any]] = None,
         route: Optional[Dict[str, Any]] = None,
         session_model: Optional[str] = None,
         requested_runtime: Optional[Dict[str, Any]] = None,
@@ -6020,23 +6155,30 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 from gateway.session_context import clear_session_vars
 
-            with self._profile_scope(request_profile):
-                tokens = self._bind_api_server_session(
-                    chat_id=session_id or "",
-                    session_key=gateway_session_key or session_id or "",
-                    session_id=session_id or "",
-                )
-                try:
-                    agent = self._create_agent(
-                        ephemeral_system_prompt=ephemeral_system_prompt,
-                        session_id=session_id,
-                        stream_delta_callback=stream_delta_callback,
-                        tool_progress_callback=tool_progress_callback,
-                        tool_start_callback=tool_start_callback,
-                        tool_complete_callback=tool_complete_callback,
-                        gateway_session_key=gateway_session_key,
-                        route=route,
+                with self._profile_scope(request_profile):
+                    tokens = self._bind_api_server_session(
+                        chat_id=session_id or "",
+                        session_key=gateway_session_key or session_id or "",
+                        session_id=session_id or "",
                     )
+                    try:
+                        agent = self._create_agent(
+                            ephemeral_system_prompt=ephemeral_system_prompt,
+                            session_id=session_id,
+                            stream_delta_callback=stream_delta_callback,
+                            tool_progress_callback=tool_progress_callback,
+                            tool_start_callback=tool_start_callback,
+                            tool_complete_callback=tool_complete_callback,
+                            reasoning_callback=reasoning_callback,
+                            gateway_session_key=gateway_session_key,
+                            requested_model=requested_model,
+                            requested_provider=requested_provider,
+                            model_options=model_options,
+                            route=route,
+                            session_model=session_model,
+                            confirmed_runtime_lock=confirmed_runtime_lock,
+                            profile_name=profile_name,
+                        )
                         if agent_ref is not None:
                             agent_ref[0] = agent
                         effective_task_id = session_id or str(uuid.uuid4())
@@ -6057,85 +6199,133 @@ class APIServerAdapter(BasePlatformAdapter):
                         if isinstance(_eff_sid, str) and _eff_sid:
                             result["session_id"] = _eff_sid
                         # Signal whether context compression occurred during this turn
-                    # so _build_response_conversation_history can skip the
-                    # prior-concatenation path and store the compressed transcript
-                    # directly.  Rotation mode changes agent.session_id; in-place
-                    # mode sets _last_compaction_in_place (see #38763).
-                    _compacted_in_place = bool(getattr(agent, "_last_compaction_in_place", False))
-                    _session_rotated = (
-                        isinstance(_eff_sid, str) and isinstance(session_id, str)
-                        and _eff_sid != session_id
-                    )
-                    if _compacted_in_place or _session_rotated:
-                        result["_compressed"] = True
-                    include_runtime = bool(
-                        requested_runtime
-                        or route
-                        or confirmed_runtime_lock
-                        or (route_source and route_source != "global")
-                    )
-                    if include_runtime:
-                        runtime = dict(getattr(agent, "_hermes_api_runtime", {}) or {})
-                        raw_provider = getattr(agent, "provider", "")
-                        raw_model = getattr(agent, "model", "")
-                        actual_provider = (
-                            self._clean_runtime_id(raw_provider, max_len=80)
-                            if isinstance(raw_provider, str)
-                            else ""
+                        # so _build_response_conversation_history can skip the
+                        # prior-concatenation path and store the compressed transcript
+                        # directly.  Rotation mode changes agent.session_id; in-place
+                        # mode sets _last_compaction_in_place (see #38763).
+                        _compacted_in_place = bool(
+                            getattr(agent, "_last_compaction_in_place", False)
                         )
-                        actual_model = (
-                            self._clean_runtime_id(raw_model)
-                            if isinstance(raw_model, str)
-                            else ""
+                        _session_rotated = (
+                            isinstance(_eff_sid, str)
+                            and isinstance(session_id, str)
+                            and _eff_sid != session_id
                         )
-                        if actual_provider:
-                            runtime["provider"] = actual_provider
-                        else:
-                            runtime.setdefault("provider", "")
-                        if actual_model:
-                            runtime["model"] = actual_model
-                        else:
-                            runtime.setdefault("model", "")
-                        if confirmed_runtime_lock:
-                            expected_provider = self._clean_runtime_id(
-                                (route or {}).get("provider")
-                                or (requested_runtime or {}).get("provider"),
-                                max_len=80,
+                        if _compacted_in_place or _session_rotated:
+                            result["_compressed"] = True
+                        include_runtime = bool(
+                            requested_runtime
+                            or route
+                            or confirmed_runtime_lock
+                            or (route_source and route_source != "global")
+                        )
+                        if include_runtime:
+                            runtime = dict(
+                                getattr(agent, "_hermes_api_runtime", {}) or {}
                             )
-                            expected_model = self._clean_runtime_id(
-                                (route or {}).get("model")
-                                or (requested_runtime or {}).get("model")
+                            raw_provider = getattr(agent, "provider", "")
+                            raw_model = getattr(agent, "model", "")
+                            actual_provider = (
+                                self._clean_runtime_id(raw_provider, max_len=80)
+                                if isinstance(raw_provider, str)
+                                else ""
                             )
-                            mismatched = (
-                                (expected_provider and actual_provider != expected_provider)
-                                or (expected_model and actual_model != expected_model)
+                            actual_model = (
+                                self._clean_runtime_id(raw_model)
+                                if isinstance(raw_model, str)
+                                else ""
                             )
-                            if mismatched:
-                                raise RuntimeError(
-                                    "confirmed model lock runtime mismatch: "
-                                    f"expected provider={expected_provider or '<unspecified>'} "
-                                    f"model={expected_model or '<unspecified>'}; "
-                                    f"actual provider={actual_provider or '<unknown>'} "
-                                    f"model={actual_model or '<unknown>'}"
+                            if actual_provider:
+                                runtime["provider"] = actual_provider
+                            else:
+                                runtime.setdefault("provider", "")
+                            if actual_model:
+                                runtime["model"] = actual_model
+                            else:
+                                runtime.setdefault("model", "")
+                            if confirmed_runtime_lock:
+                                expected_provider = self._clean_runtime_id(
+                                    (route or {}).get("provider")
+                                    or (requested_runtime or {}).get("provider"),
+                                    max_len=80,
                                 )
-                        if requested_runtime:
-                            runtime["requested"] = {
-                                "provider": self._clean_runtime_id((requested_runtime or {}).get("provider"), max_len=80),
-                                "model": self._clean_runtime_id((requested_runtime or {}).get("model")),
-                            }
-                        runtime["route_source"] = route_source or runtime.get("route_source") or "global"
-                        runtime = self._sanitize_runtime_metadata(
-                            runtime=runtime,
-                            requested_runtime=requested_runtime,
-                            route_source=route_source or "global",
-                            model_lock=("confirmed" if confirmed_runtime_lock else ""),
+                                expected_model = self._clean_runtime_id(
+                                    (route or {}).get("model")
+                                    or (requested_runtime or {}).get("model")
+                                )
+                                mismatched = (
+                                    (
+                                        expected_provider
+                                        and actual_provider != expected_provider
+                                    )
+                                    or (
+                                        expected_model
+                                        and actual_model != expected_model
+                                    )
+                                )
+                                if mismatched:
+                                    raise RuntimeError(
+                                        "confirmed model lock runtime mismatch: "
+                                        f"expected provider={expected_provider or '<unspecified>'} "
+                                        f"model={expected_model or '<unspecified>'}; "
+                                        f"actual provider={actual_provider or '<unknown>'} "
+                                        f"model={actual_model or '<unknown>'}"
+                                    )
+                            if requested_runtime:
+                                runtime["requested"] = {
+                                    "provider": self._clean_runtime_id(
+                                        (requested_runtime or {}).get("provider"),
+                                        max_len=80,
+                                    ),
+                                    "model": self._clean_runtime_id(
+                                        (requested_runtime or {}).get("model")
+                                    ),
+                                }
+                            runtime["route_source"] = (
+                                route_source
+                                or runtime.get("route_source")
+                                or "global"
+                            )
+                            runtime = self._sanitize_runtime_metadata(
+                                runtime=runtime,
+                                requested_runtime=requested_runtime,
+                                route_source=route_source or "global",
+                                model_lock=(
+                                    "confirmed" if confirmed_runtime_lock else ""
+                                ),
+                            )
+                            if isinstance(result, dict):
+                                result["runtime"] = runtime
+                            usage["runtime"] = runtime
+                        return result, usage
+                    except _ProviderAuthResolutionError as exc:
+                        logger.warning(
+                            "Provider authentication failed for session=%s: %s",
+                            session_id or "",
+                            exc,
                         )
-                        if isinstance(result, dict):
-                            result["runtime"] = runtime
-                        usage["runtime"] = runtime
-                    return result, usage
-                finally:
-                    clear_session_vars(tokens)
+                        return (
+                            {
+                                "final_response": (
+                                    f"⚠️ Provider authentication failed: {exc}"
+                                ),
+                                "messages": [],
+                                "api_calls": 0,
+                                "tools": [],
+                            },
+                            {
+                                "input_tokens": 0,
+                                "output_tokens": 0,
+                                "total_tokens": 0,
+                            },
+                        )
+                    finally:
+                        clear_session_vars(tokens)
+            finally:
+                if previous_home is None:
+                    os.environ.pop("HERMES_HOME", None)
+                else:
+                    os.environ["HERMES_HOME"] = previous_home
 
         self._activate_admitted_request()
         self._inflight_agent_runs += 1
