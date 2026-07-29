@@ -17071,25 +17071,11 @@ def _(rid, params: dict) -> dict:
             home_token = set_hermes_home_override(profile_home)
         try:
             ctx = _model_picker_context(agent)
-            # picker_hints + canonical_order produce the TUI/desktop picker shape:
-            # `authenticated`/`auth_type`/`key_env`/`warning` per row, in
-            # CANONICAL_PROVIDERS declaration order. Desktop pickers default to the
-            # configured subset; callers that need setup affordances can pass
-            # include_unconfigured=true explicitly.
-            # Curated model lists are preserved — list_authenticated_providers
-            # populates `models` from the curated catalog, not provider_model_ids
-            # (which would pull non-agentic models like TTS/embeddings/etc.).
-            payload = build_models_payload(
+            payload = build_model_options_payload(
                 ctx,
                 explicit_only=bool(params.get("explicit_only")),
                 include_unconfigured=bool(params.get("include_unconfigured")),
-                picker_hints=True,
-                canonical_order=True,
-                pricing=True,
-                capabilities=True,
                 refresh=bool(params.get("refresh")),
-                probe_custom_providers=bool(params.get("refresh")),
-                probe_current_custom_provider=not bool(params.get("refresh")),
             )
         finally:
             if home_token is not None:

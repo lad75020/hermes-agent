@@ -3544,7 +3544,7 @@ def test_model_options_scopes_inventory_to_requested_profile(monkeypatch, tmp_pa
     monkeypatch.setattr(inventory, "load_picker_context", lambda: events.append(("load", None)) or FakeContext())
     monkeypatch.setattr(
         inventory,
-        "build_models_payload",
+        "build_model_options_payload",
         lambda ctx, **kwargs: events.append(("build", kwargs)) or {"provider": "custom:omlx", "providers": []},
     )
 
@@ -3555,6 +3555,11 @@ def test_model_options_scopes_inventory_to_requested_profile(monkeypatch, tmp_pa
     assert events[-1] == ("reset", "token")
     assert any(name == "load" for name, _ in events)
     assert any(name == "build" for name, _ in events)
+    assert next(value for name, value in events if name == "build") == {
+        "explicit_only": False,
+        "include_unconfigured": False,
+        "refresh": False,
+    }
 
 
 def test_session_close_releases_resume_lock_before_slow_teardown(monkeypatch):
