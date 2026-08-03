@@ -4872,8 +4872,8 @@ def _strip_session_list_rows(sessions: List[Dict[str, Any]]) -> List[Dict[str, A
 
 @app.get("/api/sessions")
 def get_sessions(
-    limit: int = 20,
-    offset: int = 0,
+    limit: int = Query(20, ge=0, le=100),
+    offset: int = Query(0, ge=0),
     min_messages: int = 0,
     archived: str = "exclude",
     order: str = "created",
@@ -4912,12 +4912,12 @@ def get_sessions(
     if profile:
         profile_name, _ = _cron_profile_home(profile)
     try:
-        db = _open_session_db_for_profile(profile)
+        # Opportunistic, config-gated, double-throttled stale-session
+        # sweep — the only auto_archive hook that fires for Desktop's
+        # `hermes serve` backend. No-op when disabled or run recently.
+        _maybe_auto_archive_for_profile(profile)
+        db = _open_session_db_for_profile(profile, read_only=True)
         try:
-            # Opportunistic, config-gated, double-throttled stale-session
-            # sweep — the only auto_archive hook that fires for Desktop's
-            # `hermes serve` backend. No-op when disabled or run recently.
-            _maybe_auto_archive_for_profile(db, profile)
             min_message_count = max(0, min_messages)
             archived_only = archived == "only"
             include_archived = archived == "include"
@@ -4982,8 +4982,8 @@ def _split_csv_filter(value: Optional[str]) -> Optional[List[str]]:
 
 @app.get("/api/profiles/sessions")
 def get_profiles_sessions(
-    limit: int = 20,
-    offset: int = 0,
+    limit: int = Query(20, ge=0, le=200),
+    offset: int = Query(0, ge=0),
     min_messages: int = 0,
     archived: str = "exclude",
     order: str = "recent",
