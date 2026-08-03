@@ -2740,7 +2740,7 @@ def list_authenticated_providers(
                     from hermes_cli.models import fetch_api_models
                     live_models = fetch_api_models(
                         api_key,
-                        api_url, timeout=1.5,
+                        api_url,
                         timeout=1.5 if for_picker else 5.0,  # picker: fail fast so a slow custom endpoint doesn't block /model
                         headers=_extra_headers_from_config(ep_cfg) or None,
                     )
