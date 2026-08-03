@@ -28,6 +28,7 @@ import {
   Code,
   Cpu,
   Database,
+  Download,
   Eye,
   FolderOpen,
   FileText,
