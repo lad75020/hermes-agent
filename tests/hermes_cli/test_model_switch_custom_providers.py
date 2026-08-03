@@ -1110,7 +1110,7 @@ def test_custom_providers_uses_live_models_for_multi_model_endpoint(monkeypatch)
         (
             custom_providers[0]["api_key"],
             "https://gateway.example.com/v1",
-            {"timeout": 1.5, "headers": None},
+            {"timeout": 1.5, "timeout": 5.0, "headers": None},
         )
     ], "fetch_api_models must be called with the custom provider's credentials"
     assert gateway_prov["models"] == [
