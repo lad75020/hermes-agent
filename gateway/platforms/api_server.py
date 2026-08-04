@@ -6327,7 +6327,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         session_id=session_id or "",
                     )
                     agent = None
-                try:
+                    try:
                         agent = self._create_agent(
                             ephemeral_system_prompt=ephemeral_system_prompt,
                             session_id=session_id,
@@ -6349,12 +6349,12 @@ class APIServerAdapter(BasePlatformAdapter):
                             agent_ref[0] = agent
                         effective_task_id = session_id or str(uuid.uuid4())
                         # Baseline for selective background-process reaping on
-                    # SSE client disconnect — mirrors gateway/run.py's
-                    # gateway-turn cleanup (#76115); this API-server surface
-                    # runs its own agent lifecycle and doesn't go through
-                    # TurnRunner, so it needs its own baseline.
-                    _publish_turn_process_ownership(agent, effective_task_id)
-                    result = agent.run_conversation(
+                        # SSE client disconnect — mirrors gateway/run.py's
+                        # gateway-turn cleanup (#76115); this API-server surface
+                        # runs its own agent lifecycle and doesn't go through
+                        # TurnRunner, so it needs its own baseline.
+                        _publish_turn_process_ownership(agent, effective_task_id)
+                        result = agent.run_conversation(
                             user_message=user_message,
                             conversation_history=conversation_history,
                             task_id=effective_task_id,
@@ -6493,13 +6493,13 @@ class APIServerAdapter(BasePlatformAdapter):
                         )
                     finally:
                         # Turn finished (success, auth failure, or crash) — clear
-                    # ownership markers so a disconnect landing after this
-                    # point can't reap background work this turn left
-                    # running on purpose. Mirrors the same race-window guard
-                    # in gateway/run.py's _run_sync_with_timeout_lifecycle.
-                    if agent is not None:
-                        _clear_turn_process_ownership(agent)
-                    clear_session_vars(tokens)
+                        # ownership markers so a disconnect landing after this
+                        # point can't reap background work this turn left
+                        # running on purpose. Mirrors the same race-window guard
+                        # in gateway/run.py's _run_sync_with_timeout_lifecycle.
+                        if agent is not None:
+                            _clear_turn_process_ownership(agent)
+                        clear_session_vars(tokens)
             finally:
                 if previous_home is None:
                     os.environ.pop("HERMES_HOME", None)
