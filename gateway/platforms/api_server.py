@@ -6544,14 +6544,11 @@ class APIServerAdapter(BasePlatformAdapter):
                         # runs its own agent lifecycle and doesn't go through
                         # TurnRunner, so it needs its own baseline.
                         _publish_turn_process_ownership(agent, effective_task_id)
-                        # Shutdown interrupt coverage (#63529).  Registering here,
-                    # once, covers every _run_agent() caller — the same reason
-                    # the _ProviderAuthResolutionError handler below lives here
-                    # rather than in each route.  Only two callers pass
-                    # ``agent_ref``, and only /v1/runs has a run_id, so neither
-                    # is a usable hook for the rest.
-                    self._shutdown_interruptible_agents[id(agent)] = agent
-                    result = agent.run_conversation(
+                        # Shutdown interrupt coverage (#63529). Registering here
+                        # once covers every _run_agent() caller, including routes
+                        # that do not expose an agent_ref or run_id.
+                        self._shutdown_interruptible_agents[id(agent)] = agent
+                        result = agent.run_conversation(
                             user_message=user_message,
                             conversation_history=conversation_history,
                             task_id=effective_task_id,
