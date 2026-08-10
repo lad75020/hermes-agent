@@ -31,92 +31,22 @@ from utils import normalize_proxy_url
 
 logger = logging.getLogger(__name__)
 
-_BASE64_IMAGE_MAX_BYTES = 100 * 1024 * 1024
-_IMAGE_B64_FIELD_RE = re.compile(
-    r'(?P<prefix>"image_base64"\s*:\s*")(?P<data>[A-Za-z0-9+/=\r\n]+)(?P<suffix>")',
-    re.DOTALL,
-)
-_DATA_IMAGE_RE = re.compile(
-    r'data:(?P<mime>image/[A-Za-z0-9.+-]+);base64,(?P<data>[A-Za-z0-9+/=\r\n]+)',
-    re.DOTALL,
-)
 
+def _consume_detached_handler_exception(task: "asyncio.Task") -> None:
+    """Done-callback retrieving a detached fatal-error handler's exception.
 
-def _image_ext_for_mime(mime_type: str) -> str:
-    mime = (mime_type or "").split(";", 1)[0].strip().lower()
-    if mime == "image/jpeg":
-        return ".jpg"
-    guessed = mimetypes.guess_extension(mime) if mime else None
-    return guessed or ".png"
-
-
-def _mime_from_image_bytes(raw: bytes, fallback: str = "image/png") -> str:
-    if raw.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if raw.startswith(b"GIF87a") or raw.startswith(b"GIF89a"):
-        return "image/gif"
-    if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
-        return "image/webp"
-    return fallback or "image/png"
-
-
-def _save_response_base64_image(
-    b64_data: str,
-    *,
-    mime_type: str = "image/png",
-    filename: str | None = None,
-) -> str | None:
-    """Decode a response-embedded base64 image into Hermes' image cache.
-
-    Gateway platforms can send files up to their native attachment limits, but
-    they cannot send multi-megabyte base64 strings as chat text.  This helper
-    moves ``image_base64`` / ``data:image`` payloads back onto disk so the
-    normal native media-delivery path can attach them.
+    Prevents "Task exception was never retrieved" warnings for handler tasks
+    we deliberately let finish in the background after their awaiting
+    (carrier) task was cancelled — see ``_notify_fatal_error``.
     """
-    normalized = re.sub(r"\s+", "", b64_data or "")
-    if not normalized:
-        return None
-    # Avoid decoding payloads that cannot fit the intended 100 MB attachment
-    # envelope.  Base64 expands by roughly 4/3.
-    if (len(normalized) * 3) // 4 > _BASE64_IMAGE_MAX_BYTES:
-        logger.warning("Embedded base64 image exceeds %d bytes; skipping", _BASE64_IMAGE_MAX_BYTES)
-        return None
-    try:
-        raw = base64.b64decode(normalized, validate=True)
-    except Exception as exc:
-        logger.warning("Could not decode embedded base64 image: %s", exc)
-        return None
-    if not raw:
-        return None
-    if len(raw) > _BASE64_IMAGE_MAX_BYTES:
-        logger.warning("Embedded image exceeds %d bytes after decode; skipping", _BASE64_IMAGE_MAX_BYTES)
-        return None
-    detected_mime = _mime_from_image_bytes(raw, mime_type)
-    if not detected_mime.startswith("image/"):
-        logger.warning("Embedded base64 payload is not an image (%s); skipping", detected_mime)
-        return None
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "Detached fatal-error handler task failed: %s", exc, exc_info=exc
+        )
 
-    try:
-        from hermes_constants import get_hermes_home
-
-        cache_dir = Path(get_hermes_home()) / "cache" / "images"
-    except Exception:
-        cache_dir = Path.home() / ".hermes" / "cache" / "images"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    safe_name = ""
-    if filename:
-        safe_name = Path(str(filename)).name
-        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", safe_name).strip("._")
-    if not safe_name:
-        safe_name = f"embedded_image_{uuid.uuid4().hex[:12]}{_image_ext_for_mime(detected_mime)}"
-    path = cache_dir / safe_name
-    if path.exists():
-        path = cache_dir / f"{path.stem}_{uuid.uuid4().hex[:8]}{path.suffix}"
-    path.write_bytes(raw)
-    return str(path)
 
 # Audio file extensions Hermes recognizes for native audio delivery.
 # Keep Telegram's narrower attachment/voice sets below separate: formats such
@@ -3088,6 +3018,11 @@ class BasePlatformAdapter(ABC):
         self._fatal_error_message: Optional[str] = None
         self._fatal_error_retryable = True
         self._fatal_error_handler: Optional[Callable[["BasePlatformAdapter"], Awaitable[None] | None]] = None
+        # Strong references to shielded fatal-error handler tasks that outlive
+        # their carrier task (asyncio only keeps weak refs). Without this set,
+        # the event loop can GC the detached handler before it finishes — the
+        # exact "handler killed mid-flight" class we are fixing (#81335).
+        self._detached_fatal_tasks: set = set()
         # Cross-HERMES_HOME token takeover is armed by GatewayRunner only for
         # an adapter's initial connect during an explicit ``gateway run
         # --replace`` startup.  Ordinary starts and every reconnect fail safe
@@ -3535,7 +3470,37 @@ class BasePlatformAdapter(ABC):
             return
         result = handler(self)
         if asyncio.iscoroutine(result):
-            await result
+            # Run the handler as a detached, shielded task. The notification
+            # is frequently awaited from inside an adapter-owned task (e.g.
+            # the Telegram ``_polling_error_task``), and the gateway's fatal
+            # handler tears the adapter down via ``disconnect()`` — which
+            # cancels that very task. Without the shield the cancellation
+            # killed the handler mid-flight: the adapter was already popped
+            # from the gateway's adapter map but never queued for background
+            # reconnection, leaving a zombie gateway with no platforms and no
+            # pending retries (#81335).
+            task = asyncio.ensure_future(result)
+            # Keep a strong reference so the event loop's weak-ref task
+            # table doesn't GC the handler before it finishes (asyncio docs:
+            # "Save a reference to tasks ... to avoid a task disappearing
+            # mid-execution"). Matches the gateway-level pattern in
+            # GatewayRunner._handle_adapter_fatal_error.
+            _tasks = getattr(self, "_detached_fatal_tasks", None)
+            if _tasks is None:
+                _tasks = self._detached_fatal_tasks = set()
+            _tasks.add(task)
+            task.add_done_callback(_tasks.discard)
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # The carrier task was cancelled (typically by our own
+                # teardown running inside the handler). Let the handler
+                # finish detached so reconnect queueing / the shutdown
+                # decision completes, and consume its eventual exception to
+                # avoid "Task exception was never retrieved" noise.
+                if not task.done():
+                    task.add_done_callback(_consume_detached_handler_exception)
+                raise
 
     def _acquire_platform_lock(self, scope: str, identity: str, resource_desc: str) -> bool:
         """Acquire a scoped lock for this adapter. Returns True on success.
