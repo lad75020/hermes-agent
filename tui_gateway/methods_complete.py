@@ -359,19 +359,27 @@ def _(rid, params: dict) -> dict:
     try:
         from hermes_cli.inventory import build_model_options_payload
 
+        requested_profile = params.get("profile") if isinstance(params, dict) else None
+        requested_home = _profile_home(requested_profile)
         session = _sessions.get(params.get("session_id", ""))
-        agent = session.get("agent") if session else None
-        # Layer agent-session state on top of disk config — once an agent
-        # is spawned, IT owns the live provider/model/base_url. Empty
-        # agent attributes must NOT clobber disk config (with_overrides
-        # is truthy-only).
-        ctx = _model_picker_context(agent)
-        payload = build_model_options_payload(
-            ctx,
-            explicit_only=bool(params.get("explicit_only")),
-            include_unconfigured=bool(params.get("include_unconfigured")),
-            refresh=bool(params.get("refresh")),
-        )
+        # An explicit profile makes its persisted configuration authoritative.
+        # Desktop can retain a draft agent while its composer has moved profiles;
+        # a live session's provider identity must never replace the selected
+        # profile's local catalog. The no-profile path retains the legacy live
+        # session overlay for standalone TUI clients.
+        agent = session.get("agent") if session and not requested_profile else None
+        home_token = set_hermes_home_override(requested_home) if requested_home else None
+        try:
+            ctx = _model_picker_context(agent)
+            payload = build_model_options_payload(
+                ctx,
+                explicit_only=bool(params.get("explicit_only")),
+                include_unconfigured=bool(params.get("include_unconfigured")),
+                refresh=bool(params.get("refresh")),
+            )
+        finally:
+            if home_token is not None:
+                reset_hermes_home_override(home_token)
         return _ok(rid, payload)
     except Exception as e:
         return _err(rid, 5033, str(e))

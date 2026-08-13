@@ -3907,6 +3907,55 @@ def test_model_options_scopes_inventory_to_requested_profile(monkeypatch, tmp_pa
     }
 
 
+def test_model_options_uses_requested_profile_not_stale_session(monkeypatch, tmp_path):
+    """An explicit picker profile must not inherit another profile's live agent.
+
+    Desktop can keep a just-created launch-profile session while the user
+    switches the composer to another profile.  Reusing that session's agent
+    here incorrectly makes the selected profile inherit the launch profile's
+    named custom-provider catalog.
+    """
+    import hermes_cli.inventory as inventory
+
+    requested_home = tmp_path / "profiles" / "ollama"
+    stale_home = tmp_path / "profiles" / "default"
+    requested_home.mkdir(parents=True)
+    stale_home.mkdir(parents=True)
+    events = []
+
+    class FakeContext:
+        def with_overrides(self, **kwargs):
+            events.append(("overrides", kwargs))
+            return self
+
+    stale_agent = type(
+        "Agent",
+        (),
+        {"provider": "custom", "model": "stale-model", "base_url": "http://stale.example/v1"},
+    )()
+    server._sessions["sid"] = {"agent": stale_agent, "profile_home": str(stale_home)}
+    monkeypatch.setattr(server, "_profile_home", lambda profile: requested_home if profile == "ollama" else None)
+    monkeypatch.setattr(server, "set_hermes_home_override", lambda home: events.append(("set", Path(home))) or "token")
+    monkeypatch.setattr(server, "reset_hermes_home_override", lambda token: events.append(("reset", token)))
+    monkeypatch.setattr(inventory, "load_picker_context", lambda: events.append(("load", None)) or FakeContext())
+    monkeypatch.setattr(
+        inventory,
+        "build_model_options_payload",
+        lambda ctx, **kwargs: events.append(("build", kwargs)) or {"provider": "custom", "providers": []},
+    )
+
+    try:
+        resp = server.handle_request(
+            {"id": "1", "method": "model.options", "params": {"profile": "ollama", "session_id": "sid"}}
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert resp["result"]["provider"] == "custom"
+    assert events[0] == ("set", requested_home)
+    assert ("overrides", {"current_provider": "custom", "current_model": "stale-model", "current_base_url": "http://stale.example/v1"}) not in events
+
+
 def test_session_close_releases_resume_lock_before_slow_teardown(monkeypatch):
     """One slow session finalizer must not stall unrelated session.resume RPCs."""
     teardown_started = threading.Event()

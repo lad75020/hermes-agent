@@ -12969,16 +12969,17 @@ def _(rid, params: dict) -> dict:
     try:
         from hermes_cli.inventory import build_model_options_payload
 
+        requested_profile = params.get("profile") if isinstance(params, dict) else None
         session = _sessions.get(params.get("session_id", ""))
-        agent = session.get("agent") if session else None
-        home_token = None
-        profile_home = None
-        if session and session.get("profile_home"):
-            profile_home = session.get("profile_home")
+        # An explicit profile must use its persisted configuration rather than
+        # a possibly stale agent retained by an earlier desktop session.
+        if requested_profile:
+            profile_home = _profile_home(requested_profile)
+            agent = None
         else:
-            profile_home = _profile_home(params.get("profile") if isinstance(params, dict) else None)
-        if profile_home:
-            home_token = set_hermes_home_override(profile_home)
+            profile_home = session.get("profile_home") if session else None
+            agent = session.get("agent") if session else None
+        home_token = set_hermes_home_override(profile_home) if profile_home else None
         try:
             ctx = _model_picker_context(agent)
             payload = build_model_options_payload(
