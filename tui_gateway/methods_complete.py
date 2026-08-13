@@ -332,9 +332,7 @@ def _(rid, params: dict) -> dict:
 
 
 def _session_agent(params: dict):
-    # An explicit profile scopes config/auth to that profile. A session id can be stale after
-    # the client changes profile, so its live agent must not overwrite the requested profile's picker state.
-    if str(params.get("profile") or "").strip():
+    if params.get("profile"):
         return None
     session = _sessions.get(params.get("session_id", ""))
     return session.get("agent") if session else None
