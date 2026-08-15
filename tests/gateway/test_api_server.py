@@ -2988,8 +2988,17 @@ class TestSessionKeyHeader:
             assert call_kwargs["gateway_session_key"] is None
 
     @pytest.mark.asyncio
-    async def test_session_key_rejected_without_api_key(self, adapter):
-        """Without API_SERVER_KEY, accepting a caller-supplied memory scope is unsafe — reject with 403."""
+    async def test_session_key_accepted_without_api_key(self, adapter):
+        """Local no-key mode accepts X-Hermes-Session-Key so VPN-local/browser
+        clients keep the same memory-scoping contract as built-in gateway
+        adapters. connect() already refuses to start the API server without
+        API_SERVER_KEY in production, so the no-key path is local/manual only.
+
+        LOCAL DIVERGENCE from upstream: upstream asserted 403 here; Laurent's
+        deployment intentionally allows session headers in no-key mode. Do not
+        re-introduce the 403 assertion on merge. See hermes-agent skill
+        'no-key local session headers'.
+        """
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post(
@@ -2997,7 +3006,9 @@ class TestSessionKeyHeader:
                 headers={"X-Hermes-Session-Key": "whatever"},
                 json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
             )
-            assert resp.status == 403
+            # Permissive local policy: the session key must NOT be rejected as
+            # an auth failure. Any non-403 outcome is acceptable here.
+            assert resp.status != 403
 
     @pytest.mark.asyncio
     async def test_session_key_rejects_control_chars(self, auth_adapter):
