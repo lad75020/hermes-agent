@@ -6716,8 +6716,8 @@ class APIServerAdapter(BasePlatformAdapter):
                         if agent_ref is not None:
                             agent_ref[0] = agent
                         if active_run_id:
-                        self._active_run_agents[active_run_id] = agent
-                    effective_task_id = session_id or str(uuid.uuid4())
+                            self._active_run_agents[active_run_id] = agent
+                        effective_task_id = session_id or str(uuid.uuid4())
                         # Baseline for selective background-process reaping on
                         # SSE client disconnect — mirrors gateway/run.py's
                         # gateway-turn cleanup (#76115); this API-server surface
@@ -6872,15 +6872,15 @@ class APIServerAdapter(BasePlatformAdapter):
                         # running on purpose. Mirrors the same race-window guard
                         # in gateway/run.py's _run_sync_with_timeout_lifecycle.
                         if active_run_id:
-                        self._active_run_agents.pop(active_run_id, None)
-                    if agent is not None:
+                            self._active_run_agents.pop(active_run_id, None)
+                        if agent is not None:
                             _clear_turn_process_ownership(agent)
                             # Symmetric with the registration above: the turn is
-                        # over, so it must not be interrupted by a later
-                        # shutdown.  pop() is a no-op when _create_agent
-                        # succeeded but the turn never reached registration.
-                        self._shutdown_interruptible_agents.pop(id(agent), None)
-                    clear_session_vars(tokens)
+                            # over, so it must not be interrupted by a later
+                            # shutdown.  pop() is a no-op when _create_agent
+                            # succeeded but the turn never reached registration.
+                            self._shutdown_interruptible_agents.pop(id(agent), None)
+                        clear_session_vars(tokens)
             finally:
                 if previous_home is None:
                     os.environ.pop("HERMES_HOME", None)
