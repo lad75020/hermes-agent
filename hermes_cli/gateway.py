@@ -5508,6 +5508,17 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         except Exception:
             pass  # best-effort; don't block gateway startup
 
+    # Refresh the local Ollama provider model lists from `ollama list` so the
+    # gateway (and any model routing that relies on the configured model set)
+    # reflects what is actually installed. Best-effort: a missing ollama
+    # binary, a stopped daemon, or an unwritable config never blocks startup.
+    try:
+        from hermes_cli.ollama_refresh import refresh_ollama_provider_models
+
+        refresh_ollama_provider_models()
+    except Exception:
+        pass  # best-effort; don't block gateway startup
+
     from gateway.run import start_gateway
 
     print("┌─────────────────────────────────────────────────────────┐")
