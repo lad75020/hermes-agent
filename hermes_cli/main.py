@@ -2726,6 +2726,9 @@ def cmd_dashboard(args):
     _mcp_discovery_after_bind = _dashboard_prepare_runtime(args, _headless_backend)
 
     from hermes_cli.dashboard_procs import BACKEND_LOCK_NAME
+    from hermes_cli.ollama_refresh import refresh_ollama_provider_models
+    refresh_ollama_provider_models()
+
     from hermes_cli.web_server import start_server
 
     # Interactive auth setup: if this bind will engage the auth gate but no
