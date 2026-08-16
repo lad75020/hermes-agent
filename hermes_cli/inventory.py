@@ -298,7 +298,7 @@ def build_model_options_payload(
       cache so live catalogs repopulate fully
     """
     refresh = bool(refresh)
-    return build_models_payload(
+    payload = build_models_payload(
         ctx,
         explicit_only=bool(explicit_only),
         include_unconfigured=bool(include_unconfigured),
@@ -311,6 +311,52 @@ def build_model_options_payload(
         probe_custom_providers=refresh,
         probe_current_custom_provider=not refresh,
     )
+    if (
+        str(ctx.current_provider or "").strip().lower() == "ollama-launch"
+        and not any(
+            str(row.get("slug", "")).strip().lower() == "ollama-launch"
+            for row in payload["providers"]
+        )
+    ):
+        injected = _build_ollama_launch_row_if_missing(ctx)
+        if injected:
+            payload["providers"] = [*payload["providers"], injected]
+
+    return payload
+
+
+def _build_ollama_launch_row_if_missing(ctx: ConfigContext) -> dict | None:
+    """Build a fallback ollama-launch row from local installed models.
+
+    A profile can point ``model.provider`` at ``ollama-launch`` without
+    carrying a persisted ``providers.ollama-launch`` config block. In that
+    case provider discovery currently returns no row (no credential-backed
+    source), so picker surfaces lose all models even though ``ollama list``
+    is authoritative for local instances.
+    """
+    if str(ctx.current_provider or "").strip().lower() != "ollama-launch":
+        return None
+    try:
+        from hermes_cli.ollama_refresh import list_installed_ollama_models
+    except Exception:
+        return None
+
+    try:
+        models = list_installed_ollama_models(timeout=1.5)
+    except Exception:
+        return None
+    if models is None:
+        return None
+
+    return {
+        "slug": "ollama-launch",
+        "name": "Ollama Launch",
+        "is_current": True,
+        "is_user_defined": False,
+        "models": list(models),
+        "total_models": len(models),
+        "source": "configured-current",
+    }
 
 
 # ─── Public: auxiliary-task pickers ─────────────────────────────────────

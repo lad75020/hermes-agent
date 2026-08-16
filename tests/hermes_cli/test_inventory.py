@@ -25,6 +25,7 @@ from unittest.mock import patch
 from hermes_cli.inventory import (
     ConfigContext,
     build_models_payload,
+    build_model_options_payload,
     load_picker_context,
 )
 
@@ -121,6 +122,46 @@ def test_cli_model_picker_forwards_force_refresh_to_probe_flags():
         )
     assert mock_list.call_args.kwargs["probe_custom_providers"] is True
     assert mock_list.call_args.kwargs["probe_current_custom_provider"] is False
+
+
+
+def test_build_model_options_payload_includes_current_ollama_launch_from_local_list():
+    """When no configured ollama-launch row exists, model.options must still return
+    the current provider using local ``ollama list`` models so the picker stays
+    useful in local-profile-only setups."""
+    ctx = _empty_ctx(provider="ollama-launch", model="model-a")
+    with (
+        _list_auth_returning([]),
+        patch(
+            "hermes_cli.ollama_refresh.list_installed_ollama_models",
+            return_value=["qwen3.8:30b", "qwen3.8:30b-mlx"],
+        ),
+    ):
+        payload = build_model_options_payload(ctx)
+
+    rows = [r for r in payload["providers"] if r["slug"] == "ollama-launch"]
+    assert rows, rows
+    row = rows[0]
+    assert row["models"] == ["qwen3.8:30b", "qwen3.8:30b-mlx"]
+    assert row["is_current"] is True
+    assert row["is_user_defined"] is False
+
+
+
+def test_build_model_options_payload_does_not_synthesize_non_ollama_launch_providers():
+    """Only ollama-launch gets the local-catalog fallback injection."""
+    ctx = _empty_ctx(provider="openrouter", model="gpt-5.5")
+    with (
+        _list_auth_returning([]),
+        patch(
+            "hermes_cli.ollama_refresh.list_installed_ollama_models",
+            return_value=["should-not-be-used"],
+        ) as discover_local,
+    ):
+        payload = build_model_options_payload(ctx)
+
+    assert all(r["slug"] != "ollama-launch" for r in payload["providers"])
+    discover_local.assert_not_called()
 
 
 def test_list_authenticated_providers_force_fresh_is_keyword_only():
