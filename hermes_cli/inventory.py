@@ -247,6 +247,11 @@ def build_model_options_payload(
         refresh=refresh, probe_custom_providers=refresh, probe_current_custom_provider=not refresh,
         non_blocking_catalogs=not refresh,
     )
+    if (str(ctx.current_provider or "").strip().lower() == "ollama-launch"
+            and not any(str(row.get("slug", "")).lower() == "ollama-launch" for row in payload["providers"])):
+        from hermes_cli.inventory_local_models import _build_ollama_launch_row_if_missing
+        if injected := _build_ollama_launch_row_if_missing(ctx):
+            payload["providers"].append(injected)
     _apply_limits(payload["providers"])
     _apply_usage(payload["providers"])
     if not refresh:
