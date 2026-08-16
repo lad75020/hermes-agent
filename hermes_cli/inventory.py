@@ -374,7 +374,12 @@ def build_model_options_payload(
         injected = _build_ollama_launch_row_if_missing(ctx)
         if injected:
             payload["providers"] = [*payload["providers"], injected]
-
+    if not refresh:
+        _prewarm_pricing_async(
+            payload["providers"],
+            current_provider=ctx.current_provider,
+            current_base_url=ctx.current_base_url,
+        )
     return payload
 
 
@@ -410,13 +415,6 @@ def _build_ollama_launch_row_if_missing(ctx: ConfigContext) -> dict | None:
         "total_models": len(models),
         "source": "configured-current",
     }
-    if not refresh:
-        _prewarm_pricing_async(
-            payload["providers"],
-            current_provider=ctx.current_provider,
-            current_base_url=ctx.current_base_url,
-        )
-    return payload
 
 
 # ─── Public: auxiliary-task pickers ─────────────────────────────────────
