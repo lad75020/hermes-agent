@@ -13,9 +13,17 @@ import { setSessionYolo } from '@/lib/yolo-session'
 import { normalizeChoices, setClarifyRequest } from '@/store/clarify'
 import { migrateSessionDraft } from '@/store/composer'
 import { clearQueuedPrompts, migrateQueuedPrompts } from '@/store/composer-queue'
+import { $gatewaySwitching } from '@/store/gateway-switch'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
-import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalizeProfileKey } from '@/store/profile'
+import {
+  $activeGatewayProfile,
+  $gatewaySwapTarget,
+  $newChatProfile,
+  ensureGatewayAgent,
+  ensureGatewayProfile,
+  normalizeProfileKey
+} from '@/store/profile'
 import {
   beginSessionMutation,
   endSessionMutation,
@@ -60,6 +68,7 @@ import {
   setWorkspaceCwdOwner,
   setYoloActive
 } from '@/store/session'
+import { requestForSessionProfile } from '@/store/session-request-router'
 import {
   $sessionTiles,
   closeSessionTile,
@@ -85,6 +94,7 @@ import {
   type BranchMessage,
   chatMessageArraysEquivalent,
   dedupeInflightUserAgainstTranscript,
+  goneSessionVerdict,
   isSessionGoneError,
   overlayConcurrentMessageChanges,
   patchSessionWorkspace,
@@ -726,7 +736,29 @@ export function useSessionActions({
         return
       }
 
-      await ensureGatewayProfile(sessionProfile)
+      // A row spliced from a CONNECTED registry gateway (#88880) carries its
+      // owning connection — activate THAT gateway, not a same-named local
+      // profile. Rows without the tag keep the legacy profile path.
+      if (storedForProfile?.connection_id) {
+        await ensureGatewayAgent(storedForProfile.connection_id, sessionProfile || 'default')
+      } else {
+        await ensureGatewayProfile(sessionProfile)
+      }
+
+      // Request-time routing guard for every session-scoped RPC below. The
+      // await above REQUESTS the swap, but by dispatch time the active gateway
+      // can be back on another profile: a concurrent switch won the
+      // gatewaySwitch mutex, an eviction path (idle reap, connection edit,
+      // profile delete) re-pointed the active route at the primary, or the
+      // target's dial failed and scheduleReconnect left the previous socket
+      // active. Sending this session's resume/activate on whatever socket
+      // happens to be active then lands it on a backend that has never heard
+      // of the session — the backend boots, sits idle, and the renderer burns
+      // its bounded retries into the "retries gave up" screen while the bot's
+      // own backend is healthy one port over (#89206: local pool AND SSH).
+      // requestForSessionProfile re-resolves the route at each call.
+      const requestForSession = <T>(method: string, params: Record<string, unknown> = {}): Promise<T> =>
+        requestForSessionProfile<T>(sessionProfile, requestGateway, method, params)
 
       // Re-check after the profile-resolve / gateway-swap awaits above: the
       // cache may have changed, and takeWarmCache re-validates belongs-to and
@@ -798,7 +830,7 @@ export function useSessionActions({
             let activated: SessionResumeResponse | null = null
 
             try {
-              activated = await requestGateway<SessionResumeResponse>('session.activate', {
+              activated = await requestForSession<SessionResumeResponse>('session.activate', {
                 session_id: cachedRuntimeId,
                 cols: 96,
                 omit_messages: true
@@ -811,7 +843,7 @@ export function useSessionActions({
                 throw error
               }
 
-              const usage = await requestGateway<UsageStats>('session.usage', { session_id: cachedRuntimeId })
+              const usage = await requestForSession<UsageStats>('session.usage', { session_id: cachedRuntimeId })
 
               if (!isCurrentResume()) {
                 return
@@ -1039,7 +1071,7 @@ export function useSessionActions({
 
         let resumeRuntimeBaselineMessages: ChatMessage[] = []
 
-        const resumePromise = requestGateway<SessionResumeResponse>('session.resume', {
+        const resumePromise = requestForSession<SessionResumeResponse>('session.resume', {
           session_id: storedSessionId,
           cols: 96,
           source: 'desktop',
@@ -1316,11 +1348,39 @@ export function useSessionActions({
         // permanently-dead id. (Booting straight into a no-longer-existent
         // last-session id is the common trigger.)
         if ($messages.get().length === 0 && isSessionGoneError(fallbackError)) {
-          // A session created THIS run isn't gone — its backend just flapped
-          // before the turn-less session persisted. Keep the empty view and arm
-          // the bounded retry to rebind, rather than yanking to a fresh draft.
-          // Only a stale id from a PRIOR run drops to a draft.
-          if (createdThisRun.has(storedSessionId)) {
+          // A 404 is only trustworthy from the backend that OWNS the session.
+          // A cross-profile open (Bots pane) races the gateway swap, so both
+          // lookups can land on a backend that never heard of the id (#88540).
+          // Re-resolve before discarding: a row still listed on any profile —
+          // or a swap in flight — means "retry once things settle", not gone.
+          let stillListed = false
+
+          try {
+            stillListed = Boolean(await resolveStoredSession(storedSessionId))
+          } catch {
+            // Resolution itself failed — inconclusive, treat as not listed.
+          }
+
+          if (!isCurrentResume()) {
+            return
+          }
+
+          const verdict = goneSessionVerdict({
+            createdThisRun: createdThisRun.has(storedSessionId),
+            stillListed,
+            switchInFlight:
+              $gatewaySwitching.get() ||
+              Boolean($gatewaySwapTarget.get()) ||
+              // Known owner ≠ active gateway: the 404 came from the wrong
+              // backend. An UNKNOWN owner must not count — it would block the
+              // draft fallback for genuinely dead ids on secondary profiles.
+              Boolean(
+                sessionProfile?.trim() &&
+                normalizeProfileKey(sessionProfile) !== normalizeProfileKey($activeGatewayProfile.get())
+              )
+          })
+
+          if (verdict === 'retry') {
             setResumeFailedSessionId(storedSessionId)
 
             return
