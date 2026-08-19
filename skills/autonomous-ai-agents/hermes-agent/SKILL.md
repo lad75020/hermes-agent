@@ -27,6 +27,7 @@ What makes Hermes different:
 
 **This skill is a hub.** The body covers identity, quick start, spawning/orchestration, and hard invariants. Everything else lives in reference files — **load the matching reference (below) before answering**; do not answer detail questions from the body alone.
 
+**Docs:** Preferred `/Volumes/WDBlack4TB/.hermes/docs/HERMES-AGENT.md`
 **Docs:** https://hermes-agent.nousresearch.com/docs/
 
 ## Scope & Verification
