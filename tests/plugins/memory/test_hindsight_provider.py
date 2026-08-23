@@ -350,7 +350,10 @@ class TestConfig:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
 
-        monkeypatch.setitem(sys.modules, "hindsight", SimpleNamespace(HindsightEmbedded=FakeHindsightEmbedded))
+        monkeypatch.setattr(
+            "plugins.memory.hindsight._create_embedded_client",
+            FakeHindsightEmbedded,
+        )
         monkeypatch.setattr("plugins.memory.hindsight._check_local_runtime", lambda: (True, ""))
 
         p = HindsightMemoryProvider()
@@ -368,6 +371,19 @@ class TestConfig:
 
         assert captured["idle_timeout"] == 0
         assert captured["llm_provider"] == "openai"
+
+    def test_get_client_waits_for_embedded_startup_reconciliation(self):
+        p = HindsightMemoryProvider()
+        p._mode = "local_embedded"
+        p._config = {"startup_timeout": 7}
+        expected_client = object()
+        startup_thread = MagicMock()
+        startup_thread.is_alive.side_effect = [True, False]
+        startup_thread.join.side_effect = lambda timeout: setattr(p, "_client", expected_client)
+        p._daemon_start_thread = startup_thread
+
+        assert p._get_client() is expected_client
+        startup_thread.join.assert_called_once_with(timeout=7)
 
 
 class TestPostSetup:

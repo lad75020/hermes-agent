@@ -168,7 +168,14 @@ def _check_local_runtime() -> tuple[bool, str | None]:
     status) reports the real ImportError.
     """
     try:
-        importlib.import_module("hindsight")
+        # Do not import the top-level ``hindsight`` package here.  Its
+        # ``__init__`` eagerly imports the in-process Hindsight API server,
+        # which in turn imports FastMCP.  Hermes intentionally pins MCP 2.x,
+        # while current FastMCP server releases still require MCP <2.  The
+        # embedded integration does not need that server in this process: the
+        # daemon manager launches it in an isolated ``uvx`` environment and we
+        # talk to it through ``hindsight-client``.
+        importlib.import_module("hindsight_client")
         importlib.import_module("hindsight_embed.daemon_embed_manager")
         importlib.import_module("sentence_transformers")
         return True, None
@@ -176,27 +183,98 @@ def _check_local_runtime() -> tuple[bool, str | None]:
         return False, str(exc)
 
 
-def _local_runtime_hint(reason: str | None) -> str:
-    """Actionable install guidance when the local_embedded runtime is missing.
+class _IsolatedEmbeddedHindsight:
+    """Embedded client whose API daemon stays isolated from Hermes' MCP stack.
 
-    ``local_embedded`` imports ``from hindsight import HindsightEmbedded``, which
-    is provided only by the ``hindsight-all`` package (its wheel ships the
-    top-level ``hindsight`` module). ``plugin.yaml`` declares only
-    ``hindsight-client`` (enough for cloud / local_external), so a user who
-    selected local_embedded without going through ``hermes memory setup`` — a
-    hand-written config, the legacy ``"mode": "local"`` alias, or a restored
-    backup — hits ``ModuleNotFoundError: No module named 'hindsight'``.
-    NousResearch/hermes-agent#7718.
+    This intentionally mirrors the small lifecycle surface used from
+    ``hindsight.HindsightEmbedded`` without importing the eager top-level
+    package.  The daemon remains a genuine Hindsight embedded daemon backed by
+    the profile's pg0 database; only its Python dependencies run in ``uvx``
+    instead of contaminating Hermes' own runtime environment.
+    """
+
+    def __init__(
+        self,
+        *,
+        profile: str = "default",
+        llm_provider: str = "groq",
+        llm_api_key: str = "",
+        llm_model: str = "openai/gpt-oss-120b",
+        llm_base_url: str | None = None,
+        idle_timeout: int = 0,
+    ) -> None:
+        from hindsight_embed import get_embed_manager
+
+        self.profile = profile
+        self.config = {
+            "HINDSIGHT_API_LLM_PROVIDER": llm_provider,
+            "HINDSIGHT_API_LLM_API_KEY": llm_api_key,
+            "HINDSIGHT_API_LLM_MODEL": llm_model,
+            "HINDSIGHT_API_LOG_LEVEL": "info",
+            "HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT": str(idle_timeout),
+        }
+        if llm_base_url:
+            self.config["HINDSIGHT_API_LLM_BASE_URL"] = llm_base_url
+        self._manager = get_embed_manager()
+        self._client = None
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def _ensure_started(self) -> None:
+        if self._client is not None and self._manager.is_running(self.profile):
+            return
+        with self._lock:
+            if self._client is not None and self._manager.is_running(self.profile):
+                return
+            if self._closed:
+                raise RuntimeError("Cannot use embedded Hindsight after it has been closed")
+            if not self._manager.ensure_running(self.config, self.profile):
+                raise RuntimeError(f"Failed to start daemon for profile '{self.profile}'")
+            from hindsight_client import Hindsight
+
+            self._client = Hindsight(base_url=self._manager.get_url(self.profile))
+
+    def close(self, stop_daemon: bool = False) -> None:
+        client = self._client
+        self._client = None
+        self._closed = True
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                logger.debug("Error closing embedded Hindsight client", exc_info=True)
+        if stop_daemon:
+            self._manager.stop(self.profile)
+
+    def __getattr__(self, name: str):
+        self._ensure_started()
+        return getattr(self._client, name)
+
+
+def _create_embedded_client(**kwargs):
+    """Factory kept separate so lifecycle wiring is straightforward to test."""
+    return _IsolatedEmbeddedHindsight(**kwargs)
+
+
+def _local_runtime_hint(reason: str | None) -> str:
+    """Return actionable install guidance for missing embedded components.
+
+    The embedded API server runs in an isolated ``uvx`` environment, while the
+    Hermes process needs only the daemon manager, client, and local embedding
+    dependencies.  Keeping those boundaries explicit avoids importing the
+    in-process Hindsight server and its incompatible FastMCP/MCP dependency
+    graph.
     """
     text = (reason or "").lower()
-    if "no module named" in text and ("hindsight'" in text or 'hindsight"' in text
-                                      or "hindsight_embed" in text):
+    if "no module named" in text and any(
+        name in text
+        for name in ("hindsight_client", "hindsight_embed", "sentence_transformers")
+    ):
         return (
             f" Install the embedded runtime with: uv pip install --python "
             f"{sys.executable} hindsight-all — or run 'hermes memory setup'. "
-            "(local_embedded needs the 'hindsight-all' package, which provides the "
-            "top-level 'hindsight' module; 'hindsight-client' alone only covers "
-            "cloud / local_external.)"
+            "(local_embedded needs the Hindsight daemon manager, client, and "
+            "local embedding dependencies.)"
         )
     return ""
 
@@ -765,6 +843,9 @@ class HindsightMemoryProvider(MemoryProvider):
         self._agent_workspace = ""
         self._turn_index = 0
         self._client = None
+        # local_embedded startup reconciles the profile environment and may
+        # restart the daemon. Client operations must not race that restart.
+        self._daemon_start_thread: threading.Thread | None = None
         self._timeout = _DEFAULT_TIMEOUT
         self._idle_timeout = _DEFAULT_IDLE_TIMEOUT
         self._prefetch_result = ""
@@ -1212,6 +1293,22 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _get_client(self):
         """Return the cached Hindsight client (created once, reused)."""
+        daemon_thread = self._daemon_start_thread
+        if (
+            self._mode == "local_embedded"
+            and daemon_thread is not None
+            and daemon_thread.is_alive()
+            and daemon_thread is not threading.current_thread()
+        ):
+            startup_timeout = _parse_int_setting(
+                self._config.get("startup_timeout") if self._config else None,
+                300,
+            )
+            daemon_thread.join(timeout=startup_timeout)
+            if daemon_thread.is_alive():
+                raise TimeoutError(
+                    f"Hindsight embedded daemon startup did not finish within {startup_timeout}s"
+                )
         if self._client is None:
             if self._mode == "local_embedded":
                 available, reason = _check_local_runtime()
@@ -1227,8 +1324,6 @@ class HindsightMemoryProvider(MemoryProvider):
                     pass
                 except Exception as _e:
                     raise ImportError(str(_e))
-                from hindsight import HindsightEmbedded
-                HindsightEmbedded.__del__ = lambda self: None
                 llm_provider = self._config.get("llm_provider", "")
                 if llm_provider in {"openai_compatible", "openrouter"}:
                     llm_provider = "openai"
@@ -1250,7 +1345,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 )
                 self._idle_timeout = idle_timeout
                 kwargs["idle_timeout"] = idle_timeout
-                self._client = HindsightEmbedded(**kwargs)
+                self._client = _create_embedded_client(**kwargs)
             else:
                 _ensure_cloud_client_dependency()
                 from hindsight_client import Hindsight
@@ -1902,8 +1997,12 @@ class HindsightMemoryProvider(MemoryProvider):
                         f.write(f"\n=== Daemon startup failed: {e} ===\n")
                         traceback.print_exc(file=f)
 
-            t = threading.Thread(target=_start_daemon, daemon=True, name="hindsight-daemon-start")
-            t.start()
+            self._daemon_start_thread = threading.Thread(
+                target=_start_daemon,
+                daemon=True,
+                name="hindsight-daemon-start",
+            )
+            self._daemon_start_thread.start()
 
     def system_prompt_block(self) -> str:
         if self._memory_mode == "context":
