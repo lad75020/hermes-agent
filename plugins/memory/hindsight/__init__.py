@@ -93,6 +93,7 @@ _MIN_VERSION_FOR_UPDATE_MODE_APPEND = "0.5.0"
 _VALID_BUDGETS = {"low", "mid", "high"}
 _PROVIDER_DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
+    "openai-codex": "gpt-5.2-codex",
     "anthropic": "claude-haiku-4-5",
     "gemini": "gemini-3.6-flash",
     "groq": "openai/gpt-oss-120b",
@@ -169,7 +170,11 @@ def _check_local_runtime() -> tuple[bool, str | None]:
     status) reports the real ImportError.
     """
     try:
-        importlib.import_module("hindsight")
+        # The top-level package eagerly imports Hindsight's API server and
+        # FastMCP. Hermes uses MCP 2.x while that server currently targets
+        # MCP <2; local_embedded talks to the daemon over hindsight-client and
+        # does not need the in-process server.
+        importlib.import_module("hindsight_client")
         importlib.import_module("hindsight_embed.daemon_embed_manager")
         importlib.import_module("sentence_transformers")
         return True, None
@@ -177,16 +182,108 @@ def _check_local_runtime() -> tuple[bool, str | None]:
         return False, str(exc)
 
 
+class _IsolatedDaemonEmbedManager:
+    """Run Hindsight's API daemon in its own dependency environment."""
+
+    def __init__(self) -> None:
+        from hindsight_embed.daemon_embed_manager import DaemonEmbedManager
+
+        self._manager = DaemonEmbedManager()
+
+    def _find_api_command(self) -> list[str]:
+        from hindsight_embed import __version__
+
+        return ["uvx", f"hindsight-api@{__version__}"]
+
+    def ensure_running(self, config: dict, profile: str) -> bool:
+        original = self._manager._find_api_command
+        self._manager._find_api_command = self._find_api_command
+        try:
+            return self._manager.ensure_running(config, profile)
+        finally:
+            self._manager._find_api_command = original
+
+    def __getattr__(self, name: str):
+        return getattr(self._manager, name)
+
+
+class _IsolatedEmbeddedHindsight:
+    """Embedded client that avoids importing Hindsight's MCP server in Hermes.
+
+    The daemon still runs as a genuine Hindsight embedded process; Hermes only
+    uses the daemon manager and HTTP client in-process. This isolates its
+    FastMCP/MCP<2 dependency graph from Hermes' MCP 2 runtime.
+    """
+
+    def __init__(
+        self,
+        *,
+        profile: str = "default",
+        llm_provider: str = "groq",
+        llm_api_key: str = "",
+        llm_model: str = "openai/gpt-oss-120b",
+        llm_base_url: str | None = None,
+        idle_timeout: int = 0,
+    ) -> None:
+        self.profile = profile
+        self.config = {
+            "HINDSIGHT_API_LLM_PROVIDER": llm_provider,
+            "HINDSIGHT_API_LLM_API_KEY": llm_api_key,
+            "HINDSIGHT_API_LLM_MODEL": llm_model,
+            "HINDSIGHT_API_LOG_LEVEL": "info",
+            "HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT": str(idle_timeout),
+        }
+        if llm_base_url:
+            self.config["HINDSIGHT_API_LLM_BASE_URL"] = llm_base_url
+        self._manager = _IsolatedDaemonEmbedManager()
+        self._client = None
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def _ensure_started(self) -> None:
+        if self._client is not None and self._manager.is_running(self.profile):
+            return
+        with self._lock:
+            if self._client is not None and self._manager.is_running(self.profile):
+                return
+            if self._closed:
+                raise RuntimeError("Cannot use embedded Hindsight after it has been closed")
+            if not self._manager.ensure_running(self.config, self.profile):
+                raise RuntimeError(f"Failed to start daemon for profile '{self.profile}'")
+            from hindsight_client import Hindsight
+
+            self._client = Hindsight(base_url=self._manager.get_url(self.profile))
+
+    def close(self, stop_daemon: bool = False) -> None:
+        client = self._client
+        self._client = None
+        self._closed = True
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                logger.debug("Error closing embedded Hindsight client", exc_info=True)
+        if stop_daemon:
+            self._manager.stop(self.profile)
+
+    def __getattr__(self, name: str):
+        self._ensure_started()
+        return getattr(self._client, name)
+
+
+def _create_embedded_client(**kwargs):
+    """Create an embedded client without importing Hindsight's eager package."""
+    return _IsolatedEmbeddedHindsight(**kwargs)
+
+
 def _local_runtime_hint(reason: str | None) -> str:
     """Actionable install guidance when the local_embedded runtime is missing.
 
-    ``local_embedded`` imports ``from hindsight import HindsightEmbedded``, which
-    is provided only by the ``hindsight-all`` package (its wheel ships the
-    top-level ``hindsight`` module). ``plugin.yaml`` declares only
-    ``hindsight-client`` (enough for cloud / local_external), so a user who
-    selected local_embedded without going through ``hermes memory setup`` — a
-    hand-written config, the legacy ``"mode": "local"`` alias, or a restored
-    backup — hits ``ModuleNotFoundError: No module named 'hindsight'``.
+    ``local_embedded`` needs the Hindsight embedded runtime in addition to the
+    cloud / external ``hindsight-client``. ``plugin.yaml`` declares only the
+    latter, so a user who selected local_embedded without going through
+    ``hermes memory setup`` — a hand-written config, the legacy ``"mode":
+    "local"`` alias, or a restored backup — can be missing the daemon manager.
     NousResearch/hermes-agent#7718.
     """
     text = (reason or "").lower()
@@ -195,9 +292,8 @@ def _local_runtime_hint(reason: str | None) -> str:
         return (
             f" Install the embedded runtime with: uv pip install --python "
             f"{sys.executable} hindsight-all — or run 'hermes memory setup'. "
-            "(local_embedded needs the 'hindsight-all' package, which provides the "
-            "top-level 'hindsight' module; 'hindsight-client' alone only covers "
-            "cloud / local_external.)"
+            "(local_embedded needs the 'hindsight-all' package; "
+            "'hindsight-client' alone only covers cloud / local_external.)"
         )
     return ""
 
@@ -1194,7 +1290,7 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "api_url", "description": "Hindsight API URL", "default": _DEFAULT_LOCAL_URL, "when": {"mode": "local_external"}},
             {"key": "api_key", "description": "API key (optional)", "secret": True, "env_var": "HINDSIGHT_API_KEY", "when": {"mode": "local_external"}},
             # Local embedded mode
-            {"key": "llm_provider", "description": "LLM provider", "default": "openai", "choices": ["openai", "anthropic", "gemini", "groq", "openrouter", "minimax", "ollama", "lmstudio", "openai_compatible"], "when": {"mode": "local_embedded"}},
+            {"key": "llm_provider", "description": "LLM provider", "default": "openai", "choices": ["openai", "openai-codex", "anthropic", "gemini", "groq", "openrouter", "minimax", "ollama", "lmstudio", "openai_compatible"], "when": {"mode": "local_embedded"}},
             {"key": "llm_base_url", "description": "Endpoint URL (e.g. http://192.168.1.10:8080/v1)", "default": "", "when": {"mode": "local_embedded", "llm_provider": "openai_compatible"}},
             {"key": "llm_api_key", "description": "LLM API key (optional for openai_compatible)", "secret": True, "env_var": "HINDSIGHT_LLM_API_KEY", "when": {"mode": "local_embedded"}},
             {"key": "llm_model", "description": "LLM model", "default": "gpt-4o-mini", "default_from": {"field": "llm_provider", "map": _PROVIDER_DEFAULT_MODELS}, "when": {"mode": "local_embedded"}},
@@ -1248,8 +1344,6 @@ class HindsightMemoryProvider(MemoryProvider):
                     pass
                 except Exception as _e:
                     raise ImportError(str(_e))
-                from hindsight import HindsightEmbedded
-                HindsightEmbedded.__del__ = lambda self: None
                 llm_provider = self._config.get("llm_provider", "")
                 if llm_provider in {"openai_compatible", "openrouter"}:
                     llm_provider = "openai"
@@ -1271,7 +1365,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 )
                 self._idle_timeout = idle_timeout
                 kwargs["idle_timeout"] = idle_timeout
-                self._client = HindsightEmbedded(**kwargs)
+                self._client = _create_embedded_client(**kwargs)
             else:
                 _ensure_cloud_client_dependency()
                 from hindsight_client import Hindsight

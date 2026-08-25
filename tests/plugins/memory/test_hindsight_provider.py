@@ -352,7 +352,10 @@ class TestConfig:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
 
-        monkeypatch.setitem(sys.modules, "hindsight", SimpleNamespace(HindsightEmbedded=FakeHindsightEmbedded))
+        monkeypatch.setattr(
+            "plugins.memory.hindsight._create_embedded_client",
+            FakeHindsightEmbedded,
+        )
         monkeypatch.setattr("plugins.memory.hindsight._check_local_runtime", lambda: (True, ""))
 
         p = HindsightMemoryProvider()
@@ -1488,6 +1491,20 @@ class TestConfigSchema:
         }
         assert expected_keys.issubset(keys), f"Missing: {expected_keys - keys}"
 
+    def test_local_embedded_schema_supports_codex_without_hindsight_api_key(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "hindsight" / "config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps({"mode": "local_embedded", "llm_provider": "openai-codex"}))
+        monkeypatch.setattr("plugins.memory.hindsight.get_hermes_home", lambda: tmp_path)
+        monkeypatch.delenv("HINDSIGHT_API_KEY", raising=False)
+        monkeypatch.setattr("plugins.memory.hindsight._check_local_runtime", lambda: (True, None))
+
+        provider = HindsightMemoryProvider()
+        llm_provider = next(field for field in provider.get_config_schema() if field["key"] == "llm_provider")
+
+        assert "openai-codex" in llm_provider["choices"]
+        assert provider.is_available()
+
 
 # ---------------------------------------------------------------------------
 # bank_id_template tests
@@ -1555,6 +1572,40 @@ class TestAvailability:
         monkeypatch.setenv("HINDSIGHT_API_KEY", "test-key")
         p = HindsightMemoryProvider()
         assert p.is_available()
+
+    def test_local_embedded_runtime_probe_avoids_eager_hindsight_server(self, monkeypatch):
+        """Hermes' MCP 2 runtime must not import Hindsight's MCP 1 server."""
+        from plugins.memory.hindsight import _check_local_runtime
+
+        imported = []
+
+        def fake_import(name):
+            imported.append(name)
+            if name in {
+                "hindsight_client",
+                "hindsight_embed.daemon_embed_manager",
+                "sentence_transformers",
+            }:
+                return SimpleNamespace()
+            raise AssertionError(f"unexpected import: {name}")
+
+        monkeypatch.setattr(
+            "plugins.memory.hindsight.importlib.import_module", fake_import
+        )
+
+        assert _check_local_runtime() == (True, None)
+        assert "hindsight" not in imported
+
+    def test_isolated_embedded_manager_runs_hindsight_api_via_uvx(self, monkeypatch):
+        """The local daemon must not inherit Hermes' MCP 2 dependency graph."""
+        from plugins.memory.hindsight import _IsolatedDaemonEmbedManager
+
+        monkeypatch.setattr("hindsight_embed.__version__", "9.9.9")
+
+        assert _IsolatedDaemonEmbedManager()._find_api_command() == [
+            "uvx",
+            "hindsight-api@9.9.9",
+        ]
 
 
     def test_local_mode_unavailable_when_runtime_import_fails(self, tmp_path, monkeypatch):
