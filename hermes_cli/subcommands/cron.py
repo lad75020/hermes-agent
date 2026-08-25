@@ -62,6 +62,16 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         help="Monitor mode: http(s) URL fetched with a bounded GET each tick "
             "instead of a script. Same hash-suppression semantics as "
             "--monitor-script.")
+    cron_create.add_argument(
+        "--no-fallback",
+        dest="no_fallback",
+        action="store_true",
+        default=False,
+        help=(
+            "Never fall back to another provider/model if this job's primary "
+            "provider fails. Useful for local-only jobs."
+        ),
+    )
     cron_create.add_argument("--workdir",
         help="Absolute path for the job to run from. Injects AGENTS.md / CLAUDE.md / .cursorrules from that directory and uses it as the cwd for terminal/file/code_exec tools. Omit to preserve old behaviour (no project context files).",
     )
@@ -138,6 +148,21 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "--monitor-script`). Pass empty string to clear.")
     cron_edit.add_argument("--monitor-url", dest="monitor_url",
         help=("Set/replace the monitor source URL. Pass empty string to clear."))
+    cron_edit.add_argument(
+        "--no-fallback",
+        dest="no_fallback",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Disable provider/model fallback for this job.",
+    )
+    cron_edit.add_argument(
+        "--allow-fallback",
+        dest="no_fallback",
+        action="store_const",
+        const=False,
+        help="Allow this job to use configured fallback providers again.",
+    )
     cron_edit.add_argument("--workdir",
         help="Absolute path for the job to run from (injects AGENTS.md etc. and sets terminal cwd). Pass empty string to clear.",
     )

@@ -503,6 +503,7 @@ def _format_job(job: dict[str, Any]) -> dict[str, Any]:
         "last_error": redact_sensitive_text(
             job["last_error"], force=True, redact_url_credentials=True,
         ) if job.get("last_error") else job.get("last_error"),
+        "no_fallback": bool(job.get("no_fallback", False)),
         "enabled": job.get("enabled", True),
         # Derive from enabled so half-paused records never render as paused.
         "state": effective_job_state(job),

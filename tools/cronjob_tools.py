@@ -691,8 +691,7 @@ def _action_create(a: dict[str, Any]) -> str:
             # [] is an explicit zero-tool allowlist, not a clear back to the unrestricted default (#82010).
             enabled_toolsets=a["enabled_toolsets"] if a["enabled_toolsets"] is not None else None,
             workdir=_normalize_optional_job_value(a["workdir"]),
-            no_agent=_no_agent, attach_to_session=a["attach_to_session"],
-            no_fallback=bool(a["no_fallback"]),
+            no_agent=_no_agent, no_fallback=bool(a["no_fallback"]), attach_to_session=a["attach_to_session"],
             monitor_script=_normalize_optional_job_value(a["monitor_script"]),
             monitor_url=_normalize_optional_job_value(a["monitor_url"]),
             # CLI-only lane: absent from CRONJOB_SCHEMA and the model dispatch (models don't pick models).
@@ -912,6 +911,8 @@ def _update_run_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[str
     if a["workdir"] is not None:
         # Empty string clears; otherwise update_job() validates/normalizes.
         updates["workdir"] = _normalize_optional_job_value(a["workdir"]) or None
+    if a["no_fallback"] is not None:
+        updates["no_fallback"] = bool(a["no_fallback"])
     if a["no_agent"] is not None:
         # Flipping to True needs a script on the job or in this same update.
         target_no_agent = bool(a["no_agent"])
@@ -920,8 +921,6 @@ def _update_run_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[str
                 "Cannot set no_agent=True on a job without a script. "
                 "Set `script` in the same update, or on the job first.")
         updates["no_agent"] = target_no_agent
-    if a["no_fallback"] is not None:
-        updates["no_fallback"] = bool(a["no_fallback"])
     if a["repeat"] is not None:
         # Shared chokepoint coerces string forms ('forever'/'once'/'3') and 0/negative.
         from cron.jobs import normalize_repeat_value
@@ -1119,14 +1118,11 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
                 "type": "string",
                 "description": "Optional change-detector that gates the agent: an http(s) URL (fetched each tick) or a script path (same rules as `script`, run each tick) — cheap, no LLM. Output identical to the previous tick skips the agent run entirely; changed output wakes the agent with a diff injected into the prompt. First tick always runs (baseline). Output must be deterministic (no timestamps) or every tick looks changed. Incompatible with no_agent. On update, '' clears."
             },
+            "no_fallback": {"type": "boolean", "description": "Disable provider/model fallback for this job."},
             "no_agent": {
                 "type": "boolean",
                 "default": False,
                 "description": "True = no LLM: the scheduler runs `script` (required) on schedule and delivers its stdout verbatim; empty stdout sends nothing (watchdog pattern). Use for script-only pings with fixed output; keep False for anything needing reasoning."
-            },
-            "no_fallback": {
-                "type": "boolean",
-                "description": "For create/update: prevent this job from switching to the global fallback provider chain. Omit to keep the existing setting on update."
             },
             "context_from": {
                 "type": "array",

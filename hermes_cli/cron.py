@@ -759,7 +759,7 @@ _JOB_ARG_FIELDS = (("name", "name"), ("deliver", "deliver"), ("failure_deliver",
                    ("model", "model"), ("provider", "model_provider"), ("pinned", "pinned"),
                    ("monitor_script", "monitor_script"), ("monitor_url", "monitor_url"),
                    ("continuity", "continuity"), ("reasoning_effort", "reasoning_effort"),
-                   ("interpreter", "interpreter"))
+                   ("interpreter", "interpreter"), ("no_fallback", "no_fallback"))
 
 
 def _job_api_kwargs(args) -> dict[str, Any]:
@@ -772,6 +772,7 @@ _JOB_DETAIL_LINES = (
     ("monitor_script", "  Monitor: {} (agent runs only on output change)"),
     ("monitor_url", "  Monitor: {} (agent runs only on output change)"),
     ("no_agent", "  Mode: no-agent (script stdout delivered directly)"),
+    ("no_fallback", "  Fallback: disabled"),
     ("continuity", "  Continuity: on (each run sees the previous run's output)"),
     ("workdir", "  Workdir: {}"),
     ("interpreter", "  Python: {}"))
