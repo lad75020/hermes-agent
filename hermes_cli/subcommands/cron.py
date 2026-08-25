@@ -71,6 +71,16 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         ),
     )
     cron_create.add_argument(
+        "--no-fallback",
+        dest="no_fallback",
+        action="store_true",
+        default=False,
+        help=(
+            "Never fall back to another provider/model if this job's primary "
+            "provider fails. Useful for local-only jobs."
+        ),
+    )
+    cron_create.add_argument(
         "--monitor-script",
         dest="monitor_script",
         help=(
@@ -191,6 +201,21 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         action="store_const",
         const=False,
         help="Disable no-agent mode on this job (reverts to LLM-driven execution).",
+    )
+    cron_edit.add_argument(
+        "--no-fallback",
+        dest="no_fallback",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Disable provider/model fallback for this job.",
+    )
+    cron_edit.add_argument(
+        "--allow-fallback",
+        dest="no_fallback",
+        action="store_const",
+        const=False,
+        help="Allow this job to use configured fallback providers again.",
     )
     cron_edit.add_argument(
         "--continuity",

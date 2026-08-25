@@ -27,7 +27,11 @@ import pytest
 # Ensure project root is importable.
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from cron.scheduler import _summarize_cron_failure_for_delivery, run_job
+from cron.scheduler import (
+    _preflight_check_provider_key,
+    _summarize_cron_failure_for_delivery,
+    run_job,
+)
 
 
 def _base_job(**overrides):
@@ -216,6 +220,13 @@ class TestCreateJobSnapshot:
         assert job["provider"] == "nous"
         assert job["provider_snapshot"] is None
         resolver.assert_not_called()
+
+    def test_new_job_persists_no_fallback_as_false_by_default(self, monkeypatch):
+        jobs = self._isolate_storage(monkeypatch)
+
+        job = jobs.create_job(prompt="do a thing", schedule="every 1 hour")
+
+        assert job["no_fallback"] is False
 
     def test_snapshot_resolution_error_fails_open_to_none(self, monkeypatch):
         """If resolution raises at creation, snapshot is None — creation never breaks."""
@@ -436,3 +447,111 @@ class TestRuntimeResolutionTargetModel:
 
         assert captured.get("target_model") == "my-pinned-model"
         assert captured.get("requested") == "openrouter"
+
+
+class TestNoFallbackCronJobs:
+    def test_preflight_requires_primary_credentials_when_job_disables_fallback(
+        self, monkeypatch
+    ):
+        """A global fallback must not hide a missing pinned local credential."""
+        from hermes_cli.auth import AuthError
+
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            lambda **_kwargs: (_ for _ in ()).throw(
+                AuthError("OLLAMA_API_KEY missing", provider="ollama")
+            ),
+        )
+
+        reason = _preflight_check_provider_key(
+            {
+                "id": "local-only",
+                "provider": "ollama",
+                "model": "qwen3.8:27b-mlx",
+                "no_fallback": True,
+            },
+            {
+                "fallback_providers": [
+                    {"provider": "anthropic", "model": "claude-sonnet-4-6"}
+                ]
+            },
+        )
+
+        assert reason is not None
+        assert "credential missing" in reason
+
+    def test_run_job_does_not_resolve_or_pass_global_fallbacks_for_local_only_job(
+        self, monkeypatch, tmp_path
+    ):
+        """A no_fallback job stops at its primary and gives the agent no chain."""
+        from hermes_cli.auth import AuthError
+
+        (tmp_path / "config.yaml").write_text(
+            "model:\n  default: qwen3.8:27b-mlx\n"
+            "cron:\n  preflight: false\n"
+            "fallback_providers:\n"
+            "  - provider: anthropic\n"
+            "    model: claude-sonnet-4-6\n"
+        )
+        resolve = MagicMock(
+            side_effect=AuthError("primary unavailable", provider="ollama")
+        )
+        fake_db = MagicMock()
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._get_hermes_home", return_value=tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("hermes_cli.env_loader.load_hermes_dotenv"), \
+             patch("hermes_cli.env_loader.reset_secret_source_cache"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("hermes_cli.runtime_provider.resolve_runtime_provider", resolve), \
+             patch("run_agent.AIAgent") as agent_cls:
+            success, _output, _final_response, error = run_job(
+                _base_job(
+                    provider="ollama",
+                    model="qwen3.8:27b-mlx",
+                    no_fallback=True,
+                )
+            )
+
+        assert success is False
+        assert error is not None
+        assert resolve.call_count == 1
+        agent_cls.assert_not_called()
+
+    def test_run_job_passes_no_fallback_model_chain_to_local_only_agent(
+        self, tmp_path
+    ):
+        """Even after primary resolution, the agent must not receive a fallback chain."""
+        (tmp_path / "config.yaml").write_text(
+            "model:\n  default: qwen3.8:27b-mlx\n"
+            "fallback_providers:\n"
+            "  - provider: anthropic\n"
+            "    model: claude-sonnet-4-6\n"
+        )
+        runtime = {
+            "api_key": "test-key",
+            "base_url": "http://localhost:11434/v1",
+            "provider": "ollama",
+            "api_mode": "chat_completions",
+        }
+        fake_db = MagicMock()
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._get_hermes_home", return_value=tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("hermes_cli.env_loader.load_hermes_dotenv"), \
+             patch("hermes_cli.env_loader.reset_secret_source_cache"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=runtime), \
+             patch("run_agent.AIAgent") as agent_cls:
+            agent_cls.return_value.run_conversation.return_value = {"final_response": "ok"}
+            success, _output, _final_response, error = run_job(
+                _base_job(
+                    provider="ollama",
+                    model="qwen3.8:27b-mlx",
+                    no_fallback=True,
+                )
+            )
+
+        assert success is True
+        assert error is None
+        assert agent_cls.call_args.kwargs["fallback_model"] is None

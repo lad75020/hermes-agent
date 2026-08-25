@@ -407,6 +407,43 @@ class TestAgentCannotSetModelPin:
         assert "provider" not in props
         assert "base_url" not in props
 
+    def test_schema_exposes_no_fallback_and_handler_persists_it(self):
+        """The model can request a local-only job without controlling its model pin."""
+        from cron.jobs import get_job
+        from tools.cronjob_tools import CRONJOB_SCHEMA
+        from tools.registry import registry
+
+        props = CRONJOB_SCHEMA["parameters"]["properties"]
+        assert props["no_fallback"]["type"] == "boolean"
+
+        created = json.loads(
+            registry.dispatch(
+                "cronjob",
+                {
+                    "action": "create",
+                    "prompt": "Use the local model only",
+                    "schedule": "every 1h",
+                    "no_fallback": True,
+                },
+            )
+        )
+        assert created["success"] is True
+        assert created["job"]["no_fallback"] is True
+        job_id = created["job_id"]
+        assert get_job(job_id)["no_fallback"] is True
+        listed = json.loads(registry.dispatch("cronjob", {"action": "list"}))
+        assert listed["jobs"][0]["no_fallback"] is True
+
+        updated = json.loads(
+            registry.dispatch(
+                "cronjob",
+                {"action": "update", "job_id": job_id, "no_fallback": False},
+            )
+        )
+        assert updated["success"] is True
+        assert updated["job"]["no_fallback"] is False
+        assert get_job(job_id)["no_fallback"] is False
+
 
     def test_handler_update_leaves_user_pin_untouched(self):
         """An update through the agent handler must not clear or change a

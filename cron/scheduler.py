@@ -4745,13 +4745,14 @@ def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
 
     Mirrors the effective requested-provider computation from run_job's
     resolution block without any side effects on the run. When a fallback
-    chain is configured the check is skipped entirely — the existing
+    chain is configured the check is skipped entirely unless this job disables
+    fallback — the existing
     auth-fallback path may legitimately rescue a missing primary key, so
     blocking here would break that contract (and burning zero LLM calls is
     already guaranteed by the fallback resolution being config-local).
     """
     try:
-        if get_fallback_chain(cfg):
+        if get_fallback_chain(cfg) and not job.get("no_fallback"):
             return None
     except Exception:
         return None  # fail-open: never block on a preflight-internal error
@@ -5858,7 +5859,8 @@ def run_job(
                 or primary_provider_for_drift
             )
         except Exception as resolve_exc:
-            # Primary provider resolution failed. Walk fallback_providers for:
+            # Primary provider resolution failed. Unless this job explicitly
+            # disables fallback, walk fallback_providers for:
             #   1) AuthError (missing/expired credential)
             #   2) Transient network/DNS failures during OAuth refresh or
             #      discovery (e.g. macOS morning DNS blip → httpx.ConnectError
@@ -5870,7 +5872,7 @@ def run_job(
             # provider while retaining a paid primary model.
             is_auth = isinstance(resolve_exc, AuthError)
             is_transient_net = _is_transient_provider_resolve_error(resolve_exc)
-            if not (is_auth or is_transient_net):
+            if job.get("no_fallback") or not (is_auth or is_transient_net):
                 raise RuntimeError(format_runtime_provider_error(resolve_exc)) from resolve_exc
 
             primary_provider_for_drift = (
@@ -6019,7 +6021,9 @@ def run_job(
                     f"config is pinned or restored. See #44585."
                 )
 
-        fallback_model = get_fallback_chain(_cfg) or None
+        fallback_model = (
+            None if job.get("no_fallback") else (get_fallback_chain(_cfg) or None)
+        )
         credential_pool = None
         runtime_provider = str(runtime.get("provider") or "").strip().lower()
         if runtime_provider:

@@ -688,6 +688,7 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "state": effective_job_state(job),
         "paused_at": job.get("paused_at"),
         "paused_reason": job.get("paused_reason"),
+        "no_fallback": bool(job.get("no_fallback", False)),
     }
     if job.get("script"):
         result["script"] = job["script"]
@@ -1277,6 +1278,7 @@ def cronjob(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     no_agent: Optional[bool] = None,
+    no_fallback: Optional[bool] = None,
     attach_to_session: Optional[bool] = None,
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
@@ -1384,6 +1386,7 @@ def cronjob(
                     enabled_toolsets=enabled_toolsets or None,
                     workdir=_normalize_optional_job_value(workdir),
                     no_agent=_no_agent,
+                    no_fallback=bool(no_fallback),
                     attach_to_session=attach_to_session,
                     monitor_script=_normalize_optional_job_value(monitor_script),
                     monitor_url=_normalize_optional_job_value(monitor_url),
@@ -1699,6 +1702,8 @@ def cronjob(
                             success=False,
                         )
                 updates["no_agent"] = target_no_agent
+            if no_fallback is not None:
+                updates["no_fallback"] = bool(no_fallback)
             if repeat is not None:
                 # Normalize: treat 0 or negative as None (infinite)
                 normalized_repeat = None if repeat <= 0 else repeat
@@ -1812,6 +1817,15 @@ Scheduling from cron-run sessions is disabled by default and enabled via cron.al
                     "WHEN TO USE False (default): anything that needs reasoning — summarize a feed, draft a daily briefing, pick interesting items, rephrase data for a human, follow conditional logic based on content."
                 ),
             },
+            "no_fallback": {
+                "type": "boolean",
+                "description": (
+                    "When true, this job is primary-provider-only: Hermes must not "
+                    "use configured fallback providers or models if its primary "
+                    "provider cannot resolve or fails. Default false. On update, "
+                    "pass false to re-enable configured fallbacks."
+                ),
+            },
             "context_from": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -1909,6 +1923,7 @@ registry.register(
         enabled_toolsets=args.get("enabled_toolsets"),
         workdir=args.get("workdir"),
         no_agent=args.get("no_agent"),
+        no_fallback=args.get("no_fallback"),
         monitor_script=args.get("monitor_script"),
         monitor_url=args.get("monitor_url"),
         task_id=kw.get("task_id"),
