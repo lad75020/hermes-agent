@@ -456,7 +456,7 @@ class TestAgentCannotSetModelPin:
 
         created = json.loads(
             registry.dispatch(
-                "cronjob",
+                "cronjob_manage",
                 {
                     "action": "create",
                     "prompt": "Use the local model only",
@@ -469,12 +469,12 @@ class TestAgentCannotSetModelPin:
         assert created["job"]["no_fallback"] is True
         job_id = created["job_id"]
         assert get_job(job_id)["no_fallback"] is True
-        listed = json.loads(registry.dispatch("cronjob", {"action": "list"}))
+        listed = json.loads(registry.dispatch("cronjob_manage", {"action": "list"}))
         assert listed["jobs"][0]["no_fallback"] is True
 
         updated = json.loads(
             registry.dispatch(
-                "cronjob",
+                "cronjob_manage",
                 {"action": "update", "job_id": job_id, "no_fallback": False},
             )
         )
