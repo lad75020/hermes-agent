@@ -37,6 +37,7 @@ const MAIN_PLIST = path.join(ELECTRON_DIR, 'entitlements.mac.plist')
 const INHERIT_PLIST = path.join(ELECTRON_DIR, 'entitlements.mac.inherit.plist')
 
 const DEVICE_PREFIX = 'com.apple.security.device.'
+const APPLE_EVENTS_ENTITLEMENT = 'com.apple.security.automation.apple-events'
 
 function loadEntitlements(plistPath: string): Record<string, unknown> {
   assert.ok(fs.existsSync(plistPath), `missing entitlements file: ${plistPath}`)
@@ -58,6 +59,15 @@ test('inherit plist grants microphone (regression #37718)', () => {
       '`com.apple.security.device.audio-input`; without it the ' +
       'hardened-runtime Helper process is denied the microphone and no ' +
       'TCC prompt appears (#37718).'
+  )
+})
+
+test('main plist grants Apple Events automation for Xcode MCP', () => {
+  const main = loadEntitlements(MAIN_PLIST)
+  assert.equal(
+    main[APPLE_EVENTS_ENTITLEMENT],
+    true,
+    'entitlements.mac.plist must grant Apple Events automation so macOS can authorize Hermes to use Xcode MCP.'
   )
 })
 
