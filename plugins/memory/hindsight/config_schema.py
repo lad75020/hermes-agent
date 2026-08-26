@@ -26,6 +26,11 @@ CONFIG_SCHEMA = ProviderConfigSchema(
                     "Hindsight Cloud API (lightweight, just needs an API key)",
                 ),
                 ProviderFieldOption(
+                    "local_embedded",
+                    "Local Embedded",
+                    "Run Hindsight on this Mac with its managed local daemon and configured LLM",
+                ),
+                ProviderFieldOption(
                     "local_external",
                     "Local External",
                     "Connect to an existing Hindsight instance",
