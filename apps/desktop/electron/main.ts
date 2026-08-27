@@ -4603,6 +4603,9 @@ function createPythonBackend(root, label, backendArgs, options: any = {}) {
     }),
     root,
     bootstrap: Boolean(options.bootstrap),
+    // Python-based Hermes runtimes write HERMES_DESKTOP_READY_FILE after the
+    // server binds. Prefer this durable signal over parsing process output.
+    readyFile: true,
     shell: false
   }
 }
@@ -4627,6 +4630,8 @@ function createActiveBackend(backendArgs) {
     }),
     root: ACTIVE_HERMES_ROOT,
     bootstrap: true,
+    // Matches createPythonBackend(): this is also a Python Hermes runtime.
+    readyFile: true,
     shell: false
   }
 }

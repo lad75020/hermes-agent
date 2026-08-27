@@ -131,6 +131,7 @@ function waitForDashboardReadyFile(
   return new Promise((resolve, reject) => {
     let done = false
     let interval = null
+    let stdoutBuffer = ''
 
     function cleanup() {
       if (done) {
@@ -144,6 +145,7 @@ function waitForDashboardReadyFile(
         clearInterval(interval)
       }
 
+      child.stdout.off('data', onStdout)
       child.off('exit', onExit)
       child.off('error', onError)
     }
@@ -167,6 +169,21 @@ function waitForDashboardReadyFile(
       reject(err)
     }
 
+    function onStdout(chunk) {
+      stdoutBuffer += chunk.toString()
+      const lines = stdoutBuffer.split(/\r?\n/)
+      stdoutBuffer = lines.pop() || ''
+
+      for (const line of lines) {
+        const match = line.match(_READY_RE)
+        if (match) {
+          cleanup()
+          resolve(Number.parseInt(match[1], 10))
+          return
+        }
+      }
+    }
+
     const timer = setTimeout(() => {
       cleanup()
       reject(new Error(`Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)`))
@@ -174,6 +191,7 @@ function waitForDashboardReadyFile(
 
     child.on('exit', onExit)
     child.on('error', onError)
+    child.stdout.on('data', onStdout)
     interval = setInterval(check, 50)
 
     if (typeof interval.unref === 'function') {

@@ -204,6 +204,19 @@ test('waitForDashboardPortAnnouncement uses ready file when provided', async () 
   }
 })
 
+test('waitForDashboardPortAnnouncement falls back to stdout when its ready file is absent', async () => {
+  const tmp = mkTmpReadyFile()
+  const child = makeFakeChild()
+
+  try {
+    const result = waitForDashboardPortAnnouncement(child, { readyFile: tmp.file, timeoutMs: 1_000 })
+    child.stdout.emit('data', 'HERMES_BACKEND_READY port=7654\n')
+    assert.equal(await result, 7654)
+  } finally {
+    tmp.cleanup()
+  }
+})
+
 test('waitForDashboardReadyFile rejects when the child exits before file readiness', async () => {
   const tmp = mkTmpReadyFile()
   const child = makeFakeChild()
