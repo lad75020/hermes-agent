@@ -38,3 +38,27 @@ def test_wrap_command_uses_stable_parent_pid_and_preserves_command_tail():
         *command_args,
     ]
     assert "--create-time" not in wrapped_args
+
+
+def test_stdio_children_dead_is_false_when_a_tracked_child_is_alive(monkeypatch):
+    """A live stdio child must not trigger the fast-fail watchdog."""
+    server = mcp_tool.MCPServerTask("stdio")
+    server._stdio_child_pids = {101}
+    fake_psutil = type(
+        "Psutil", (), {"pid_exists": staticmethod(lambda pid: pid == 101)}
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    assert server._stdio_children_dead() is False
+
+
+def test_stdio_children_dead_is_true_after_all_tracked_children_exit(monkeypatch):
+    """The watchdog still detects an exited stdio child."""
+    server = mcp_tool.MCPServerTask("stdio")
+    server._stdio_child_pids = {101, 102}
+    fake_psutil = type(
+        "Psutil", (), {"pid_exists": staticmethod(lambda pid: False)}
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    assert server._stdio_children_dead() is True
