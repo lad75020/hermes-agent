@@ -211,3 +211,5 @@ terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_14305
 - **Secrets in `.env`, settings in `config.yaml`** — never tell a user to put a non-credential setting in `.env`.
 - **Profile-safe paths** — `get_hermes_home()` in code, `$HERMES_HOME` when resolving paths in a session.
 - **Never hand-edit `config.yaml` for the user** — use `hermes config set KEY VAL`; a stray indent can corrupt the file and break the live gateway.
+
+For REST OpenAPI targets, use `hermes mcp add NAME --url BASE_URL --transport openapi` (optionally `--openapi-url DOCUMENT_URL`). Native MCP remains the default transport.

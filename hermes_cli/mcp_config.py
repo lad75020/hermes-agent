@@ -625,9 +625,9 @@ def cmd_mcp_add(args):
     if cmd_args and cmd_args[0] == "--":
         cmd_args = cmd_args[1:]
     auth_type = getattr(args, "auth", None)
-    transport_type = str(getattr(args, "transport", "mcp") or "mcp").strip().lower()
-    openapi_url = getattr(args, "openapi_url", None)
     raw_connect_timeout = getattr(args, "connect_timeout", None)
+    transport = getattr(args, "transport", "mcp") or "mcp"
+    openapi_url = getattr(args, "openapi_url", None)
 
     server_config: dict[str, Any] = {}
     try:
@@ -642,13 +642,10 @@ def cmd_mcp_add(args):
     if url and explicit_env:
         _error("--env is only supported for stdio MCP servers (--command or stdio presets)")
         return
-    if transport_type == "openapi" and not url:
-        _error("--transport openapi requires --url <REST API base URL>")
+    if transport == "openapi" and (not url or auth_type == "oauth"):
+        _error("OpenAPI requires --url and does not support OAuth discovery")
         return
-    if transport_type == "openapi" and auth_type == "oauth":
-        _error("--transport openapi does not support MCP OAuth negotiation; use --auth header")
-        return
-    if openapi_url and transport_type != "openapi":
+    if openapi_url and transport != "openapi":
         _error("--openapi-url requires --transport openapi")
         return
     if not url and not command:
@@ -677,7 +674,7 @@ def cmd_mcp_add(args):
 
     if url:
         server_config["url"] = url
-        if transport_type == "openapi":
+        if transport == "openapi":
             server_config["transport"] = "openapi"
             if openapi_url:
                 server_config["openapi_url"] = openapi_url
@@ -776,10 +773,8 @@ def cmd_mcp_list(args=None):
     print(f"  {'─' * 16} {'─' * 30} {'─' * 12} {'─' * 10}")
 
     for name, cfg in servers.items():
-        if str(cfg.get("transport") or "").lower() == "openapi":
-            transport = f"OpenAPI {cfg.get('url', '?')}"
-        elif "url" in cfg:
-            transport = cfg["url"]
+        if "url" in cfg:
+            transport = ("OpenAPI " if cfg.get("transport") == "openapi" else "") + cfg["url"]
         elif "command" in cfg:
             transport = cfg["command"]
             cmd_args = cfg.get("args", [])
@@ -863,9 +858,7 @@ def cmd_mcp_test(args):
         return 3
     print()
     print(color(f"  Testing '{name}'...", Colors.CYAN))
-    if str(cfg.get("transport") or "").lower() == "openapi":
-        _info(f"Transport: OpenAPI REST → {cfg.get('url', '?')}")
-    elif "url" in cfg:
+    if "url" in cfg:
         _info(f"Transport: HTTP → {cfg['url']}")
     else:
         _info(f"Transport: stdio → {cfg.get('command', '?')}")

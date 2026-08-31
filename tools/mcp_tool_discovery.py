@@ -146,14 +146,9 @@ def _owner_secret_scope():
 async def _connect_server(name: str, config: dict) -> _core.MCPServerTask:
     """Create an MCPServerTask, start it, return once ready (tear down with ``server.shutdown()``
     on the same loop). Raises on bad config, missing HTTP support or connect failure."""
-    from tools import openapi_tool
+    from tools.openapi_tool import OpenAPIServerTask, is_openapi_server_config
 
-    server_cls = (
-        openapi_tool.OpenAPIServerTask
-        if openapi_tool.is_openapi_server_config(config)
-        else _core.MCPServerTask
-    )
-    server = server_cls(name)
+    server = OpenAPIServerTask(name) if is_openapi_server_config(config) else _core.MCPServerTask(name)
     claim = _core._connect_server_claim.get()
     if claim is not None:
         claim(server)

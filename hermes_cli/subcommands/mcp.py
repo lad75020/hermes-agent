@@ -26,7 +26,9 @@ def build_mcp_parser(subparsers, *, cmd_mcp: Callable) -> None:
 
     mcp_add_p = mcp_sub.add_parser("add", help="Add an MCP server (discovery-first install)")
     mcp_add_p.add_argument("name", help="Server name (used as config key)")
-    mcp_add_p.add_argument("--url", help="HTTP/SSE MCP endpoint or REST API base URL")
+    mcp_add_p.add_argument("--url", help="MCP endpoint or OpenAPI base URL")
+    mcp_add_p.add_argument("--transport", choices=["mcp", "openapi"], default="mcp", help="Remote protocol")
+    mcp_add_p.add_argument("--openapi-url", help="OpenAPI document URL (defaults to <url>/openapi.json)")
     # dest="mcp_command": the default dest="command" would clobber the top-level
     # subcommand name the dispatcher routes on (None when omitted → falls into chat).
     mcp_add_p.add_argument("--command", dest="mcp_command", help="Stdio command (e.g. npx)")
@@ -34,12 +36,6 @@ def build_mcp_parser(subparsers, *, cmd_mcp: Callable) -> None:
         "--args", nargs=argparse.REMAINDER, default=[],
         help="Arguments for stdio command; must be the last option")
     mcp_add_p.add_argument("--auth", choices=["oauth", "header"], help="Auth method")
-    mcp_add_p.add_argument(
-        "--transport", choices=["mcp", "openapi"], default="mcp",
-        help="Connection type: native MCP (default) or REST operations from an OpenAPI document")
-    mcp_add_p.add_argument(
-        "--openapi-url",
-        help="OpenAPI document URL (only with --transport openapi; defaults to <url>/openapi.json)")
     mcp_add_p.add_argument("--preset", help="Known MCP preset name")
     mcp_add_p.add_argument(
         "--connect-timeout", type=float,
