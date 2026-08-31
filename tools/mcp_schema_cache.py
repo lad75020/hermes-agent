@@ -35,6 +35,7 @@ def config_fingerprint(config: dict) -> str:
         "command": config.get("command"),
         "args": config.get("args") or [],
         "url": config.get("url"),
+        "openapi_url": config.get("openapi_url"),
         "transport": config.get("transport"),
         "tools_include": sorted(tools_filter.get("include") or []),
         "tools_exclude": sorted(tools_filter.get("exclude") or []),

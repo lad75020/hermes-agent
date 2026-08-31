@@ -30,6 +30,16 @@ class TestConfigFingerprint:
             {**base, "timeout": 5, "enabled": True, "lazy": True}
         )
 
+    def test_openapi_schema_url_changes_fingerprint(self):
+        base = {
+            "transport": "openapi",
+            "url": "https://api.example.test",
+            "openapi_url": "https://api.example.test/public.json",
+        }
+        assert msc.config_fingerprint(base) != msc.config_fingerprint(
+            {**base, "openapi_url": "https://api.example.test/admin.json"}
+        )
+
 
 class TestCacheRoundTrip:
     def _isolate(self, monkeypatch, tmp_path):

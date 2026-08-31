@@ -5825,7 +5825,13 @@ async def _connect_server(name: str, config: dict) -> MCPServerTask:
         ImportError: if HTTP transport is needed but not available.
         Exception: on connection or initialization failure.
     """
-    server = MCPServerTask(name)
+    from tools.openapi_tool import OpenAPIServerTask, is_openapi_server_config
+
+    server = (
+        OpenAPIServerTask(name)
+        if is_openapi_server_config(config)
+        else MCPServerTask(name)
+    )
     claim = _connect_server_claim.get()
     claim_token = None
     if claim is not None:

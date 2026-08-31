@@ -206,7 +206,7 @@ rejected), and Hermes's bundled `github/*` skills driving the `gh` CLI are a
 more capable integration. On Desktop, GitHub mentions instead offer the
 `github-auth` skill when `gh` isn't signed in yet.
 
-## Two kinds of MCP servers
+## External server transports
 
 ### Stdio servers
 
@@ -242,6 +242,46 @@ Use HTTP servers when:
 - the MCP server is hosted elsewhere
 - your organization exposes internal MCP endpoints
 - you do not want Hermes spawning a local subprocess for that integration
+
+### REST OpenAPI servers
+
+Some bridges, including [mcpo](https://github.com/open-webui/mcpo), expose an
+MCP server as ordinary REST operations plus an OpenAPI 3.x document. These are
+not native HTTP MCP endpoints. Select the OpenAPI transport explicitly so
+Hermes fetches the schema, registers each operation as a tool, and executes the
+operation over REST:
+
+```bash
+hermes mcp add XCodeMCP \
+  --url http://127.0.0.1:8084 \
+  --transport openapi \
+  --openapi-url http://127.0.0.1:8084/openapi.json
+```
+
+Equivalent config:
+
+```yaml
+mcp_servers:
+  XCodeMCP:
+    transport: openapi
+    url: http://127.0.0.1:8084
+    openapi_url: http://127.0.0.1:8084/openapi.json  # optional default
+    headers: {}                                      # optional
+```
+
+Hermes maps path, query, header, and cookie parameters into the tool input
+schema using OpenAPI's standard serialization styles. Required JSON object-body
+properties are flattened when their names are unambiguous; optional or
+colliding bodies use a nested `body` input so conditional requirements are
+preserved. Operations that require unsupported non-JSON request bodies are not
+registered. Local component `$ref` values are resolved. For mcpo operation IDs
+such as `tool_XcodeListWindows_post`, Hermes preserves the original MCP tool
+name (`XcodeListWindows`) under the normal `mcp__<server>__<tool>` namespace.
+
+Use `transport: openapi` only for REST/OpenAPI servers. Omit it for native
+Streamable HTTP/SSE MCP endpoints. OpenAPI targets expose operations only;
+MCP resources, prompts, sampling, elicitation, and OAuth negotiation do not
+apply.
 
 ### OAuth-authenticated HTTP servers
 

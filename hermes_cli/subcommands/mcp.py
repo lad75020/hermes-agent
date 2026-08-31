@@ -42,7 +42,17 @@ def build_mcp_parser(subparsers, *, cmd_mcp: Callable) -> None:
         "add", help="Add an MCP server (discovery-first install)"
     )
     mcp_add_p.add_argument("name", help="Server name (used as config key)")
-    mcp_add_p.add_argument("--url", help="HTTP/SSE endpoint URL")
+    mcp_add_p.add_argument("--url", help="MCP endpoint or OpenAPI base URL")
+    mcp_add_p.add_argument(
+        "--transport",
+        choices=["mcp", "openapi"],
+        default="mcp",
+        help="Remote protocol (default: native MCP; use openapi for REST OpenAPI servers)",
+    )
+    mcp_add_p.add_argument(
+        "--openapi-url",
+        help="OpenAPI document URL (defaults to <url>/openapi.json)",
+    )
     # dest="mcp_command" so this flag does not clobber the top-level
     # subparser's args.command attribute, which the dispatcher reads to
     # route to cmd_mcp.  Without an explicit dest, argparse derives

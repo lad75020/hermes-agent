@@ -25,6 +25,10 @@ mcp_servers:
     url: "..."          # HTTP servers
     headers: {}
 
+    # For a REST OpenAPI server instead of native HTTP MCP:
+    transport: openapi
+    openapi_url: "https://api.example.com/openapi.json"  # optional
+
     # Optional HTTP/SSE TLS settings:
     ssl_verify: true                # bool or path to a CA bundle (PEM)
     client_cert: "/path/to/cert.pem"  # mTLS client certificate (see below)
@@ -48,8 +52,9 @@ mcp_servers:
 | `command` | string | stdio | Executable to launch |
 | `args` | list | stdio | Arguments for the subprocess |
 | `env` | mapping | stdio | Environment passed to the subprocess |
-| `url` | string | HTTP | Remote MCP endpoint |
-| `headers` | mapping | HTTP | Headers for remote server requests |
+| `url` | string | HTTP/OpenAPI | Remote MCP endpoint, or REST base URL when `transport: openapi` |
+| `openapi_url` | string | OpenAPI | OpenAPI 3.x document URL. Defaults to `<url>/openapi.json` |
+| `headers` | mapping | HTTP/OpenAPI | Headers for remote server requests |
 | `ssl_verify` | bool or string | HTTP | TLS verification. `true` (default) uses system CAs, `false` disables verification (insecure), or a string path to a custom CA bundle (PEM) |
 | `client_cert` | string or list | HTTP | mTLS client certificate. String = path to a PEM file containing cert + key. List `[cert, key]` = separate files. List `[cert, key, password]` = encrypted key |
 | `client_key` | string | HTTP | Path to the client private key, when `client_cert` is a string and the key is in a separate file |
@@ -59,7 +64,7 @@ mcp_servers:
 | `protocol` | string | both | Protocol-era negotiation: `auto` (default — legacy `initialize` handshake first, falling back to the 2026-07-28 `server/discover` stateless probe when the server rejects the handshake as modern-only), `stateless` (probe `server/discover` first; one legacy retry), or `legacy` (handshake only, no fallback) |
 | `supports_parallel_tool_calls` | bool | both | Allow tools from this server to run concurrently |
 | `skip_preflight` | bool | HTTP | Bypass the fail-fast content-type probe for valid Streamable HTTP endpoints whose HEAD/GET answers a non-MCP content type (default: `false`) |
-| `transport` | string | HTTP | Set to `sse` to use the SSE transport instead of Streamable HTTP |
+| `transport` | string | HTTP/OpenAPI | Set to `sse` for native MCP SSE, or `openapi` for ordinary REST operations described by OpenAPI 3.x. Omit for Streamable HTTP MCP |
 | `keepalive_interval` | number | both | Liveness ping cadence in seconds (default: `180`, floored at 5s). Set below the server's session TTL for servers that GC idle sessions quickly |
 | `idle_timeout_seconds` | number | stdio | Optional stdio server recycle after idle time (`0` disables). May also live under a `lifecycle:` mapping |
 | `max_lifetime_seconds` | number | stdio | Optional stdio server recycle after age (`0` disables). May also live under a `lifecycle:` mapping |

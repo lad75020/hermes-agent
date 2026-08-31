@@ -161,8 +161,18 @@ hermes mcp configure NAME   Toggle tool selection
 hermes mcp add SERVER --command CMD --args ARG1 ARG2
 hermes mcp add SERVER --url https://example.com/mcp
 hermes mcp add SERVER --url https://example.com/mcp --auth header
+# REST/OpenAPI bridge (for example mcpo; this is not native HTTP MCP):
+hermes mcp add SERVER --url http://127.0.0.1:8084 --transport openapi --openapi-url http://127.0.0.1:8084/openapi.json
 # For --auth header, pass JSON such as {"Authorization":"Bearer ..."} on stdin/interactively; redact token values in logs/UI.
 ```
+
+**REST OpenAPI transport:** use `transport: openapi` only when the target
+exposes ordinary REST operations plus an OpenAPI 3.x document. Hermes defaults
+`openapi_url` to `<url>/openapi.json`, maps path/query/header/cookie parameters
+and JSON request bodies into tool inputs, and registers operations under the
+normal `mcp__<server>__<tool>` namespace. Omit this transport for native
+Streamable HTTP/SSE MCP endpoints. OpenAPI targets expose operations only, not
+MCP resources, prompts, sampling, elicitation, or OAuth negotiation.
 
 **Pitfall: stdio args that begin with `-`.** `hermes mcp add ... --args` currently uses argparse `nargs="*"`; values like `-y` may be parsed as Hermes options instead of child-command arguments. For commands such as Chrome DevTools MCP (`npx -y chrome-devtools-mcp@latest`), prefer editing `mcp_servers` directly in `config.yaml`:
 

@@ -450,6 +450,8 @@ def cmd_mcp_add(args):
     preset_name = getattr(args, "preset", None)
     raw_env = getattr(args, "env", None)
     raw_connect_timeout = getattr(args, "connect_timeout", None)
+    transport = getattr(args, "transport", "mcp") or "mcp"
+    openapi_url = getattr(args, "openapi_url", None)
 
     server_config: Dict[str, Any] = {}
     try:
@@ -468,6 +470,16 @@ def cmd_mcp_add(args):
 
     if url and explicit_env:
         _error("--env is only supported for stdio MCP servers (--command or stdio presets)")
+        return
+
+    if transport == "openapi" and not url:
+        _error("--transport openapi requires --url <base-url>")
+        return
+    if transport == "openapi" and auth_type == "oauth":
+        _error("OAuth discovery is only supported for native MCP servers")
+        return
+    if openapi_url and transport != "openapi":
+        _error("--openapi-url requires --transport openapi")
         return
 
     # Validate transport
@@ -489,6 +501,10 @@ def cmd_mcp_add(args):
     # Build initial config
     if url:
         server_config["url"] = url
+        if transport == "openapi":
+            server_config["transport"] = "openapi"
+            if openapi_url:
+                server_config["openapi_url"] = openapi_url
     else:
         server_config["command"] = command
         if cmd_args:
@@ -703,7 +719,7 @@ def cmd_mcp_list(args=None):
             # Truncate long URLs
             if len(url) > 28:
                 url = url[:25] + "..."
-            transport = url
+            transport = f"OpenAPI {url}" if cfg.get("transport") == "openapi" else url
         elif "command" in cfg:
             cmd = cfg["command"]
             cmd_args = cfg.get("args", [])
@@ -761,7 +777,8 @@ def cmd_mcp_test(args):
 
     # Show transport info
     if "url" in cfg:
-        _info(f"Transport: HTTP → {cfg['url']}")
+        transport_name = "OpenAPI REST" if cfg.get("transport") == "openapi" else "HTTP"
+        _info(f"Transport: {transport_name} → {cfg['url']}")
     else:
         cmd = cfg.get("command", "?")
         _info(f"Transport: stdio → {cmd}")

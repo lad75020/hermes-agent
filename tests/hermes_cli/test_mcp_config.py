@@ -206,6 +206,41 @@ class TestMcpAdd:
         assert "ink" in config.get("mcp_servers", {})
         assert config["mcp_servers"]["ink"]["url"] == "https://mcp.ml.ink/mcp"
 
+    def test_add_openapi_server_persists_explicit_transport(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """REST OpenAPI targets are explicit and retain their schema URL."""
+        captured = {}
+
+        def mock_probe(name, config, **kw):
+            captured.update(config)
+            return [("XcodeListWindows", "List Xcode windows")]
+
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server", mock_probe
+        )
+        inputs = iter(["n", ""])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        from hermes_cli.mcp_config import cmd_mcp_add
+        from hermes_cli.config import load_config
+
+        cmd_mcp_add(
+            _make_args(
+                name="XCodeMCP",
+                url="http://127.0.0.1:8084",
+                transport="openapi",
+                openapi_url="http://127.0.0.1:8084/openapi.json",
+            )
+        )
+
+        assert "Saved" in capsys.readouterr().out
+        assert captured["transport"] == "openapi"
+        saved = load_config()["mcp_servers"]["XCodeMCP"]
+        assert saved["url"] == "http://127.0.0.1:8084"
+        assert saved["transport"] == "openapi"
+        assert saved["openapi_url"] == "http://127.0.0.1:8084/openapi.json"
+
 
     def test_add_stdio_server_with_env(self, tmp_path, capsys, monkeypatch):
         """Stdio servers can persist explicit environment variables."""
