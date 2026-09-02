@@ -27,6 +27,8 @@ Configuration in config.yaml::
             allowed_users: []          # empty = allow all; entries are hex pubkeys or npubs
             reply_in_thread: true      # false = post replies flat to the channel timeline
             reaction_only_users: []    # acknowledge explicit tags without dispatching; allowed_users wins on overlap
+            reply_in_thread: true      # false = post replies flat to the channel timeline
+            reaction_only_users: []    # acknowledge explicit tags without dispatching; allowed_users wins on overlap
 
 Or via environment variables (overrides config.yaml):
     BUZZ_RELAY_URL, BUZZ_CHANNELS, BUZZ_HOME_CHANNEL, BUZZ_POLL_INTERVAL,
@@ -173,7 +175,7 @@ from gateway.platforms.base import (
     SendResult,
     MessageEvent,
     MessageType,
-    cache_media_bytes,
+    cache_media_bytes_async,
 )
 from gateway.config import Platform
 
@@ -2395,6 +2397,169 @@ class BuzzAdapter(BasePlatformAdapter):
             if attachment is not None:
                 cached.append(attachment)
         return cached
+        # Persist only when the sweep actually moved the cursor, so an idle
+        # channel does not rewrite the file every poll interval.
+        if self._cursor_mark(state) != before:
+            self._save_cursors()
+
+    @staticmethod
+    def _parse_imeta_attachments(event: dict) -> Tuple[List[dict], int]:
+        """Return accepted NIP-94 metadata and the rejected ``imeta`` count."""
+        tags = event.get("tags")
+        if not isinstance(tags, list):
+            return [], 0
+        attachments: List[dict] = []
+        rejected = 0
+        total_declared_bytes = 0
+        for tag in tags:
+            if not isinstance(tag, (list, tuple)) or not tag or tag[0] != "imeta":
+                continue
+            if len(attachments) >= _MAX_INBOUND_ATTACHMENTS:
+                rejected += 1
+                continue
+            fields: Dict[str, str] = {}
+            for raw_field in tag[1:]:
+                if not isinstance(raw_field, str):
+                    continue
+                key, separator, value = raw_field.partition(" ")
+                if separator and key not in fields:
+                    fields[key] = value.strip()
+            url = fields.get("url", "")
+            digest = fields.get("x", "").lower()
+            filename = fields.get("filename", "")
+            mime_type = fields.get("m", "")
+            try:
+                size = int(fields.get("size", ""))
+                parsed = urlsplit(url)
+                parsed_hostname = parsed.hostname
+                # Access validates malformed/non-numeric ports even though exact
+                # origin authorization occurs immediately before downloading.
+                parsed.port
+            except (TypeError, ValueError):
+                rejected += 1
+                continue
+            if (
+                parsed.scheme != "https"
+                or not parsed_hostname
+                or parsed.username
+                or parsed.password
+                or parsed.fragment
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or not 0 < size <= _MAX_INBOUND_ATTACHMENT_BYTES
+                or total_declared_bytes + size > _MAX_INBOUND_ATTACHMENT_BYTES
+            ):
+                rejected += 1
+                continue
+            total_declared_bytes += size
+            attachments.append(
+                {
+                    "url": url,
+                    "sha256": digest,
+                    "size": size,
+                    "filename": _safe_attachment_filename(filename),
+                    "mime_type": mime_type[:255],
+                }
+            )
+        return attachments, rejected
+
+    @staticmethod
+    def _imeta_attachments(event: dict) -> List[dict]:
+        """Return bounded, structurally valid NIP-94 attachment metadata."""
+        attachments, _rejected = BuzzAdapter._parse_imeta_attachments(event)
+        return attachments
+
+    @staticmethod
+    def _attachment_rejection_note(rejected: int) -> str:
+        """Return a fixed-width diagnostic for malformed or excess metadata."""
+        shown = str(rejected) if rejected <= 999 else "999+"
+        return f"[{shown} Buzz attachment(s) rejected as malformed or over limits.]"
+
+    async def _download_attachment(self, metadata: dict) -> Optional[CachedMedia]:
+        """Download, integrity-check, and cache one authorized Buzz attachment."""
+        url = metadata["url"]
+        try:
+            parsed_url = urlsplit(url)
+            host = (parsed_url.hostname or "").lower().rstrip(".")
+            origin = (host, parsed_url.port or 443)
+        except ValueError:
+            parsed_url = None
+            origin = ("", 0)
+        if (
+            parsed_url is None
+            or parsed_url.scheme != "https"
+            or origin not in self._attachment_origins
+        ):
+            logger.warning(
+                "Buzz: refusing attachment from untrusted origin %s:%s",
+                origin[0] or "<missing>",
+                origin[1],
+            )
+            return None
+
+        import httpx
+
+        try:
+            timeout = httpx.Timeout(_ATTACHMENT_DOWNLOAD_TIMEOUT)
+            async with asyncio.timeout(_ATTACHMENT_DOWNLOAD_TIMEOUT):
+                async with httpx.AsyncClient(
+                    follow_redirects=False,
+                    timeout=timeout,
+                    headers={"Accept-Encoding": "identity"},
+                ) as client:
+                    async with client.stream("GET", url) as response:
+                        if response.status_code != 200:
+                            logger.warning(
+                                "Buzz: attachment download returned HTTP %s",
+                                response.status_code,
+                            )
+                            return None
+                        content_length = response.headers.get("content-length")
+                        if content_length:
+                            try:
+                                declared_response_size = int(content_length)
+                            except ValueError:
+                                return None
+                            if declared_response_size != metadata["size"]:
+                                logger.warning(
+                                    "Buzz: attachment Content-Length does not match imeta size"
+                                )
+                                return None
+                        data = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            data.extend(chunk)
+                            if len(data) > metadata["size"]:
+                                logger.warning("Buzz: attachment exceeded its declared size")
+                                return None
+        except (TimeoutError, httpx.HTTPError, OSError, ValueError) as exc:
+            logger.warning("Buzz: attachment download failed: %s", exc)
+            return None
+
+        if len(data) != metadata["size"]:
+            logger.warning("Buzz: attachment size does not match imeta")
+            return None
+        if hashlib.sha256(data).hexdigest() != metadata["sha256"]:
+            logger.warning("Buzz: attachment SHA-256 does not match imeta")
+            return None
+        try:
+            return await cache_media_bytes_async(
+                bytes(data),
+                filename=metadata["filename"],
+                mime_type=metadata["mime_type"],
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning("Buzz: attachment cache write failed: %s", exc)
+            return None
+
+    async def _cache_inbound_attachments(
+        self,
+        metadata_items: List[dict],
+    ) -> List[CachedMedia]:
+        cached: List[CachedMedia] = []
+        for metadata in metadata_items:
+            attachment = await self._download_attachment(metadata)
+            if attachment is not None:
+                cached.append(attachment)
+        return cached
 
     async def _handle_event(self, channel_id: str, state: dict, event: dict) -> None:
         """De-dupe, filter, and dispatch a single ``messages get`` event."""
@@ -2896,6 +3061,241 @@ class BuzzAdapter(BasePlatformAdapter):
                     )
                     cached = cache_media_bytes(
                         download_path.read_bytes(),
+                        filename=download_path.name,
+                        mime_type=mime_type,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Buzz: failed to localize inbound media %s (%s)",
+                    label,
+                    type(exc).__name__,
+                )
+                continue
+
+            if cached is None:
+                logger.warning("Buzz: rejected invalid inbound media %s", label)
+                continue
+            media_urls.append(cached.path)
+            media_types.append(cached.media_type)
+            media_kinds.append(cached.kind)
+
+        if media_urls:
+            logger.info(
+                "Buzz: localized %d inbound media attachment(s) for message %s",
+                len(media_urls),
+                message_id[:12],
+            )
+
+        if "image" in media_kinds:
+            message_type = MessageType.PHOTO
+        elif "audio" in media_kinds:
+            message_type = MessageType.AUDIO
+        elif "video" in media_kinds:
+            message_type = MessageType.VIDEO
+        elif media_kinds:
+            message_type = MessageType.DOCUMENT
+        else:
+            message_type = MessageType.TEXT
+
+        if not cleaned_text:
+            cleaned_text = (
+                "(attachment)"
+                if media_urls
+                else "(Buzz media attachment unavailable)"
+            )
+        return cleaned_text, media_urls, media_types, message_type
+
+    # ── Thread anchoring ──────────────────────────────────────────────────
+    #
+    # NIP-10 marked ``e`` tags: a reply carries ["e", <root>, "", "root"] plus
+    # ["e", <parent>, "", "reply"]; a message that STARTS a thread carries a
+    # single ["e", <parent>, "", "reply"] and no root marker.
+    #
+    # The gateway hands adapters the triggering message's own id as the reply
+    # anchor.  Anchoring to that id is correct for a top-level message (it
+    # opens the thread the user expects), but inside an existing thread it
+    # nests a fresh sub-thread under every single answer.  Buzz renders that
+    # as an endless ladder of one-message threads.
+    #
+    # Fix: remember each inbound message's thread ROOT.  When the trigger was
+    # already inside a thread, reply against that root so our answer lands in
+    # the same thread the user is typing in.  When it was top-level, keep the
+    # existing behaviour and anchor to the message itself.
+
+    _THREAD_ROOT_CACHE = 512
+
+    @staticmethod
+    def _extract_thread_root(event: dict) -> Optional[str]:
+        """Return the NIP-10 thread root of ``event``, or None if top-level."""
+        tags = event.get("tags")
+        if not isinstance(tags, list):
+            return None
+        root = None
+        reply = None
+        for tag in tags:
+            if not isinstance(tag, (list, tuple)) or len(tag) < 2:
+                continue
+            if str(tag[0]) != "e":
+                continue
+            marker = str(tag[3]).lower() if len(tag) > 3 else ""
+            if marker == "root":
+                root = str(tag[1])
+            elif marker == "reply":
+                reply = str(tag[1])
+            elif not marker and reply is None:
+                # Unmarked (deprecated positional) e-tag: treat as the parent.
+                reply = str(tag[1])
+        if root:
+            return root
+        # A lone "reply" e-tag means this message started a thread hanging off
+        # <reply>; that parent IS the thread root for anything that follows.
+        return reply
+
+    def _record_thread_root(self, event_id: str, event: dict) -> None:
+        """Cache the thread root for an inbound message id."""
+        if not event_id:
+            return
+        roots = getattr(self, "_thread_roots", None)
+        if roots is None:
+            roots = self._thread_roots = OrderedDict()
+        roots[event_id] = self._extract_thread_root(event)
+        roots.move_to_end(event_id)
+        while len(roots) > self._THREAD_ROOT_CACHE:
+            roots.popitem(last=False)
+
+    def _resolve_reply_anchor(self, anchor: Optional[str]) -> Optional[str]:
+        """Map a gateway reply anchor onto the right Buzz thread anchor.
+
+        Returns the thread root when the triggering message was already inside
+        a thread (so the reply joins it), otherwise the anchor unchanged (so a
+        reply to a top-level message opens one thread, as before).
+        """
+        if not anchor:
+            return anchor
+        roots = getattr(self, "_thread_roots", None) or {}
+        return roots.get(str(anchor)) or anchor
+    def _remember_event(self, state: dict, event: dict) -> None:
+        """Record author + content snippet for later NIP-10 parent lookup."""
+        event_id = str(event.get("id") or "")
+        if not event_id:
+            return
+        pubkey = str(event.get("pubkey") or "").lower()
+        content = event.get("content")
+        snippet = content[:_EVENT_META_CONTENT_CAP] if isinstance(content, str) else ""
+        self._store_event_meta(state, event_id, pubkey, snippet)
+
+    def _remember_event_meta(
+        self,
+        channel_id: str,
+        event_id: str,
+        pubkey: str,
+        content: str,
+    ) -> None:
+        state = self._channel_state.get(channel_id)
+        if state is None or not event_id:
+            return
+        snippet = (content or "")[:_EVENT_META_CONTENT_CAP]
+        self._store_event_meta(state, event_id, (pubkey or "").lower(), snippet)
+
+    @staticmethod
+    def _store_event_meta(
+        state: dict,
+        event_id: str,
+        pubkey: str,
+        snippet: str,
+    ) -> None:
+        cache = state.setdefault("event_meta", OrderedDict())
+        if not isinstance(cache, OrderedDict):
+            cache = OrderedDict(cache)
+            state["event_meta"] = cache
+        cache[event_id] = (pubkey, snippet)
+        cache.move_to_end(event_id)
+        while len(cache) > _SEEN_CAP:
+            cache.popitem(last=False)
+
+    @staticmethod
+    def _lookup_event_meta(state: dict, event_id: Optional[str]) -> Optional[Tuple[str, str]]:
+        if not event_id:
+            return None
+        cache = state.get("event_meta") or {}
+        entry = cache.get(event_id)
+        if not entry or not isinstance(entry, tuple) or len(entry) < 2:
+            return None
+        return str(entry[0] or ""), str(entry[1] or "")
+    async def _localize_inbound_media(
+        self,
+        text: str,
+        message_id: str,
+        *,
+        user_id: str = "",
+        chat_type: Optional[str] = None,
+        chat_id: Optional[str] = None,
+    ) -> Tuple[str, List[str], List[str], MessageType]:
+        """Authenticate and cache same-relay media references in *text*.
+
+        Each object is independent: one failed download is logged and skipped
+        without discarding the caption or any other successfully cached files.
+
+        Downloading spends this agent's Buzz credentials on a URL chosen by
+        the sender, so it runs only when the gateway's authorization callback
+        returns an explicit ``True``. The adapter's own ``allowed_users``
+        list is a pre-filter, not a substitute: a missing, failed, or
+        negative gateway decision leaves the text untouched and no
+        credentialed request is made.
+        """
+        urls, replacements = _find_relay_media_refs(text, self.relay_url)
+        if not urls:
+            return text, [], [], MessageType.TEXT
+
+        if self._is_sender_authorized(user_id, chat_type, chat_id) is not True:
+            logger.warning(
+                "Buzz: not localizing %d media reference(s) in message %s — "
+                "sender %s… is not explicitly authorized",
+                len(urls), message_id[:12], (user_id or "?")[:8],
+            )
+            return text, [], [], MessageType.TEXT
+
+        cleaned_text = _replace_media_refs(text, replacements)
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        media_kinds: List[str] = []
+
+        from gateway.platforms.base import (
+            cache_media_bytes_async,
+            validate_inbound_media_size,
+        )
+
+        for url in urls:
+            path_match = _MEDIA_PATH_RE.fullmatch(urlsplit(url).path)
+            if path_match is None:
+                continue
+            ext = (path_match.group("ext") or ".bin").lower()
+            label = f"{path_match.group('sha')[:12]}{ext}"
+            try:
+                with tempfile.TemporaryDirectory(prefix="hermes-buzz-media-") as temp_dir:
+                    download_path = Path(temp_dir) / f"buzz_{label}"
+                    code, _out, _err = await self._run_cli(
+                        ["media", "get", "-o", str(download_path), url]
+                    )
+                    if code != 0 or not download_path.is_file():
+                        logger.warning(
+                            "Buzz: failed to localize inbound media %s (exit %d)",
+                            label,
+                            code,
+                        )
+                        continue
+                    validate_inbound_media_size(
+                        download_path.stat().st_size,
+                        media_type="Buzz media",
+                    )
+                    mime_type = (
+                        mimetypes.guess_type(download_path.name)[0]
+                        or "application/octet-stream"
+                    )
+                    # Up to the inbound media cap (128 MiB) — read off the loop too.
+                    data = await asyncio.to_thread(download_path.read_bytes)
+                    cached = await cache_media_bytes_async(
+                        data,
                         filename=download_path.name,
                         mime_type=mime_type,
                     )
