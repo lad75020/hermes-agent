@@ -2748,6 +2748,13 @@ def run_conversation(
         # gated on context_compressor — so orphans from session loading or
         # manual message manipulation are always caught.
         api_messages = agent._sanitize_api_messages(api_messages)
+        # Send-path vision eviction (#89296): compression only strips stale
+        # screenshots when prune fires, and the Anthropic adapter's keep-window
+        # never sees OpenAI-style tool-result image_url parts. The per-call
+        # clone is rewritten in place; persisted history is untouched.
+        from agent.context_compressor import evict_stale_outbound_tool_images
+
+        evict_stale_outbound_tool_images(api_messages)
 
         # One-time repeated-heal escalation notice (#96870): if the sanitizer
         # above just crossed the per-session heal threshold, deliver the
@@ -8273,9 +8280,19 @@ def run_conversation(
                     _info = getattr(_compressor, "should_compress_info", None)
                     if _info is not None:
                         try:
-                            _block_reason = _info(_real_tokens)[1]
+                            _should_now, _block_reason = _info(_real_tokens)
                         except Exception:
-                            _block_reason = None
+                            _should_now, _block_reason = False, None
+                        if _should_now and not _block_reason:
+                            # The engine says compression SHOULD run, yet this
+                            # branch was taken — the per-turn attempt budget is
+                            # spent. Over threshold with no reclamation left is
+                            # exactly the silent-lockout case, so name it
+                            # instead of dropping the (True, None) on the floor
+                            # (#101889).
+                            _block_reason = (
+                                f"attempts_exhausted:{compression_attempts}"
+                            )
                     if _block_reason:
                         agent._warn_context_overflow_blocked(
                             _block_reason,
