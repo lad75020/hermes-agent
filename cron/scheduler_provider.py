@@ -560,8 +560,6 @@ class InProcessCronScheduler(CronScheduler):
         profile_homes=None,
         profile_adapters=None,
         default_profile=None,
-        profile_adapters=None,
-        default_profile=None,
         profile_gate=None,
     ):
         import logging
@@ -591,8 +589,6 @@ class InProcessCronScheduler(CronScheduler):
                 loop=loop,
                 interval=interval,
                 can_dispatch=can_dispatch,
-                profile_adapters=profile_adapters,
-                default_profile=default_profile,
                 profile_adapters=profile_adapters,
                 default_profile=default_profile,
                 profile_gate=profile_gate,
@@ -676,8 +672,6 @@ class InProcessCronScheduler(CronScheduler):
         can_dispatch=None,
         profile_adapters=None,
         default_profile=None,
-        profile_adapters=None,
-        default_profile=None,
         profile_gate=None,
     ):
         """Tick every served profile's cron store when multiplex_profiles is on.
@@ -695,7 +689,6 @@ class InProcessCronScheduler(CronScheduler):
         """
         import logging
         from cron.scheduler import tick as cron_tick
-        from cron.scheduler import CronTickYielded
         from cron.scheduler import (
             CronTickYielded,
             SharedRouteAdapters,
@@ -751,7 +744,6 @@ class InProcessCronScheduler(CronScheduler):
             ok = False
             _tick_error = None
             _profile_errors: dict[str, str] = {}
-            _profile_errors: dict[str, str] = {}
             # Worst per-profile failure this cycle (fd exhaustion wins) so the
             # #87644 backoff/reclaim is applied once per cycle, not per profile.
             _cycle_exc: BaseException | None = None
@@ -771,24 +763,10 @@ class InProcessCronScheduler(CronScheduler):
                 else:
                     for entry in cycle_homes:
                         _pname = entry[0] if isinstance(entry, tuple) else None
-                        _pname = entry[0] if isinstance(entry, tuple) else None
                         home = entry[1] if isinstance(entry, tuple) else entry
                         home_token = set_hermes_home_override(str(home))
                         try:
                             with use_cron_store(home):
-                                # Deliver each profile's cron via ITS OWN adapters.
-                                # The shared `adapters` set belongs to the default
-                                # profile only. A secondary profile uses its own map
-                                # in profile_adapters[name], which is populated only
-                                # once that profile's bot connects. A secondary must
-                                # NEVER fall back to the default profile's `adapters`
-                                # (that ships its cron output through the wrong bot),
-                                # so before its adapter connects — map absent or empty
-                                # — it simply does not deliver this tick.
-                                if _pname is None or _pname == default_profile:
-                                    _tick_adapters = adapters
-                                else:
-                                    _tick_adapters = (profile_adapters or {}).get(_pname) or {}
                                 # Deliver each profile's cron via ITS OWN adapters.
                                 # The shared `adapters` set belongs to the default
                                 # profile only. A secondary profile uses its own map
@@ -823,15 +801,6 @@ class InProcessCronScheduler(CronScheduler):
                                     sync=False,
                                     can_dispatch=can_dispatch,
                                 )
-                        except CronTickYielded as e:
-                            # This profile is served stale and a fresh
-                            # gateway owns its runtime lock: record the yield
-                            # for THIS profile's status only, and keep
-                            # ticking the remaining profiles — one profile's
-                            # fresh gateway must not cancel another profile's
-                            # only ticker in the same cycle.
-                            logger.info("Cron tick yielded for profile at %s: %s", home, e)
-                            _profile_errors[str(home)] = f"{type(e).__name__}: {e}"
                         except CronTickYielded as e:
                             # This profile is served stale and a fresh
                             # gateway owns its runtime lock: record the yield

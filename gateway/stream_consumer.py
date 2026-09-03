@@ -2080,8 +2080,7 @@ class GatewayStreamConsumer:
             and "data:image/" not in text
         ):
             return text
-        cleaned = text.replace("[[audio_as_voice]]", "")
-        cleaned = GatewayStreamConsumer._MEDIA_RE.sub("", cleaned)
+        cleaned = _BasePlatformAdapter.strip_media_directives_for_display(text)
         cleaned = GatewayStreamConsumer._IMAGE_B64_FIELD_RE.sub(
             lambda m: f'{m.group("prefix")}[omitted; sent as image attachment]{m.group("suffix") or ""}',
             cleaned,
@@ -2794,7 +2793,6 @@ class GatewayStreamConsumer:
             # interim text and orphan the true final into a plain-send
             # duplicate (live finding, 2026-08-16 canary).
             _md = self._metadata_for_send(final=False) or {}
-            _md = self._metadata_for_send(final=False) or {}
             _md["_interim_send"] = True
             # Only pass reply_to for platforms that use reply-anchoring for
             # threading. Discord/Telegram use native thread_id in metadata;
@@ -2805,7 +2803,6 @@ class GatewayStreamConsumer:
             result = await self.adapter.send(
                 chat_id=self.chat_id,
                 content=text,
-                reply_to=self._initial_reply_to_id,
                 reply_to=self._initial_reply_to_id if _needs_reply_anchor else None,
                 metadata=_md,
             )

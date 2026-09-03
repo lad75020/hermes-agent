@@ -37,7 +37,7 @@ except ImportError:
     except ImportError:
         msvcrt = None
 from pathlib import Path
-from typing import Any, Callable, Callable, List, Optional, Protocol
+from typing import Any, Callable, List, Optional, Protocol
 
 # Add parent directory to path for imports BEFORE repo-level imports.
 # Without this, standalone invocations (e.g. after `hermes update` reloads
@@ -5340,66 +5340,6 @@ def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
     return None
 
 
-def _delivery_platform_routed_from_primary_gateway(platform_name: str) -> bool:
-    """True when the primary gateway routes this platform to the profile the
-    scheduler is currently serving.
-
-    Under ``gateway.multiplex_profiles`` a satellite profile's cron jobs are
-    ticked by the primary gateway's in-process ticker (#69377) and delivered
-    through the primary gateway's live adapters — the satellite home never
-    holds the platform credentials itself (giving it a token of its own is a
-    ``duplicate_credential`` fatal). ``_preflight_check_delivery`` loads the
-    gateway config of the job's OWN home, where such a platform correctly
-    reads as unconnected; consulting the primary home's ``profile_routes``
-    keeps routed satellite jobs from being permanently false-blocked (#97476).
-    Reads the primary config.yaml directly (both the top-level and nested
-    ``gateway.`` forms) instead of ``load_gateway_config()`` so no primary
-    platform config leaks into this process's environment.
-    """
-    try:
-        from hermes_constants import get_default_hermes_root, get_hermes_home
-
-        primary_home = get_default_hermes_root()
-        current_home = Path(get_hermes_home())
-        if (
-            primary_home.expanduser().resolve(strict=False)
-            == current_home.expanduser().resolve(strict=False)
-        ):
-            return False  # this IS the primary home — nothing to consult
-        config_path = primary_home.expanduser() / "config.yaml"
-        if not config_path.exists():
-            return False
-
-        import yaml
-
-        with open(config_path, encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
-        routes_raw = raw.get("profile_routes")
-        if routes_raw is None and isinstance(raw.get("gateway"), dict):
-            routes_raw = raw["gateway"].get("profile_routes")
-        if not isinstance(routes_raw, list):
-            return False
-
-        from gateway.profile_routing import parse_profile_routes
-        from hermes_cli.profiles import profile_matches_home
-
-        platform_key = platform_name.lower()
-        for route in parse_profile_routes(routes_raw):
-            if (
-                route.enabled
-                and str(route.platform).lower() == platform_key
-                and profile_matches_home(route.profile)
-            ):
-                return True
-        return False
-    except Exception:
-        logger.debug(
-            "preflight: primary-gateway profile-route lookup unavailable",
-            exc_info=True,
-        )
-        return False
-
-
 def _primary_profile_routes_for_current_home() -> list:
     """Primary gateway ``profile_routes`` that target the profile currently
     being served, or ``[]`` (also when this IS the primary home).
@@ -5506,7 +5446,6 @@ class SharedRouteAdapters:
             if route.matches(str(route.platform), chat_id=chat_id, thread_id=thread_id):
                 return adapter
         return default
-        return False
 
 
 def _preflight_check_delivery(job: dict) -> Optional[str]:
@@ -6732,16 +6671,8 @@ def run_job(
                 # cron run resolves ITS OWN home (and state.db) instead of
                 # silently falling back to the process-global default.
                 _session_db_context = contextvars.copy_context()
-                # The timeout worker is a second thread, so it does not inherit
-                # the multiplexed profile ContextVar automatically. Run the
-                # constructor inside a copy of the active context so a profile
-                # cron run resolves ITS OWN home (and state.db) instead of
-                # silently falling back to the process-global default.
-                _session_db_context = contextvars.copy_context()
                 _session_db_future = _session_db_pool.submit(
-                    _session_db_context.run, 
                     _session_db_context.run, get_shared_session_db
-                
                 )
                 try:
                     _session_db = _session_db_future.result(timeout=_session_db_timeout)
@@ -8026,13 +7957,6 @@ def _run_one_job_body(
         if not isinstance(e, Exception):
             raise
         return False
-    finally:
-        # Function-level on purpose: this must scope delivery, deferred-agent
-        # teardown, claim-loss handling and bookkeeping, not just run_job.
-        # An earlier revision reset inside the run block's finally, which left
-        # _deliver_result unscoped — do not move it back in a tidy-up.
-        if _scope_token is not None:
-            reset_secret_scope(_scope_token)
     finally:
         # Function-level on purpose: this must scope delivery, deferred-agent
         # teardown, claim-loss handling and bookkeeping, not just run_job.
