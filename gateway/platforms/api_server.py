@@ -8258,6 +8258,79 @@ class APIServerAdapter(BasePlatformAdapter):
             "resolved": resolved,
         })
 
+    @staticmethod
+    def _normalize_approval_choice(choice: Any) -> str:
+        normalized = str(choice or "").strip().lower()
+        aliases = {"approve": "once", "allow": "once", "yes": "once", "no": "deny"}
+        return aliases.get(normalized, normalized)
+
+    async def _handle_approvals(self, request: "web.Request") -> "web.Response":
+        """GET /v1/approvals — list pending approval requests in this API process."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            from tools.approval import snapshot_gateway_approvals
+
+            approvals = snapshot_gateway_approvals()
+        except Exception as exc:
+            logger.exception("[api_server] approval listing failed")
+            return web.json_response(_openai_error(str(exc), err_type="server_error"), status=500)
+        return web.json_response({
+            "object": "hermes.approval_list",
+            "approvals": approvals,
+            "count": len(approvals),
+        })
+
+    async def _handle_approval_resolve(self, request: "web.Request") -> "web.Response":
+        """POST /v1/approvals/resolve — resolve FIFO approval by session_key."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(_openai_error("Invalid JSON"), status=400)
+
+        session_key = str(body.get("session_key") or request.match_info.get("session_key") or "").strip()
+        if not session_key:
+            return web.json_response(_openai_error("session_key is required"), status=400)
+        choice = self._normalize_approval_choice(body.get("choice"))
+        if choice not in {"once", "session", "always", "deny"}:
+            return web.json_response(
+                _openai_error(
+                    "choice must be one of: once, session, always, deny",
+                    code="invalid_approval_choice",
+                ),
+                status=400,
+            )
+        resolve_all = (
+            _coerce_request_bool(body.get("all"), default=False)
+            or _coerce_request_bool(body.get("resolve_all"), default=False)
+        )
+        try:
+            from tools.approval import resolve_gateway_approval
+
+            resolved = resolve_gateway_approval(session_key, choice, resolve_all=resolve_all)
+        except Exception as exc:
+            logger.exception("[api_server] approval resolution failed for session %s", session_key)
+            return web.json_response(_openai_error(str(exc)), status=500)
+        if resolved <= 0:
+            return web.json_response(
+                _openai_error(
+                    f"No pending approval for session: {session_key}",
+                    code="approval_not_pending",
+                ),
+                status=404,
+            )
+        return web.json_response({
+            "object": "hermes.approval_response",
+            "session_key": session_key,
+            "choice": choice,
+            "resolve_all": resolve_all,
+            "resolved": resolved,
+        })
+
     async def _handle_steer_run(self, request: "web.Request") -> "web.Response":
         """POST /v1/runs/{run_id}/steer — inject guidance into a running agent."""
         auth_err = self._check_auth(request)
