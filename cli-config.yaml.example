@@ -1562,6 +1562,10 @@ stt:
     # logprob_threshold: -1.0       # ...AND avg_logprob < this (both must hit — quiet real speech survives)
     # unload_after_idle_seconds: 0  # 0=never unload (default); e.g. 300 releases the model after 5min idle (frees VRAM on GPU; next voice message reloads it)
   language: "en"               # GLOBAL language hint for every STT provider (per-provider language wins). Set "" for auto-detect.
+  # apple:                       # macOS 26+ local SpeechAnalyzer/SpeechTranscriber provider; select with `provider: apple`
+  #   language: ""              # hook override > this > stt.language > HERMES_LOCAL_STT_LANGUAGE > system locale (not auto-detection)
+  #   download_assets: false     # never download Apple's language assets unless explicitly set true
+  #   timeout_seconds: 180       # bounded helper invocation timeout (1..1800)
   # groq:
   #   model: "whisper-large-v3-turbo"
   #   language: ""             # blank = stt.language > HERMES_LOCAL_STT_LANGUAGE > auto-detect

@@ -45,4 +45,12 @@ describe('voiceFieldVisible', () => {
     expect(voiceFieldVisible('tts.openai.voice', cfg({ tts: { provider: 'openai', openai: {} } }))).toBe(true)
     expect(voiceFieldVisible('tts.edge.voice', cfg({ tts: { provider: 'openai', openai: {} } }))).toBe(false)
   })
+
+  it('shows Apple settings only when Apple STT is selected', () => {
+    const apple = cfg({ stt: { enabled: true, provider: 'apple', apple: {}, local: {} } })
+
+    expect(voiceFieldVisible('stt.apple.language', apple)).toBe(true)
+    expect(voiceFieldVisible('stt.apple.download_assets', apple)).toBe(true)
+    expect(voiceFieldVisible('stt.local.model', apple)).toBe(false)
+  })
 })

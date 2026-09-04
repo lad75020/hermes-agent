@@ -146,7 +146,11 @@ export function ConfigField({
           {selectOptions.map(option => (
             <SelectItem key={option || EMPTY_SELECT_VALUE} value={option || EMPTY_SELECT_VALUE}>
               {option
-                ? (optionLabels?.[option] ?? prettyName(option))
+                ? (optionLabels?.[option] ?? (schemaKey === 'stt.apple.language'
+                    ? (option === 'fr-FR' ? 'French' : option === 'en-US' ? 'English' : option)
+                    : prettyName(option)))
+                : schemaKey === 'stt.apple.language'
+                  ? 'Use configured default'
                 : schemaKey === 'display.personality'
                   ? c.none
                   : schemaKey === 'memory.provider'

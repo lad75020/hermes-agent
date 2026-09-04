@@ -41,6 +41,11 @@ class TestSttCategory:
         assert cat["name"] == "Speech-to-Text"
         assert len(cat["providers"]) >= 5
 
+    def test_apple_native_stt_row_requires_macos_26(self):
+        apple = _stt_provider_named("Apple Native STT")
+        assert apple["stt_provider"] == "apple"
+        assert "macOS 26+" in apple["badge"]
+
 
 
 
@@ -74,6 +79,11 @@ class TestConfigWrites:
             )
             apply_provider_selection("stt", "OpenAI", config)
         assert config["stt"]["provider"] == "openai"
+
+    def test_write_provider_config_sets_apple_stt_provider(self):
+        config = {}
+        _write_provider_config(_stt_provider_named("Apple Native STT"), config, managed_feature=None)
+        assert config["stt"]["provider"] == "apple"
 
 
 class TestActiveDetection:

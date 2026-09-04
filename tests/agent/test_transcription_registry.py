@@ -80,6 +80,7 @@ class TestRegistration:
         [
             "local",
             "local_command",
+            "apple",
             "groq",
             "openai",
             "mistral",

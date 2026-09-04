@@ -103,7 +103,7 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
     ),
     # "mistral" temporarily removed — mistralai PyPI package quarantined
     # (malicious 2.4.6 release on 2026-05-12). Restore once available.
-    "stt.provider": _select("Speech-to-text provider", "local", "groq", "openai", "xai", "elevenlabs"),
+    "stt.provider": _select("Speech-to-text provider", "local", "apple", "groq", "openai", "xai", "elevenlabs"),
     "stt.local.model": _select("Local faster-whisper model size", "tiny", "base", "small", "medium", "large-v3"),
     "stt.groq.model": _select(
         "Groq Whisper model", "whisper-large-v3-turbo", "whisper-large-v3", "distil-whisper-large-v3-en"
@@ -227,13 +227,18 @@ def _build_schema_from_config(config: Dict[str, Any], prefix: str = "") -> Dict[
 
 
 def _config_schema_with_virtual_fields() -> Dict[str, Dict[str, Any]]:
-    """DEFAULT_CONFIG schema plus the virtual ``model_context_length`` field, inserted right
-    after ``model`` so it renders adjacent in the frontend."""
+    """DEFAULT_CONFIG schema plus virtual fields whose runtime defaults are implicit.
+
+    ``model_context_length`` follows ``model`` and ``stt.provider`` follows
+    ``stt.enabled`` so both render beside the setting they refine.
+    """
     ordered: Dict[str, Dict[str, Any]] = {}
     for key, entry in _build_schema_from_config(DEFAULT_CONFIG).items():
         ordered[key] = entry
         if key == "model":
             ordered["model_context_length"] = _SCHEMA_OVERRIDES["model_context_length"]
+        if key == "stt.enabled":
+            ordered["stt.provider"] = _SCHEMA_OVERRIDES["stt.provider"]
     return ordered
 
 

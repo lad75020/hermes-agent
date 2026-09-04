@@ -99,6 +99,12 @@ def test_local_whisper_relays(voice_home):
     assert "api_key" not in stt
 
 
+def test_apple_stt_relays(voice_home):
+    """Apple's Speech framework is local to the gateway host, never a client wire protocol."""
+    voice_home({"stt": {"provider": "apple"}})
+    assert _resolve()["stt"]["mode"] == "relay"
+
+
 def test_missing_credentials_relay(voice_home):
     voice_home({"stt": {"provider": "groq"}})
     stt = _resolve()["stt"]

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Speech-to-text transcription used by the gateway for voice messages.
 
-Built-in providers: local (faster-whisper, default/free), local_command, groq, openai
+Built-in providers: local (faster-whisper, default/free), local_command, apple, groq, openai
 (also serves the managed ``nous`` selection), mistral, xai, elevenlabs, deepinfra; plus
 user-declared command providers and plugin providers. ``transcribe_audio(path)`` returns
 ``{"success", "transcript", "error"?, "provider"?}``. This module owns provider resolution,
@@ -39,6 +39,7 @@ from tools.transcription_cloud import (  # noqa: F401  (handlers dispatched via 
 from tools.transcription_command import (
     _apply_pre_transcription_hook, _dispatch_to_plugin_provider, _enforce_prompt_length_limit,
     _resolve_command_stt_provider_config, _transcribe_command_stt, _unregistered_stt_provider_error)
+from tools.transcription_apple import _transcribe_apple  # noqa: F401 (globals()-dispatched handler)
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +138,7 @@ def _has_openai_audio_backend() -> bool:
 
 def _is_local_stt_provider(provider: str, stt_config: Dict[str, Any]) -> bool:
     """Whether *provider* is exempt from Hermes's remote upload cap."""
-    return (provider or "").lower().strip() in {"local", "local_command"}
+    return (provider or "").lower().strip() in {"local", "local_command", "apple"}
 
 
 # ---- Provider resolution ------------------------------------------------
@@ -443,6 +444,7 @@ def _transcribe_prepared_audio(
 _BUILTIN_MODEL_KEYS = {
     "local": ("local", "model", DEFAULT_LOCAL_MODEL, False),
     "local_command": ("local", "model", DEFAULT_LOCAL_MODEL, False),
+    "apple": ("apple", "model", "apple-native", True),
     "groq": ("groq", "model", DEFAULT_GROQ_STT_MODEL, True),
     "openai": ("openai", "model", DEFAULT_STT_MODEL, False),
     "mistral": ("mistral", "model", DEFAULT_MISTRAL_STT_MODEL, False),

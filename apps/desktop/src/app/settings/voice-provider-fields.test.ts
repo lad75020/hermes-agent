@@ -10,6 +10,11 @@ describe('voiceProviderKeys', () => {
     expect(voiceProviderKeys('tts', 'openai')).toEqual(['tts.openai.model', 'tts.openai.voice'])
     expect(voiceProviderKeys('tts', 'elevenlabs')).toEqual(['tts.elevenlabs.voice_id', 'tts.elevenlabs.model_id'])
     expect(voiceProviderKeys('tts', 'edge')).toEqual(['tts.edge.voice'])
+    expect(voiceProviderKeys('stt', 'apple')).toEqual([
+      'stt.apple.language',
+      'stt.apple.download_assets',
+      'stt.apple.timeout_seconds'
+    ])
   })
 
   it('covers every built-in TTS provider the Capabilities picker offers', () => {
@@ -39,6 +44,12 @@ describe('voiceProviderKeys', () => {
 })
 
 describe('voice field option coverage', () => {
+  it('offers French and English for Apple STT in Capabilities', () => {
+    expect(ENUM_OPTIONS['stt.apple.language']).toEqual(['', 'fr-FR', 'en-US'])
+    expect(FREE_INPUT_KEYS.has('stt.apple.language')).toBe(false)
+    expect(voiceProviderKeys('stt', 'apple')).toContain('stt.apple.language')
+  })
+
   it('offers the current gpt-4o-mini-tts voice set, not just the tts-1 six', () => {
     const voices = ENUM_OPTIONS['tts.openai.voice']
 

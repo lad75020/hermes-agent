@@ -1057,7 +1057,7 @@ DEFAULT_CONFIG = {
         # Echo the raw transcript of gateway voice messages back as a 🎙️ message.
         "echo_transcripts": True,
         # No seeded "provider": a stored value counts as an explicit user pick; unset = autodetect
-        # ladder. Valid: "local" (faster-whisper) | "groq" | "openai" | "mistral" | "elevenlabs" |
+        # ladder. Valid: "local" (faster-whisper) | "apple" (macOS 26+ on-device) | "groq" | "openai" | "mistral" | "elevenlabs" |
         # "deepinfra". Global language hint unless a per-provider language overrides it. "en"
         # because Whisper auto-detect misreads short/accented clips; "" = auto; or "es", "zh", ...
         "language": "en",
@@ -1078,6 +1078,13 @@ DEFAULT_CONFIG = {
             "no_speech_prob_threshold": 0.6,
             "logprob_threshold": -1.0,
             "unload_after_idle_seconds": 0,  # 0 = never; e.g. 300 frees the model after 5min
+        },
+        "apple": {
+            # macOS 26+ SpeechAnalyzer/SpeechTranscriber. This does not alter auto-detection.
+            # Blank = stt.language, HERMES_LOCAL_STT_LANGUAGE, then the system locale (not language detection).
+            "language": "",
+            "download_assets": False,  # explicit opt-in; no network download by default
+            "timeout_seconds": 180,
         },
         "groq": {
             # whisper-large-v3, whisper-large-v3-turbo, distil-whisper-large-v3-en

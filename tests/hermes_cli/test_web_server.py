@@ -2479,6 +2479,23 @@ class TestBuildSchemaFromConfig:
         assert fields["memory.provider"]["type"] == "select"
         assert _web_server_config.CONFIG_SCHEMA["memory.provider"] is not fields["memory.provider"]
 
+    def test_stt_provider_schema_keeps_apple_builtin_ahead_of_command_config(self):
+        """A command block named apple cannot shadow the native Apple provider."""
+        options = _web_server_config._custom_provider_options(
+            "stt",
+            list(_web_server_config.CONFIG_SCHEMA["stt.provider"]["options"]),
+            {
+                "stt": {
+                    "provider": "local",
+                    "providers": {"APPLE": {"command": "curl …"}, "myasr": {"command": "curl …"}},
+                }
+            },
+        )
+
+        assert "apple" in options
+        assert "APPLE" not in options
+        assert "myasr" in options
+
 
 
 

@@ -469,12 +469,33 @@ Voice messages sent on Telegram, Discord, WhatsApp, Slack, or Signal are automat
 Local transcription works out of the box when `faster-whisper` is installed. If that's unavailable, Hermes can also use a local `whisper` CLI from common install locations (like `/opt/homebrew/bin`) or a custom command via `HERMES_LOCAL_STT_COMMAND`.
 :::
 
+### Apple Speech (macOS 26+)
+
+On macOS 26 or later, set `stt.provider: apple` to use Apple's on-device `SpeechAnalyzer` and `SpeechTranscriber` APIs. Hermes compiles its packaged helper into the active profile's cache, so it does not require a Python package or send audio to a hosted STT provider. This is an explicit provider choice only; the normal automatic-provider order is unchanged.
+
+Apple language resolution is: a `pre_transcription` hook override, `stt.apple.language`, `stt.language`, `HERMES_LOCAL_STT_LANGUAGE`, then the Mac's native locale. Hermes defaults `stt.language` to `en`; clear it as well as `stt.apple.language` to use the Mac locale (unless an environment hint is set). This is locale selection, not automatic detection of the spoken language. Apple language assets are never downloaded by default. Start with downloads disabled:
+
+```yaml
+stt:
+  provider: apple
+  apple:
+    language: "en-US"
+    download_assets: false
+    timeout_seconds: 180
+```
+
+If the selected language's assets are missing, explicitly set `stt.apple.download_assets: true` to allow Apple's system installer to download them. Otherwise missing assets produce a clear local error. Audio transcription stays on the Hermes backend Mac; selecting Apple never falls back to a cloud STT provider. A remotely connected client still sends its audio to that Mac through the existing Hermes connection.
+
+Unsupported audio containers are converted through `ffmpeg` only when necessary; native Apple audio inputs are passed through unchanged. No microphone permission is needed by this file-transcription helper; the client that records microphone audio still needs its normal permission. Whisper-style `model` and `prompt` overrides do not apply to Apple's system model.
+
+For non-downloading diagnostics, run `python -c 'from tools.transcription_apple import apple_stt_status; print(apple_stt_status("fr-FR"))'` in the Hermes Python environment. See Apple's [SpeechTranscriber documentation](https://developer.apple.com/documentation/speech/speechtranscriber) and [WWDC25 session](https://developer.apple.com/videos/play/wwdc2025/277/).
+
 ### Configuration
 
 ```yaml
 # In ~/.hermes/config.yaml
 stt:
-  provider: "local"           # "local" | "groq" | "openai" | "mistral" | "xai" | "elevenlabs" | "deepinfra"
+  provider: "local"           # "local" | "apple" | "groq" | "openai" | "mistral" | "xai" | "elevenlabs" | "deepinfra"
   language: "en"              # Global language hint applied to every provider unless a per-provider language overrides it; set "" to restore auto-detect
   local:
     model: "base"             # tiny, base, small, medium, large-v3
@@ -627,7 +648,7 @@ The shell command runs under the same user as Hermes with full filesystem access
 
 ### Python plugin providers (STT)
 
-For STT engines that aren't built-in AND can't be expressed as a shell command (need a Python SDK, OAuth-refreshing auth, streaming chunks, etc.), register a Python plugin via `ctx.register_transcription_provider()`. The plugin **coexists with** the 8 built-in providers (`local`, `local_command`, `groq`, `openai`, `mistral`, `xai`, `elevenlabs`, `deepinfra`) and the `stt.providers.<name>: type: command` registry — built-ins keep their native implementations and always win on name collision; command providers win over plugins of the same name (config is more local than plugin install).
+For STT engines that aren't built-in AND can't be expressed as a shell command (need a Python SDK, OAuth-refreshing auth, streaming chunks, etc.), register a Python plugin via `ctx.register_transcription_provider()`. The plugin **coexists with** the 9 built-in providers (`local`, `local_command`, `apple`, `groq`, `openai`, `mistral`, `xai`, `elevenlabs`, `deepinfra`) and the `stt.providers.<name>: type: command` registry — built-ins keep their native implementations and always win on name collision; command providers win over plugins of the same name (config is more local than plugin install).
 
 #### When to pick which (STT)
 

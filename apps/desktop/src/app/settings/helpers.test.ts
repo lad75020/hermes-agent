@@ -195,9 +195,9 @@ describe('settings helpers', () => {
       expect(opts).toContain('elevenlabs')
     })
 
-    it('renders a dropdown for the STT provider including xAI (Grok)', () => {
+    it('renders a dropdown for the STT provider including Apple Native STT and xAI (Grok)', () => {
       const opts = enumOptionsFor('stt.provider', 'local', config)
-      expect(opts).toEqual(['local', 'groq', 'openai', 'mistral', 'xai', 'elevenlabs'])
+      expect(opts).toEqual(['local', 'apple', 'groq', 'openai', 'mistral', 'xai', 'elevenlabs'])
     })
 
     it('renders dropdowns for per-backend model/device sub-fields', () => {
@@ -327,6 +327,7 @@ describe('settings helpers', () => {
       const opts = enumOptionsFor('stt.provider', 'local', shadowing)
       expect(opts).not.toContain('local_command')
       expect(opts).not.toContain('deepinfra')
+      expect(opts).not.toContain('APPLE')
       expect(opts).toContain('myasr')
     })
   })

@@ -249,6 +249,8 @@ TOOL_CATEGORIES = {
         "providers": [
             _row("Local Whisper", "★ recommended · free", "faster-whisper on-device, no API key", stt_provider="local",
                  post_setup="faster_whisper"),
+            _row("Apple Native STT", "macOS 26+ · free", "On-device Apple Speech recognition, no API key",
+                 stt_provider="apple"),
             _row("Nous Subscription", "subscription", "Managed OpenAI transcription billed to your subscription",
                  stt_provider="openai", **_NOUS, managed_nous_feature="stt",
                  override_env_vars=["VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY"]),

@@ -248,9 +248,10 @@ export const ENUM_OPTIONS: Record<string, string[]> = {
   'terminal.backend': ['local', 'docker', 'singularity', 'modal', 'daytona', 'ssh'],
   'stt.elevenlabs.model_id': ['scribe_v2', 'scribe_v1'],
   'stt.local.model': ['tiny', 'base', 'small', 'medium', 'large-v3'],
+  'stt.apple.language': ['', 'fr-FR', 'en-US'],
   // Speech-to-text backends — kept in sync with the stt block in
-  // hermes_cli/config.py (local/groq/openai/mistral/elevenlabs).
-  'stt.provider': ['local', 'groq', 'openai', 'mistral', 'xai', 'elevenlabs'],
+  // hermes_cli/config.py (local/apple/groq/openai/mistral/elevenlabs).
+  'stt.provider': ['local', 'apple', 'groq', 'openai', 'mistral', 'xai', 'elevenlabs'],
   // OpenAI TTS voices — the union across models (per the OpenAI TTS API
   // docs). Model-specific narrowing happens in enumOptionsFor():
   // tts-1 / tts-1-hd support 9 voices; gpt-4o-mini-tts supports all 13.
@@ -447,6 +448,11 @@ export const FIELD_LABELS: Record<string, string> = defineFieldCopy({
       model: 'Local Transcription Model',
       language: 'Transcription Language'
     },
+    apple: {
+      language: 'Apple STT Language',
+      downloadAssets: 'Download Apple Speech Assets',
+      timeoutSeconds: 'Apple STT Timeout'
+    },
     openai: {
       model: 'OpenAI STT Model'
     },
@@ -617,6 +623,11 @@ export const FIELD_DESCRIPTIONS: Record<string, string> = defineFieldCopy({
   stt: {
     enabled: 'Enable local or provider-backed speech transcription.',
     echoTranscripts: 'Post the raw 🎙️ transcript of voice messages back to the chat.',
+    apple: {
+      language: 'Optional language tag (for example fr-FR). Blank uses the global STT language, then the environment hint or Mac locale; not automatic language detection.',
+      downloadAssets: 'Download required Apple Speech assets before transcription. Requires macOS 26 or later.',
+      timeoutSeconds: 'Maximum time to wait for Apple on-device transcription. Requires macOS 26 or later.'
+    },
     elevenlabs: {
       languageCode: 'Optional ISO-639-3 language code. Blank lets ElevenLabs auto-detect.'
     }
@@ -736,6 +747,9 @@ export const SECTIONS: DesktopConfigSection[] = [
       'tts.deepinfra.voice',
       'stt.local.model',
       'stt.local.language',
+      'stt.apple.language',
+      'stt.apple.download_assets',
+      'stt.apple.timeout_seconds',
       'stt.openai.model',
       'stt.groq.model',
       'stt.mistral.model',
