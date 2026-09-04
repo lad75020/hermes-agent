@@ -1621,25 +1621,6 @@ export function focusWorkspaceOwnerSessionTile(
     owned = allOwned.filter(tile => !stale.includes(tile))
   }
 
-  let owned = allOwned
-
-  if (typeof isStaleTile === 'function') {
-    const stale = allOwned.filter(tile => {
-      try {
-        return isStaleTile(tile)
-      } catch {
-        // A throwing probe must not break the click path — keep the tile.
-        return false
-      }
-    })
-
-    for (const tile of stale) {
-      discardSessionTile(tile.storedSessionId)
-    }
-
-    owned = allOwned.filter(tile => !stale.includes(tile))
-  }
-
   // `onlyStoredIds`: the sessions this call may front (Bot Mode passes the
   // canonical chat's registry id + lineage tip). Other tabs in the owner's
   // zone stay open; they are simply not what the caller asked for.

@@ -7,6 +7,7 @@ const setSessionTileWorkspaceScope = vi.fn()
 const openSessionInNewWindow = vi.fn()
 const canOpenSessionWindow = vi.fn(() => true)
 const workspaceIsPageGet = vi.fn(() => false)
+const revealTreePane = vi.fn()
 
 vi.mock('@/store/session-states', () => ({
   focusedSessionNeedsRoute: (focused: 'main' | 'tile' | null, workspaceIsPage: boolean) =>
@@ -20,6 +21,10 @@ vi.mock('@/store/session-states', () => ({
 vi.mock('@/store/windows', () => ({
   canOpenSessionWindow: () => canOpenSessionWindow(),
   openSessionInNewWindow: (...args: unknown[]) => openSessionInNewWindow(...args)
+}))
+
+vi.mock('@/components/pane-shell/tree/store', () => ({
+  revealTreePane: (...args: unknown[]) => revealTreePane(...args)
 }))
 
 vi.mock('./routes', () => ({
@@ -92,6 +97,7 @@ describe('openSession', () => {
     workspaceIsPageGet.mockReturnValue(false)
     reuseBlankDraftTile.mockReset()
     setSessionTileWorkspaceScope.mockReset()
+    revealTreePane.mockReset()
     $activeSessionId.set(null)
     $selectedStoredSessionId.set(null)
   })
@@ -143,6 +149,7 @@ describe('openSession', () => {
     focusOpenSession.mockReturnValue(null)
     openSession('s1', navigate, 'tab')
     expect(openSessionTile).toHaveBeenCalledWith('s1', 'center')
+    expect(revealTreePane).toHaveBeenCalledWith('session-tile:s1')
     expect(navigate).not.toHaveBeenCalled()
   })
 

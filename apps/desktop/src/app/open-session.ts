@@ -15,6 +15,7 @@
  *     the bridge has no session-window support.
  */
 import type { WorkspaceMode } from '@/contrib/types'
+import { revealTreePane } from '@/components/pane-shell/tree/store'
 import { $activeSessionId, $selectedStoredSessionId, markSessionRead } from '@/store/session'
 import type { SessionProfileRoute } from '@/store/session-request-router'
 import {
@@ -157,6 +158,11 @@ export function openSession(
     } else {
       openSessionTile(storedSessionId, 'center')
     }
+
+    // Tile persistence is synchronous but the pane contribution is adopted on
+    // the next tree reconciliation. Explicitly reveal it so a plugin or other
+    // non-chat surface visibly fronts the new tab immediately.
+    revealTreePane(`session-tile:${storedSessionId}`)
 
     return
   }

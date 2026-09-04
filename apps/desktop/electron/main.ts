@@ -18081,9 +18081,6 @@ app.on('before-quit', event => {
 
     if (!sshQuitTeardownPromise) {
       const scopes = [...sshConnections.keys()]
-
-    if (!sshQuitTeardownPromise) {
-      const scopes = [...sshConnections.keys()]
         const pending = Promise.allSettled([
           ...scopes.map(scope => teardownSshConnection(scope || null)),
           ...sshBootstrapCoordinator.promises()
