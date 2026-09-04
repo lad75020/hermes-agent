@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { setApiRequestConnection, setApiRequestProfile } from '@/hermes'
 
-import { activeConnection } from './plugins'
+import { activeConnection, pluginRest } from './plugins'
 
 // desktop.getConnection/getConnectionFor are IPC round-trips into the main
 // process with no timeout of their own (#93454). A wedged main-process
@@ -45,5 +45,43 @@ describe('activeConnection connection timeout (#93454)', () => {
 
     await vi.advanceTimersByTimeAsync(20_000)
     await pending
+  })
+})
+
+describe('pluginRest profile scoping', () => {
+  afterEach(() => {
+    setApiRequestConnection(null)
+    setApiRequestProfile(null)
+    Reflect.deleteProperty(window, 'hermesDesktop')
+  })
+
+  it('lets a global plugin opt out of the active profile route', async () => {
+    const api = vi.fn(async (_request: Record<string, unknown>) => ({ ok: true }))
+    Object.defineProperty(window, 'hermesDesktop', {
+      configurable: true,
+      value: { api }
+    })
+    setApiRequestProfile('ollama')
+
+    await pluginRest('history-search', '/search/sessions', { method: 'POST', profile: null })
+
+    expect(api).toHaveBeenCalledWith(expect.objectContaining({
+      path: '/api/plugins/history-search/search/sessions',
+      method: 'POST'
+    }))
+    expect(api.mock.calls[0]?.[0]).not.toHaveProperty('profile')
+  })
+
+  it('keeps ordinary plugins scoped to the active profile', async () => {
+    const api = vi.fn(async (_request: Record<string, unknown>) => ({ ok: true }))
+    Object.defineProperty(window, 'hermesDesktop', {
+      configurable: true,
+      value: { api }
+    })
+    setApiRequestProfile('ollama')
+
+    await pluginRest('kanban', '/board')
+
+    expect(api).toHaveBeenCalledWith(expect.objectContaining({ profile: 'ollama' }))
   })
 })
