@@ -5185,6 +5185,51 @@ def _configure_immediate_prompt_run(
     monkeypatch.setattr(server, "_get_db", lambda: None)
 
 
+def test_run_prompt_submit_setup_error_does_not_crash_turn_thread(
+    monkeypatch, tmp_path
+):
+    events = []
+
+    _configure_immediate_prompt_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: events.append((event, sid, payload)),
+    )
+    monkeypatch.setattr(
+        server,
+        "_sync_agent_model_with_config",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("turn setup failed")),
+    )
+
+    agent = types.SimpleNamespace(
+        session_id="session-key",
+        _session_messages=[],
+        interim_assistant_callback=None,
+    )
+    session = _session(agent=agent, running=True)
+    server._sessions["sid-setup-error"] = session
+    try:
+        assert (
+            server._run_prompt_submit(
+                "rid-setup-error", "sid-setup-error", session, "hello"
+            )
+            is True
+        )
+
+        assert session["running"] is False
+        assert session["inflight_turn"]["status"] == "error"
+        assert any(
+            event == "message.complete"
+            and payload["status"] == "error"
+            and payload["error"] == "turn setup failed"
+            for event, _sid, payload in events
+            if payload is not None
+        )
+    finally:
+        server._sessions.pop("sid-setup-error", None)
+
+
 def test_run_prompt_submit_binds_exact_steer_authority_and_resets_contextvars(
     monkeypatch, tmp_path
 ):
