@@ -2519,14 +2519,18 @@ def get_systemd_linger_status() -> tuple[bool | None, str]:
     return None, f"unexpected loginctl output: {value or '<empty>'}"
 
 
+def _launchd_account_home() -> Path:
+    """Return the real macOS account home, independent of profile-scoped HOME."""
+    import pwd
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)  # windows-footgun: ok — POSIX launchd (macOS) helper, never invoked on Windows
+
+
 def get_launchd_plist_path() -> Path:
     """``~/Library/LaunchAgents/ai.hermes.gateway[-<profile>].plist`` under the real account home."""
-    import pwd
     suffix = _profile_suffix()
     name = f"ai.hermes.gateway-{suffix}" if suffix else "ai.hermes.gateway"
     # Real account home: profile mode may point HOME at a profile dir.
-    home = Path(pwd.getpwuid(os.getuid()).pw_dir)  # windows-footgun: ok — POSIX launchd (macOS) helper, never invoked on Windows
-    return home / "Library" / "LaunchAgents" / f"{name}.plist"
+    return _launchd_account_home() / "Library" / "LaunchAgents" / f"{name}.plist"
 
 
 def launchd_gateway_labels_for_install() -> list[str]:
@@ -3633,7 +3637,9 @@ def generate_launchd_plist() -> str:
     # Stable cwd anchor — never the volatile source checkout (same rot risk as systemd's WorkingDirectory).
     working_dir = _stable_service_working_dir()
     hermes_home = str(get_hermes_home().resolve())
-    log_dir = get_hermes_home() / "logs"
+    # launchd may be denied access to a profile/external HERMES_HOME. Keep its
+    # stdout/stderr in the real account's local Library, like the plist itself.
+    log_dir = _launchd_account_home() / "Library" / "Logs" / "Hermes"
     log_dir.mkdir(parents=True, exist_ok=True)
     label = get_launchd_label()
     venv_dir = _service_venv_dir()

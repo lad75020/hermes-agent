@@ -142,3 +142,65 @@ def test_desktop_session_search_merges_id_matches_before_content_matches(monkeyp
         ]
     }
     assert _FakeSessionDB.opened_read_only is True
+
+
+class _ConversationSessionDB:
+    def __init__(self):
+        self.closed = False
+        self.search_kwargs = None
+
+    def search_messages(self, **kwargs):
+        self.search_kwargs = kwargs
+        return [
+            {"session_id": "session-a", "role": "user", "snippet": "first"},
+            {"session_id": "session-a", "role": "assistant", "snippet": "second"},
+            {"session_id": "missing", "role": "user", "snippet": "orphan"},
+        ]
+
+    def get_session(self, session_id):
+        return {"id": session_id, "title": "Conversation A"} if session_id == "session-a" else None
+
+    def get_messages(self, session_id):
+        assert session_id == "session-a"
+        return [{"role": "user", "content": "full conversation"}]
+
+    def close(self):
+        self.closed = True
+
+
+def test_full_conversation_search_is_profile_scoped_and_expands_matches(monkeypatch):
+    db = _ConversationSessionDB()
+    opened = []
+    monkeypatch.setattr(
+        _rt_sessions,
+        "_open_session_db_for_profile",
+        lambda profile, *, read_only: opened.append((profile, read_only)) or db,
+    )
+
+    response = asyncio.run(_rt_sessions.search_session_conversations(
+        q="needle", limit=5, offset=2, source="cli, desktop", role="user", profile="Work"))
+
+    assert opened == [("Work", True)]
+    assert db.search_kwargs == {
+        "query": "needle",
+        "source_filter": ["cli", "desktop"],
+        "role_filter": ["user"],
+        "limit": 5,
+        "offset": 2,
+    }
+    assert response == {
+        "results": [{
+            "session_id": "session-a",
+            "session": {"id": "session-a", "title": "Conversation A"},
+            "matches": [
+                {"session_id": "session-a", "role": "user", "snippet": "first"},
+                {"session_id": "session-a", "role": "assistant", "snippet": "second"},
+            ],
+            "messages": [{"role": "user", "content": "full conversation"}],
+        }],
+        "limit": 5,
+        "offset": 2,
+        "matched_messages": 3,
+        "matched_sessions": 1,
+    }
+    assert db.closed is True

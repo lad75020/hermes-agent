@@ -314,6 +314,19 @@ class TestGeneratedSystemdUnits:
         assert str(local_bin) in plist
         assert str(profile_node_bin) not in plist
 
+    def test_launchd_plist_uses_real_account_library_for_logs(self, tmp_path, monkeypatch):
+        account_home = tmp_path / "account"
+        profile_home = tmp_path / "external-profile"
+        monkeypatch.setattr(gateway_cli, "_launchd_account_home", lambda: account_home)
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: profile_home)
+
+        plist = gateway_cli.generate_launchd_plist()
+
+        log_dir = account_home / "Library" / "Logs" / "Hermes"
+        assert f"<string>{log_dir / 'gateway.log'}</string>" in plist
+        assert f"<string>{log_dir / 'gateway.error.log'}</string>" in plist
+        assert str(profile_home / "logs") not in plist
+
     def test_launchd_plist_persists_configured_nofile_soft_limit(self, monkeypatch):
         """The generated plist must carry SoftResourceLimits/NumberOfFiles so a
         plist rewrite by `hermes gateway start` cannot strip the FD floor and
@@ -1659,10 +1672,12 @@ class TestProfileArg:
 
     def test_launchd_plist_wraps_gateway_stderr_with_timestamps(self, tmp_path, monkeypatch):
         profile_dir = tmp_path / ".hermes" / "profiles" / "mybot"
+        account_home = tmp_path / "account"
         profile_dir.mkdir(parents=True)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         monkeypatch.setenv("HERMES_HOME", str(profile_dir))
         monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: profile_dir)
+        monkeypatch.setattr(gateway_cli, "_launchd_account_home", lambda: account_home)
         monkeypatch.setattr(gateway_cli, "get_python_path", lambda: "/usr/bin/python3")
 
         plist = gateway_cli.generate_launchd_plist()
@@ -1673,7 +1688,7 @@ class TestProfileArg:
             "-m",
             "hermes_cli.stderr_timestamp",
             "--error-log",
-            str(profile_dir / "logs" / "gateway.error.log"),
+            str(account_home / "Library" / "Logs" / "Hermes" / "gateway.error.log"),
             "--",
             "/usr/bin/python3",
             "-m",

@@ -389,6 +389,62 @@ async def search_sessions(
             db.close()
 
 
+@search_router.get("/api/sessions/search/conversations")
+async def search_session_conversations(
+    q: str = "", limit: int = 20, offset: int = 0, source: Optional[str] = None,
+    role: Optional[str] = None, profile: Optional[str] = None):
+    """Search message content and expand each matching session to its full conversation."""
+    try:
+        safe_limit = max(1, min(int(limit), 100))
+        safe_offset = max(0, int(offset))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid limit or offset") from exc
+
+    if not q or not q.strip():
+        return {
+            "results": [], "limit": safe_limit, "offset": safe_offset,
+            "matched_messages": 0, "matched_sessions": 0}
+
+    with http_failure(
+            "GET /api/sessions/search/conversations failed", 500,
+            detail="Conversation search failed"):
+        db = _open_session_db_for_profile(profile, read_only=True)
+        try:
+            matches = db.search_messages(
+                query=q,
+                source_filter=_csv(source) or None,
+                role_filter=_csv(role) or None,
+                limit=safe_limit,
+                offset=safe_offset,
+            )
+            sessions_by_id: dict[str, dict] = {}
+            for match in matches:
+                session_id = match.get("session_id")
+                if not session_id:
+                    continue
+                if session_id in sessions_by_id:
+                    sessions_by_id[session_id]["matches"].append(match)
+                    continue
+                session = db.get_session(session_id)
+                if not session:
+                    continue
+                sessions_by_id[session_id] = {
+                    "session_id": session_id,
+                    "session": session,
+                    "matches": [match],
+                    "messages": db.get_messages(session_id),
+                }
+            return {
+                "results": list(sessions_by_id.values()),
+                "limit": safe_limit,
+                "offset": safe_offset,
+                "matched_messages": len(matches),
+                "matched_sessions": len(sessions_by_id),
+            }
+        finally:
+            db.close()
+
+
 @manage_router.post("/api/sessions/bulk-delete")
 async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
     """Delete every session in ``body.ids`` in one transaction (POST: many
