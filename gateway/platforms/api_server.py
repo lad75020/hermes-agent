@@ -6783,8 +6783,20 @@ class APIServerAdapter(BasePlatformAdapter):
             conversation_history = _auto_truncate_response_history(conversation_history)
 
         # Reuse session from previous_response_id chain so the dashboard
-        # groups the entire conversation under one session entry.
-        session_id = stored_session_id or str(uuid.uuid4())
+        # groups the entire conversation under one session entry. A client
+        # that manages its own history has no chain to reuse, so fall back to
+        # the conversation declared by X-Hermes-Session-Key before minting a
+        # new physical session id.
+        #
+        # The response chain still outranks the declared key. Only bind the
+        # declared key when it selected (or minted) the session; otherwise a
+        # foreign header could rebind the response chain's conversation.
+        _declared_selected = not stored_session_id and bool(gateway_session_key)
+        session_id = (
+            stored_session_id
+            or self._declared_conversation_session(gateway_session_key)
+            or str(uuid.uuid4())
+        )
 
         # Per-client model routing for /v1/responses (see model_routes).
         route = self._resolve_route(body.get("model"))
