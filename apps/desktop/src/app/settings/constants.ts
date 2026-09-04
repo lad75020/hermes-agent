@@ -251,7 +251,8 @@ export const ENUM_OPTIONS: Record<string, string[]> = {
   'stt.local.model': ['tiny', 'base', 'small', 'medium', 'large-v3', 'turbo'],
   // Speech-to-text backends — kept in sync with BUILTIN_STT_PROVIDERS in
   // tools/transcription_common.py (local_command is auto-detected, not picked).
-  'stt.provider': ['local', 'groq', 'openai', 'mistral', 'xai', 'elevenlabs', 'deepinfra'],
+  'stt.apple.language': ['', 'fr-FR', 'en-US'],
+  'stt.provider': ['local', 'apple', 'groq', 'openai', 'mistral', 'xai', 'elevenlabs', 'deepinfra'],
   // How the desktop voice conversation is wired — tools/voice_live.py owns the
   // gpt-live branch (one full-duplex voice model delegating to Hermes).
   'voice.voice_chat_mode': ['chained', 'gpt-live'],
@@ -496,6 +497,11 @@ export const FIELD_LABELS: Record<string, string> = defineFieldCopy({
       model: 'Local Transcription Model',
       language: 'Transcription Language'
     },
+    apple: {
+      language: 'Apple STT Language',
+      downloadAssets: 'Download Apple Speech Assets',
+      timeoutSeconds: 'Apple STT Timeout'
+    },
     openai: {
       model: 'OpenAI STT Model',
       streamingModel: 'OpenAI Live Transcription Model'
@@ -695,6 +701,11 @@ export const FIELD_DESCRIPTIONS: Record<string, string> = defineFieldCopy({
   stt: {
     enabled: 'Enable local or provider-backed speech transcription.',
     echoTranscripts: 'Post the raw 🎙️ transcript of voice messages back to the chat.',
+    apple: {
+      language: 'Optional language tag. Blank uses the global STT language, then the environment hint or Mac locale.',
+      downloadAssets: 'Allow Apple Speech asset downloads. Requires macOS 26 or later.',
+      timeoutSeconds: 'Maximum transcription wait. Requires macOS 26 or later.'
+    },
     streaming: 'Show text while you speak (OpenAI, xAI, ElevenLabs). Falls back to the recording on any failure.',
     elevenlabs: {
       languageCode: 'Optional ISO-639-3 language code. Blank lets ElevenLabs auto-detect.'
@@ -821,6 +832,9 @@ export const SECTIONS: DesktopConfigSection[] = [
       'tts.deepinfra.voice',
       'stt.local.model',
       'stt.local.language',
+      'stt.apple.language',
+      'stt.apple.download_assets',
+      'stt.apple.timeout_seconds',
       'stt.openai.model',
       'stt.openai.streaming_model',
       'stt.groq.model',

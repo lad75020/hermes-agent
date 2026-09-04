@@ -125,7 +125,7 @@ _SCHEMA_OVERRIDES: dict[str, dict[str, Any]] = {
         "edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "gemini", "neutts", "kittentts", "piper",
     ),
     "stt.provider": _select(
-        "Speech-to-text provider", "local", "groq", "openai", "mistral", "xai", "elevenlabs", "deepinfra"),
+        "Speech-to-text provider", "local", "apple", "groq", "openai", "mistral", "xai", "elevenlabs", "deepinfra"),
     "stt.local.model": _select("Local faster-whisper model size", *STT_MODEL_CATALOG["local"]),
     "stt.groq.model": _select("Groq Whisper model", *STT_MODEL_CATALOG["groq"]),
     "stt.openai.model": _select("OpenAI transcription model", *STT_MODEL_CATALOG["openai"]),
@@ -267,6 +267,8 @@ def _config_schema_with_virtual_fields() -> dict[str, dict[str, Any]]:
         ordered[key] = entry
         if key == "model":
             ordered["model_context_length"] = _SCHEMA_OVERRIDES["model_context_length"]
+        if key == "stt.enabled":
+            ordered["stt.provider"] = _SCHEMA_OVERRIDES["stt.provider"]
     return ordered
 
 

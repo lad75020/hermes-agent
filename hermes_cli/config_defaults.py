@@ -1179,6 +1179,13 @@ DEFAULT_CONFIG = {
             "logprob_threshold": -1.0,
             "unload_after_idle_seconds": 0,  # 0 = never; e.g. 300 frees the model after 5min
         },
+        "apple": {
+            # macOS 26+ SpeechAnalyzer/SpeechTranscriber. This does not alter auto-detection.
+            # Blank = stt.language, HERMES_LOCAL_STT_LANGUAGE, then the system locale (not language detection).
+            "language": "",
+            "download_assets": False,  # explicit opt-in; no network download by default
+            "timeout_seconds": 180,
+        },
         "groq": {
             "model": "whisper-large-v3-turbo",  # whisper-large-v3-turbo, whisper-large-v3
             "language": "",  # auto-detect; set "en", "es", ... to force
