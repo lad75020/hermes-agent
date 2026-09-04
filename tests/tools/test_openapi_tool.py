@@ -170,7 +170,7 @@ async def test_openapi_maps_path_query_headers_and_json_body():
 
 @pytest.mark.asyncio
 async def test_connect_server_routes_explicit_openapi_transport(monkeypatch):
-    from tools import mcp_tool
+    from tools import mcp_tool_discovery
 
     started = []
 
@@ -186,7 +186,7 @@ async def test_connect_server_routes_explicit_openapi_transport(monkeypatch):
         FakeOpenAPIServerTask,
     )
 
-    server = await mcp_tool._connect_server(
+    server = await mcp_tool_discovery._connect_server(
         "XCodeMCP",
         {"transport": "openapi", "url": "http://127.0.0.1:8084"},
     )
@@ -221,14 +221,14 @@ async def test_openapi_rejects_non_http_or_hostless_urls(field, value):
 
 
 def test_openapi_server_is_compatible_with_mcp_status(monkeypatch):
-    from tools import mcp_tool
+    from tools import mcp_tool_discovery
     from tools.openapi_tool import OpenAPIServerTask
 
     server = OpenAPIServerTask("XCodeMCP")
     server.session = SimpleNamespace()
     server._registered_tool_names = ["mcp__XCodeMCP__XcodeListWorkspaces"]
     monkeypatch.setattr(
-        mcp_tool,
+        mcp_tool_discovery._config,
         "_load_mcp_config",
         lambda: {
             "XCodeMCP": {
@@ -237,9 +237,9 @@ def test_openapi_server_is_compatible_with_mcp_status(monkeypatch):
             }
         },
     )
-    monkeypatch.setitem(mcp_tool._servers, "XCodeMCP", server)
+    monkeypatch.setitem(mcp_tool_discovery._core._servers, "XCodeMCP", server)
 
-    assert mcp_tool.get_mcp_status() == [
+    assert mcp_tool_discovery.get_mcp_status() == [
         {
             "name": "XCodeMCP",
             "transport": "openapi",

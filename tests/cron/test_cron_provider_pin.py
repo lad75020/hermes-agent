@@ -28,10 +28,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from cron.scheduler import (
-    _preflight_check_provider_key,
     _summarize_cron_failure_for_delivery,
     run_job,
 )
+from cron.scheduler_preflight import _preflight_check_provider_key
 
 
 def _base_job(**overrides):
@@ -55,10 +55,10 @@ def _run_with_current_provider(job, current_provider, tmp_path):
     """
     fake_db = MagicMock()
     with patch("cron.scheduler._hermes_home", tmp_path), \
-         patch("cron.scheduler._resolve_origin", return_value=None), \
+         patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
          patch("hermes_cli.env_loader.load_hermes_dotenv"), \
          patch("hermes_cli.env_loader.reset_secret_source_cache"), \
-         patch("hermes_state.get_shared_session_db", return_value=fake_db), \
+         patch("hermes_state_registry.acquire", return_value=fake_db), \
          patch(
              "hermes_cli.runtime_provider.resolve_runtime_provider",
              return_value={
@@ -267,10 +267,10 @@ def _run_with_current_provider_and_model(
     fake_db = MagicMock()
     with patch("cron.scheduler._hermes_home", tmp_path), \
          patch("cron.scheduler._get_hermes_home", return_value=tmp_path), \
-         patch("cron.scheduler._resolve_origin", return_value=None), \
+         patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
          patch("hermes_cli.env_loader.load_hermes_dotenv"), \
          patch("hermes_cli.env_loader.reset_secret_source_cache"), \
-         patch("hermes_state.get_shared_session_db", return_value=fake_db), \
+         patch("hermes_state_registry.acquire", return_value=fake_db), \
          patch(
              "hermes_cli.runtime_provider.resolve_runtime_provider",
              return_value={
@@ -431,10 +431,10 @@ class TestRuntimeResolutionTargetModel:
 
         fake_db = MagicMock()
         with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
              patch("hermes_cli.env_loader.load_hermes_dotenv"), \
              patch("hermes_cli.env_loader.reset_secret_source_cache"), \
-             patch("hermes_state.get_shared_session_db", return_value=fake_db), \
+             patch("hermes_state_registry.acquire", return_value=fake_db), \
              patch(
                  "hermes_cli.runtime_provider.resolve_runtime_provider",
                  side_effect=_capture,
@@ -499,10 +499,10 @@ class TestNoFallbackCronJobs:
         fake_db = MagicMock()
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._get_hermes_home", return_value=tmp_path), \
-             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
              patch("hermes_cli.env_loader.load_hermes_dotenv"), \
              patch("hermes_cli.env_loader.reset_secret_source_cache"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("hermes_state_registry.acquire", return_value=fake_db), \
              patch("hermes_cli.runtime_provider.resolve_runtime_provider", resolve), \
              patch("run_agent.AIAgent") as agent_cls:
             success, _output, _final_response, error = run_job(
@@ -537,10 +537,10 @@ class TestNoFallbackCronJobs:
         fake_db = MagicMock()
         with patch("cron.scheduler._hermes_home", tmp_path), \
              patch("cron.scheduler._get_hermes_home", return_value=tmp_path), \
-             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
              patch("hermes_cli.env_loader.load_hermes_dotenv"), \
              patch("hermes_cli.env_loader.reset_secret_source_cache"), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("hermes_state_registry.acquire", return_value=fake_db), \
              patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=runtime), \
              patch("run_agent.AIAgent") as agent_cls:
             agent_cls.return_value.run_conversation.return_value = {"final_response": "ok"}

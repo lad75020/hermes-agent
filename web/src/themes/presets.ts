@@ -8,7 +8,7 @@ import type { DashboardTheme, ThemeTypography, ThemeLayout } from "./types";
  * corner-radius all shift to match the theme's personality.
  *
  * Theme names must stay in sync with the backend's
- * `_BUILTIN_DASHBOARD_THEMES` list in `hermes_cli/web_server.py`.
+ * `_BUILTIN_DASHBOARD_THEMES` list in `hermes_cli/web_server_dashboard.py`.
  */
 
 // ---------------------------------------------------------------------------
@@ -187,7 +187,7 @@ export const roseTheme: DashboardTheme = {
 export const solarizedLightTheme: DashboardTheme = {
   name: "solarized-light",
   label: "Solarized Light",
-  description: "White canvas with pale blue and grey HermesMacOS light controls",
+  description: "White canvas with pale blue and grey controls",
   palette: {
     background: { hex: "#ffffff", alpha: 1 },
     midground: { hex: "#0b1220", alpha: 1 },
@@ -207,6 +207,8 @@ export const solarizedLightTheme: DashboardTheme = {
     ...DEFAULT_LAYOUT,
     radius: "0.625rem",
   },
+  terminalBackground: "#f7fbff",
+  terminalForeground: "#0b1220",
   colorOverrides: {
     card: "#ffffff",
     cardForeground: "#0b1220",
@@ -265,65 +267,6 @@ export const nousBlueTheme: DashboardTheme = {
     outputTokenAccent: "#0053fd",
   },
   swatchColors: ["#170d02", "#0053FD", "#E8F2FD"],
-};
-
-export const solarizedLightTheme: DashboardTheme = {
-  name: "solarized-light",
-  label: "Solarized Light",
-  description: "White canvas with pale blue and grey HermesMacOS light controls",
-  palette: {
-    background: { hex: "#ffffff", alpha: 1 },
-    midground: { hex: "#0b1220", alpha: 1 },
-    foreground: { hex: "#2176d2", alpha: 0.22 },
-    warmGlow: "rgba(144, 200, 255, 0.22)",
-    noiseOpacity: 0.16,
-  },
-  typography: {
-    ...DEFAULT_TYPOGRAPHY,
-    fontSans: `"IBM Plex Sans", ${SYSTEM_SANS}`,
-    fontMono: `"IBM Plex Mono", ${SYSTEM_MONO}`,
-    fontUrl:
-      "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap",
-    letterSpacing: "-0.003em",
-  },
-  layout: {
-    ...DEFAULT_LAYOUT,
-    radius: "0.625rem",
-  },
-  colorOverrides: {
-    card: "#ffffff",
-    cardForeground: "#0b1220",
-    popover: "#ffffff",
-    popoverForeground: "#0b1220",
-    primary: "#0b5cad",
-    primaryForeground: "#ffffff",
-    secondary: "#edf6ff",
-    secondaryForeground: "#0b1220",
-    muted: "#f3f6fa",
-    mutedForeground: "#243447",
-    accent: "#e8f4ff",
-    accentForeground: "#0d4f99",
-    destructive: "#c33434",
-    destructiveForeground: "#ffffff",
-    success: "#3f7f61",
-    warning: "#a46b15",
-    border: "#d8e4ef",
-    input: "#d8e4ef",
-    ring: "#0b5cad",
-  },
-  componentStyles: {
-    backdrop: {
-      background:
-        "radial-gradient(circle at 12% 8%, rgba(144, 200, 255, 0.22), transparent 34%), radial-gradient(circle at 88% 14%, rgba(243, 246, 250, 0.72), transparent 30%), #ffffff",
-    },
-    card: {
-      background: "rgba(255, 255, 255, 0.92)",
-      boxShadow: "0 18px 50px rgba(31, 45, 58, 0.10)",
-    },
-    header: {
-      background: "rgba(255, 255, 255, 0.9)",
-      backdropFilter: "blur(18px)",
-    },
 };
 
 /**

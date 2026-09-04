@@ -389,6 +389,55 @@ class TestAgentExecution:
         assert data["error"]["code"] == "request_not_found"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("path", "payload"),
+        [
+            ("/v1/chat/completions", {
+                "model": "hermes-agent",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": False,
+            }),
+            ("/v1/chat/completions", {
+                "model": "hermes-agent",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+            }),
+            ("/v1/responses", {"model": "hermes-agent", "input": "hello", "stream": False}),
+            ("/v1/responses", {"model": "hermes-agent", "input": "hello", "stream": True}),
+        ],
+    )
+    async def test_request_id_tracks_streaming_and_non_streaming_openai_paths(
+        self, adapter, path, payload
+    ):
+        request_id = "req-explicit-cancel"
+        result = {
+            "final_response": "ok",
+            "messages": [{"role": "assistant", "content": "ok"}],
+            "api_calls": 1,
+        }
+        usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        app = _create_app(adapter)
+        with (
+            patch.object(adapter, "_run_agent", new=AsyncMock(return_value=(result, usage))),
+            patch.object(adapter, "_track_api_request", wraps=adapter._track_api_request) as track,
+            patch.object(
+                adapter, "_write_sse_chat_completion",
+                new=AsyncMock(return_value=web.json_response({"ok": True})),
+            ),
+            patch.object(
+                adapter, "_write_sse_responses",
+                new=AsyncMock(return_value=web.json_response({"ok": True})),
+            ),
+        ):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    path, json=payload, headers={"X-Hermes-Request-Id": request_id})
+                assert resp.status == 200
+                await asyncio.sleep(0)
+
+        assert [call.args[0] for call in track.call_args_list] == [request_id]
+
+    @pytest.mark.asyncio
     async def test_run_agent_uses_session_id_as_task_id(self, adapter):
         mock_agent = MagicMock()
         mock_agent.run_conversation.return_value = {"final_response": "ok"}
@@ -880,6 +929,33 @@ class TestModelsEndpoint:
             "include_unconfigured": True,
             "refresh": True,
         }
+
+
+class TestProfilesEndpoint:
+    @pytest.mark.asyncio
+    async def test_profiles_include_reasoning_capability_metadata(self, adapter):
+        profiles = [
+            types.SimpleNamespace(
+                name="reasoner", is_default=True, model="gpt-5.5", provider="openai",
+                gateway_running=True, skill_count=4),
+            types.SimpleNamespace(
+                name="plain", is_default=False, model="plain-chat-model", provider="custom",
+                gateway_running=False, skill_count=1),
+        ]
+        app = _create_app(adapter)
+        with patch("hermes_cli.profiles.list_profiles", return_value=profiles):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.get("/v1/profiles")
+                payload = await resp.json()
+
+        assert resp.status == 200
+        reasoner, plain = payload["data"]
+        assert reasoner["supported_parameters"] == ["reasoning", "reasoning_effort"]
+        assert reasoner["supports_reasoning"] is True
+        assert reasoner["reasoning"] == {
+            "supported": True, "effort_levels": ["low", "medium", "high"]}
+        assert plain["supported_parameters"] == []
+        assert plain["reasoning"] == {"supported": False, "effort_levels": []}
 
 
 # ---------------------------------------------------------------------------

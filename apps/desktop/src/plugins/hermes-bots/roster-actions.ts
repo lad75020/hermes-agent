@@ -144,21 +144,7 @@ function refreshOpenBotChat(bot: RosterRow) {
  *  Sessions is not in sync again"). Side tabs stay open; they never answer a
  *  click aimed at the bot. Canonical-titled tiles at a foreign id are stale
  *  (hermes-agent#90102) and are discarded. Without `canonical_session` (older
- *  gateway) nothing can be verified, so nothing is fronted.
- *
- *  The open set is a Local Storage cache, and it must reconcile with backend
- *  truth before it wins (hermes-agent#90102): a persisted "Bot Chat" tile can
- *  name a session the registry no longer resolves to — a superseded row from
- *  the retired pointer design, a re-minted canonical chat, a stale finished
- *  session. Fronting it re-pinned the roster click to that stale (often
- *  hidden) session forever while the row's preview described the live one.
- *  The staleness probe compares each canonical-titled tile against the
- *  roster's server-resolved `canonical_session` (identity by NAME, resolved
- *  fresh on every profiles.list): a mismatch means the registry moved on, so
- *  the tile is discarded and the click falls through to the authoritative
- *  registry open. Side-chat tabs (any other title) carry no registry identity
- *  and are never judged; an older gateway without `canonical_session` cannot
- *  judge either — both keep the tile, the pre-#90102 behavior. */
+ *  gateway) nothing can be verified, so nothing is fronted. */
 function focusExistingBotTab(bot: RosterRow): null | { registryId: string; storedSessionId: string } {
   if (typeof host.focusOpenWorkspaceSession !== 'function') {
     return null

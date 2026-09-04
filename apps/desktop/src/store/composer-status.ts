@@ -8,7 +8,7 @@ import { $gateway } from './gateway'
 import { $goalsBySession, type GoalStatus } from './goals'
 import { dispatchNativeNotification } from './native-notifications'
 import { notifyError } from './notifications'
-import { isSessionGone, isSessionGoneForBackgroundPolling, markRuntimeGone, markSessionGone, noteRuntimeAlive } from './runtime-gone'
+import { isSessionGone, isSessionGoneForBackgroundPolling, markSessionGone, noteRuntimeAlive } from './runtime-gone'
 import { $sessions, lineageAliases } from './session'
 import { ambientRequestFor } from './session-gone-latch'
 import { $sessionStates, requestForOwnedSession } from './session-states'
@@ -418,11 +418,6 @@ export async function refreshBackgroundProcesses(sid: string): Promise<void> {
     // or the 5s timer hammers the gateway with 4001s for the window's lifetime.
     if (isSessionGoneForBackgroundPolling(error)) {
       markSessionGone(sid)
-      // Latching stops the storm; it does not make the window usable again.
-      // This poll is the only caller that runs while the user is idle, so it is
-      // the only one that can carry the gateway's "resume the stored session"
-      // verdict to the view before the user types into a dead binding.
-      markRuntimeGone(sid)
 
       return
     }

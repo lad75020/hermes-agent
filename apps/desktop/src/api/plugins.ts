@@ -46,12 +46,6 @@ export interface PluginRestOptions {
   /** Single-file multipart upload (see HermesApiRequest.upload). */
   upload?: { filename: string; contentType?: string; bytes: ArrayBuffer }
   timeoutMs?: number
-  /**
-   * Override the active profile route. `undefined` preserves the usual active
-   * profile scope; `null` targets the primary backend. Global-history plugins
-   * use the latter so one search can aggregate every local profile.
-   */
-  profile?: null | string
 }
 
 // Normalize `path` to a leading-slash suffix relative to `/api/plugins/<id>`.
@@ -87,7 +81,7 @@ export async function pluginRest<T>(pluginId: string, path: string, opts: Plugin
     body: opts.body,
     upload: opts.upload,
     timeoutMs: opts.timeoutMs,
-    ...profileScoped(opts.profile)
+    ...profileScoped()
   })
 }
 

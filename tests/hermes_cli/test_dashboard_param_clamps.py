@@ -46,18 +46,9 @@ class TestSessionPaginationClamps:
         r = client.get("/api/profiles/sessions", params={"limit": 200, "offset": 120})
         assert r.status_code == 200
 
-    def test_session_listing_returns_json(self, client):
-        from hermes_cli import web_server
-
-        r = client.get(
-            "/api/sessions?limit=50&offset=0",
-            headers={web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN},
-        )
+    def test_in_range_limit_accepted(self, client):
+        r = client.get("/api/sessions", params={"limit": 50})
         assert r.status_code == 200
-        body = r.json()
-        assert isinstance(body["sessions"], list)
-        assert body["limit"] == 50
-        assert body["offset"] == 0
 
 
 class TestAnalyticsDaysClamps:

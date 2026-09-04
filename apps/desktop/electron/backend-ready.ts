@@ -202,9 +202,11 @@ function waitForDashboardReadyFile(
 
       for (const line of lines) {
         const match = line.match(_READY_RE)
+
         if (match) {
           cleanup()
           resolve(Number.parseInt(match[1], 10))
+
           return
         }
       }

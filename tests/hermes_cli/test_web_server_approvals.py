@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 import hermes_cli.web_server as ws
 import tools.approval as approval_module
+from tools.approval_gateway_wait import _ApprovalEntry
 
 
 def _headers() -> dict[str, str]:
@@ -18,8 +19,8 @@ def _clear_session(key: str) -> None:
         approval_module._gateway_queues.pop(key, None)
 
 
-def _queue_approval(key: str, command: str = "rm -rf /tmp/demo") -> approval_module._ApprovalEntry:
-    entry = approval_module._ApprovalEntry({
+def _queue_approval(key: str, command: str = "rm -rf /tmp/demo") -> _ApprovalEntry:
+    entry = _ApprovalEntry({
         "command": command,
         "pattern_key": "recursive delete",
         "pattern_keys": ["recursive delete"],

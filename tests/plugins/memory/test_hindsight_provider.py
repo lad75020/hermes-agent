@@ -32,9 +32,9 @@ from plugins.memory.hindsight import (
     _normalize_observation_scopes,
     _normalize_retain_tags,
     _resolve_bank_id_template,
-    _sanitize_bank_segment,
     _WRITER_SENTINEL,
 )
+from plugins.memory.hindsight.settings import _sanitize_bank_segment
 
 
 # ---------------------------------------------------------------------------
@@ -1600,7 +1600,7 @@ class TestAvailability:
 
     def test_isolated_embedded_manager_runs_hindsight_api_via_uvx(self, monkeypatch):
         """The local daemon must not inherit Hermes' MCP 2 dependency graph."""
-        from plugins.memory.hindsight import _IsolatedDaemonEmbedManager
+        from plugins.memory.hindsight.embedded import _IsolatedDaemonEmbedManager
 
         monkeypatch.setattr("hindsight_embed.__version__", "9.9.9")
 
@@ -1623,7 +1623,7 @@ class TestAvailability:
             )
 
         monkeypatch.setattr(
-            "plugins.memory.hindsight.importlib.import_module",
+            "importlib.import_module",
             _raise,
         )
         p = HindsightMemoryProvider()
@@ -1642,7 +1642,7 @@ class TestAvailability:
             raise RuntimeError("x86_64-v2 unsupported")
 
         monkeypatch.setattr(
-            "plugins.memory.hindsight.importlib.import_module",
+            "importlib.import_module",
             _raise,
         )
 
@@ -1879,7 +1879,10 @@ class TestMultiplexBackgroundScope:
                 self._ensure_started = lambda: None
 
         dem = SimpleNamespace(console=None)
-        monkeypatch.setitem(sys.modules, "hindsight", SimpleNamespace(HindsightEmbedded=FakeHindsightEmbedded))
+        monkeypatch.setattr(
+            "plugins.memory.hindsight._create_embedded_client",
+            FakeHindsightEmbedded,
+        )
         monkeypatch.setitem(sys.modules, "hindsight_embed", SimpleNamespace(daemon_embed_manager=dem))
         monkeypatch.setitem(sys.modules, "hindsight_embed.daemon_embed_manager", dem)
         monkeypatch.setattr("plugins.memory.hindsight._check_local_runtime", lambda: (True, ""))

@@ -1,9 +1,7 @@
 """Tests for hermes_cli.gateway."""
 
-import argparse
 import json
 import os
-import signal
 import subprocess
 import sys
 import textwrap
@@ -51,6 +49,38 @@ def _install_fake_gateway_run(monkeypatch, start_gateway):
         "get_gateway_runtime_snapshot",
         lambda *a, **k: gateway.GatewayRuntimeSnapshot(manager="manual process"),
     )
+
+
+def test_run_gateway_refreshes_ollama_models_before_start(monkeypatch):
+    calls = []
+
+    async def start_gateway(*, replace, verbosity):
+        calls.append("start")
+        return True
+
+    _install_fake_gateway_run(monkeypatch, start_gateway)
+    for name in (
+        "_guard_official_docker_root_gateway",
+        "_guard_named_profile_under_multiplexer",
+        "_guard_supervised_gateway_conflict",
+        "_guard_existing_gateway_process_conflict",
+        "_apply_startup_watchdog_config",
+        "_respawn_storm_backoff",
+    ):
+        monkeypatch.setattr(gateway, name, lambda *args, **kwargs: None)
+    monkeypatch.setattr(gateway, "_make_exit_diag", lambda: lambda *args, **kwargs: None)
+
+    from hermes_cli import ollama_refresh
+
+    monkeypatch.setattr(
+        ollama_refresh,
+        "refresh_ollama_provider_models",
+        lambda: calls.append("refresh"),
+    )
+
+    gateway.run_gateway(quiet=True)
+
+    assert calls == ["refresh", "start"]
 
 
 def _run_native_windows_gateway_start_diag(
@@ -1089,7 +1119,6 @@ class TestWindowsScheduledTaskSupervisorGuard:
             raise AssertionError("subprocess must not run off Windows")
 
         monkeypatch.setattr(gateway.subprocess, "run", _boom_run)
-        assert gateway._windows_scheduled_task_running("HermesGateway") is False
         assert gateway._windows_scheduled_task_supervises("HermesGateway") is False
         assert gateway._windows_scheduled_task_state("HermesGateway") is None
 
@@ -1100,7 +1129,6 @@ class TestWindowsScheduledTaskSupervisorGuard:
         for state, expected in states.items():
             monkeypatch.setattr(gateway, "_windows_scheduled_task_state", lambda name, s=state: s)
             assert gateway._windows_scheduled_task_supervises("Hermes_Gateway") is expected, state
-            assert gateway._windows_scheduled_task_running("Hermes_Gateway") is (state == "Running")
 
 
 def test_find_windows_gateway_services_maps_verified_pid_tree(monkeypatch):

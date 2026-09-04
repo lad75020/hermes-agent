@@ -7,6 +7,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 import tools.approval as approval_module
+from tools.approval_gateway_wait import _ApprovalEntry
 from gateway.config import PlatformConfig
 from gateway.platforms.api_server import APIServerAdapter
 
@@ -33,8 +34,8 @@ def _clear_session(key: str) -> None:
         approval_module._gateway_queues.pop(key, None)
 
 
-def _queue_approval(key: str) -> approval_module._ApprovalEntry:
-    entry = approval_module._ApprovalEntry({
+def _queue_approval(key: str) -> _ApprovalEntry:
+    entry = _ApprovalEntry({
         "command": "rm -rf /tmp/demo",
         "pattern_key": "recursive delete",
         "pattern_keys": ["recursive delete"],

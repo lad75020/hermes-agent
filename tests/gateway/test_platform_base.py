@@ -216,6 +216,34 @@ class TestExtractBase64Images:
         assert b64 not in cleaned
         assert "data:image/jpeg;base64,[omitted; sent as image attachment]" in cleaned
 
+    @pytest.mark.asyncio
+    async def test_response_pipeline_delivers_decoded_image(self, tmp_path, monkeypatch):
+        raw_png = b"\x89PNG\r\n\x1a\n" + b"pipeline-image"
+        b64 = base64.b64encode(raw_png).decode("ascii")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        payload = json.dumps({
+            "mime_type": "image/png",
+            "filename": "pipeline.png",
+            "image_base64": b64,
+        })
+        adapter = _CapturingAdapter()
+        event = MessageEvent(text="", source=adapter.build_source(chat_id="chat-1"))
+        delivered = []
+
+        async def capture_images(*, images, **kwargs):
+            delivered.extend(images)
+
+        monkeypatch.setattr(adapter, "send_multiple_images", capture_images)
+        extracted = await adapter._extract_response_content(
+            payload, event, "session-1", is_ephemeral_response=False
+        )
+        await adapter._deliver_attachments(event, extracted, {}, anything_sent=False)
+
+        assert b64 not in extracted.text_content
+        assert len(extracted.local_files) == 1
+        assert extracted.local_files[0].endswith("pipeline.png")
+        assert delivered == [(f"file://{extracted.local_files[0]}", "")]
+
 
 # ---------------------------------------------------------------------------
 # extract_media
@@ -1375,7 +1403,8 @@ class TestDockerProfileSandboxMediaTranslation:
 
     @staticmethod
     def _sandbox_dir(task_id: str = "default"):
-        from tools.environments.base import get_sandbox_dir, sanitize_task_id_for_path
+        from tools.environments.base import get_sandbox_dir
+        from tools.environments.path_utils import sanitize_task_id_for_path
 
         name = task_id if task_id == "default" else sanitize_task_id_for_path(task_id)
         return get_sandbox_dir() / "docker" / name

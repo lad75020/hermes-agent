@@ -14,8 +14,8 @@
  *   - `window` (⇧⌘-click) — pop into its own window; falls back to `tab` when
  *     the bridge has no session-window support.
  */
-import type { WorkspaceMode } from '@/contrib/types'
 import { revealTreePane } from '@/components/pane-shell/tree/store'
+import type { WorkspaceMode } from '@/contrib/types'
 import { $activeSessionId, $selectedStoredSessionId, markSessionRead } from '@/store/session'
 import type { SessionProfileRoute } from '@/store/session-request-router'
 import {
