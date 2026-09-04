@@ -2850,6 +2850,13 @@ class TestNewEndpoints:
         else:
             assert data["active_provider"] is None
 
+    def test_stt_config_exposes_apple_provider_section(self):
+        response = self.client.get("/api/tools/toolsets/stt/config")
+        assert response.status_code == 200
+        apple = next(row for row in response.json()["providers"]
+                     if row["name"] == "Apple Native STT")
+        assert apple["stt_provider"] == "apple"
+
     def test_get_toolset_config_reports_truthful_provider_status(self, monkeypatch):
         """Each provider row carries a server-computed readiness `status`.
 

@@ -380,6 +380,8 @@ async def get_toolset_config(name: str, profile: Optional[str] = None):
                         # Key written to tts.provider; doubles as the config section
                         # (tts.<key>.*) holding the provider's voice/model settings.
                         row["tts_provider"] = prov["tts_provider"]
+                    if name == "stt" and prov.get("stt_provider"):
+                        row["stt_provider"] = prov["stt_provider"]
                     providers.append(row)
             payload = {
                 "name": name, "has_category": cat is not None, "providers": providers,

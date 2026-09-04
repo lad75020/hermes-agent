@@ -1102,6 +1102,8 @@ export interface ToolProvider {
    *  provider's voice/model settings (tts.<key>.*). Absent on other toolsets
    *  and older backends. */
   tts_provider?: string
+  /** STT provider key and per-provider configuration section. */
+  stt_provider?: string
   /** Web toolset only: capabilities this backend can serve. Search-only
    *  providers (ddgs, brave-free) report ['search']. */
   capabilities?: WebCapability[]

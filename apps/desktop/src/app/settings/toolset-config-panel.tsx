@@ -892,6 +892,9 @@ export function ToolsetConfigPanel({ toolset, onConfiguredChange, profile }: Too
                   // Capabilities panel is a complete setup surface.
                   <VoiceProviderFields providerKey={provider.tts_provider} section="tts" />
                 )}
+                {toolset === 'stt' && provider.stt_provider && (
+                  <VoiceProviderFields providerKey={provider.stt_provider} section="stt" />
+                )}
                 {MODEL_CATALOG_TOOLSETS.has(toolset) && (
                   <ModelCatalogPicker
                     isActiveBackend={provider.is_active || cfg?.active_provider === provider.name}
