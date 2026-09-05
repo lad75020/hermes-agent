@@ -341,7 +341,9 @@ async def scan_skill_hub(identifier: str = "", profile: Optional[str] = None):
 
 
 @router.get("/api/skills")
-async def get_skills(profile: Optional[str] = None):
+async def get_skills(
+    profile: Optional[str] = None, include_descriptions: bool = True
+):
     from tools.skills_tool import _find_all_skills
     from hermes_cli.skills_config import get_disabled_skills
     from tools.skill_usage import (
@@ -351,7 +353,8 @@ async def get_skills(profile: Optional[str] = None):
         with _profile_scope(profile):
             config = load_config()
             disabled = get_disabled_skills(config)
-            skills = _find_all_skills(skip_disabled=True)
+            skills = _find_all_skills(
+                skip_disabled=True, include_descriptions=include_descriptions)
             usage = load_usage()
             # Set-based provenance (same classification as skill_usage.provenance,
             # without a per-skill manifest read): hub > bundled > agent, where
@@ -369,6 +372,35 @@ async def get_skills(profile: Optional[str] = None):
         return skills
 
     return await asyncio.to_thread(_run)
+
+
+@router.get("/api/skills/description")
+async def get_skill_description(name: str, profile: Optional[str] = None):
+    """Load one installed skill description for progressive-disclosure clients."""
+    from agent.skill_utils import parse_frontmatter
+    from tools.skill_manager_tool import _find_skill
+    from tools.skills_tool_plugin import _read_skill_text, _truncate_description
+
+    def _read():
+        found = _find_skill(name)
+        if not found:
+            raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+        skill_md = found["path"] / "SKILL.md"
+        if not skill_md.exists():
+            raise HTTPException(status_code=404, detail=f"Skill '{name}' has no SKILL.md.")
+        try:
+            frontmatter, body = parse_frontmatter(_read_skill_text(skill_md)[:4000])
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        description = frontmatter.get("description", "")
+        if not description:
+            description = next((
+                line for line in map(str.strip, body.strip().split("\n"))
+                if line and not line.startswith("#")
+            ), "")
+        return {"name": name, "description": _truncate_description(description)}
+
+    return await scoped_to_thread(profile, _read)
 
 
 @router.put("/api/skills/toggle")

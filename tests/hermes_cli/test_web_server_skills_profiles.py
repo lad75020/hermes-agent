@@ -66,6 +66,33 @@ def _load_cfg(home):
 
 class TestProfileScopedSkills:
 
+    def test_compact_list_omits_descriptions_until_requested(self, client):
+        resp = client.get(
+            "/api/skills",
+            params={"profile": "worker_alpha", "include_descriptions": "false"},
+        )
+
+        assert resp.status_code == 200
+        worker = next(skill for skill in resp.json() if skill["name"] == "worker-skill")
+        assert "description" not in worker
+        assert worker["enabled"] is True
+
+    def test_description_is_loaded_for_only_the_requested_skill(self, client):
+        resp = client.get(
+            "/api/skills/description",
+            params={"name": "worker-skill", "profile": "worker_alpha"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"name": "worker-skill", "description": "test skill"}
+
+    def test_default_list_keeps_descriptions_for_existing_clients(self, client):
+        resp = client.get("/api/skills", params={"profile": "worker_alpha"})
+
+        assert resp.status_code == 200
+        worker = next(skill for skill in resp.json() if skill["name"] == "worker-skill")
+        assert worker["description"] == "test skill"
+
 
     def test_toggle_writes_into_target_profile_only(self, client, isolated_profiles):
         resp = client.put(

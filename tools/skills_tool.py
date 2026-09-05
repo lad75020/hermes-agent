@@ -184,11 +184,17 @@ def _skill_search_dirs() -> Tuple[list, list, Path]:
     return project_dirs, all_dirs, active_skills_dir
 
 
-def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
-    """All skills (name, description, category) across project/local/external dirs, first-wins
-    by name; cached per session. ``skip_disabled=True`` ignores disabled state (config UI)."""
+def _find_all_skills(
+    *, skip_disabled: bool = False, include_descriptions: bool = True
+) -> List[Dict[str, Any]]:
+    """All skills across project/local/external dirs, first-wins by name.
+
+    ``skip_disabled=True`` ignores disabled state (config UI). Compact callers can
+    set ``include_descriptions=False`` and fetch one description on demand.
+    """
     from agent.skill_utils import iter_project_skill_files, iter_skill_index_files
-    cache_key = "with_disabled" if skip_disabled else "filtered"
+    scope_key = "with_disabled" if skip_disabled else "filtered"
+    cache_key = f"{scope_key}:{'descriptions' if include_descriptions else 'compact'}"
     disabled = set() if skip_disabled else _get_disabled_skill_names()
     project_dirs, dirs_to_scan, _ = _skill_search_dirs()
     signature = _skills_scan_signature(dirs_to_scan, disabled)
@@ -212,13 +218,15 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 name = frontmatter.get("name", skill_md.parent.name)[:MAX_NAME_LENGTH]
                 if name in seen_names or name in disabled:
                     continue
-                description = frontmatter.get("description", "")
-                if not description:  # first non-heading body line (a null value stays null)
-                    description = next((ln for ln in map(str.strip, body.strip().split("\n"))
-                                        if ln and not ln.startswith("#")), description)
                 seen_names.add(name)
-                skills.append({"name": name, "description": _truncate_description(description),
-                               "category": _get_category_from_path(skill_md)})
+                skill = {"name": name, "category": _get_category_from_path(skill_md)}
+                if include_descriptions:
+                    description = frontmatter.get("description", "")
+                    if not description:  # first non-heading body line (a null value stays null)
+                        description = next((ln for ln in map(str.strip, body.strip().split("\n"))
+                                            if ln and not ln.startswith("#")), description)
+                    skill["description"] = _truncate_description(description)
+                skills.append(skill)
             except (UnicodeDecodeError, PermissionError) as e:
                 logger.debug("Failed to read skill file %s: %s", skill_md, e)
             except Exception as e:
