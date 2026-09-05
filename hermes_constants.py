@@ -128,6 +128,21 @@ def reset_hermes_home_key_cache() -> None:
     _HOME_KEY_CACHE.clear()
 
 
+def hermes_home_identity(path: str | Path | None = None) -> str | None:
+    """Fresh, strict filesystem identity for authorization proofs.
+
+    Unlike :func:`hermes_home_key`, this deliberately bypasses the registry-key
+    cache so a retargeted symlink cannot keep authorizing its previous target.
+    ``None`` means the filesystem cannot currently prove an identity.
+    """
+    candidate = Path(path) if path is not None else get_hermes_home()
+    try:
+        resolved = candidate.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    return os.path.normcase(str(resolved))
+
+
 def get_process_hermes_home() -> Path:
     """Hermes home of the running process, ignoring task overrides.
 
