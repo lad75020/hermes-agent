@@ -2306,6 +2306,7 @@ export const ja = defineLocale({
       detached: 'デタッチ',
       clean: 'クリーン',
       changed: count => `${count} 件変更`,
+      tokenTotals: (input, output) => `入力 ${input} · 出力 ${output}`,
       ahead: count => `${count} 先行`,
       behind: count => `${count} 遅延`,
       review: 'レビュー',

@@ -2845,6 +2845,7 @@ export const zh: Translations = {
       detached: '分离头指针',
       clean: '干净',
       changed: count => `${count} 处更改`,
+      tokenTotals: (input, output) => `输入 ${input} · 输出 ${output}`,
       ahead: count => `领先 ${count}`,
       behind: count => `落后 ${count}`,
       review: '审查',

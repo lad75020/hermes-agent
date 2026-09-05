@@ -264,13 +264,20 @@ describe('useSessionTileDelegate resumeTile', () => {
     )
   })
 
-  it('hydrates the tile model and provider from resume info', async () => {
+  it('hydrates the tile model, provider, and token usage from resume info', async () => {
     setSessions([row({ id: 'stored-model', profile: 'default' })])
 
     const updateSessionState = vi.fn()
 
     vi.mocked(requestGatewayForProfile).mockResolvedValueOnce({
-      info: { fast: true, model: 'gpt-5', provider: 'openai', reasoning_effort: 'high', running: false },
+      info: {
+        fast: true,
+        model: 'gpt-5',
+        provider: 'openai',
+        reasoning_effort: 'high',
+        running: false,
+        usage: { calls: 4, input: 12_345, output: 678, total: 13_023 }
+      },
       session_id: 'runtime-model'
     } as never)
 
@@ -287,6 +294,7 @@ describe('useSessionTileDelegate resumeTile', () => {
     expect(next.provider).toBe('openai')
     expect(next.reasoningEffort).toBe('high')
     expect(next.fast).toBe(true)
+    expect(next.usage).toEqual({ calls: 4, input: 12_345, output: 678, total: 13_023 })
   })
 
   it('invalidateRuntimeBindings clears the stored→runtime map so tiles re-resume after reconnect', async () => {

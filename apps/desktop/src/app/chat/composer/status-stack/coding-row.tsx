@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import { memo, useEffect } from 'react'
 
 import { PrTag } from '@/app/chat/pr-tag'
+import { useSessionView } from '@/app/chat/session-view'
 import { StatusRow } from '@/components/chat/status-row'
 import {
   type ActionItemSpec,
@@ -17,6 +18,7 @@ import { DiffCount } from '@/components/ui/diff-count'
 import type { HermesGitBranch } from '@/global'
 import { useI18n } from '@/i18n'
 import { displayPath } from '@/lib/display-path'
+import { compactNumber } from '@/lib/format'
 import { openWorktreeDialog, registerRepoStatusCwd, repoStatusForCwd, repoWorktreesForCwd } from '@/store/coding-status'
 import { notifyError } from '@/store/notifications'
 import { $pullRequestsByBranch, branchPrKey, refreshPullRequests } from '@/store/pull-requests'
@@ -49,8 +51,8 @@ interface CodingStatusRowProps {
  * The always-on coding-context row, the BASE of the composer status stack:
  * current branch, dirty summary (+/-), and ahead/behind. A touch more prominent
  * than the per-turn rows above it (larger branch label, accent glyph), and the
- * entry point to the review pane. Hidden when the active session isn't in a
- * local git repo (the probe returns null).
+ * entry point to the review pane. Outside a local git repo, the same footer
+ * remains as a token-only row because usage belongs to the session, not git.
  */
 export const CodingStatusRow = memo(function CodingStatusRow({
   onBranchOff,
@@ -62,6 +64,8 @@ export const CodingStatusRow = memo(function CodingStatusRow({
   repoPath
 }: CodingStatusRowProps) {
   const { t } = useI18n()
+  const view = useSessionView()
+  const usage = useStore(view.$usage)
   const s = t.statusStack.coding
   const p = t.sidebar.projects
   const fileMenu = t.fileMenu
@@ -93,6 +97,15 @@ export const CodingStatusRow = memo(function CodingStatusRow({
   const pr =
     useStore($pullRequestsByBranch)[resolvedRepoPath && prBranch ? branchPrKey(resolvedRepoPath, prBranch) : '']
 
+  const tokenUsage = (
+    <span
+      className="shrink-0 text-[0.68rem] leading-4 text-muted-foreground/75 tabular-nums"
+      data-slot="session-token-usage"
+    >
+      {s.tokenTotals(compactNumber(usage.input), compactNumber(usage.output))}
+    </span>
+  )
+
   const switchToBranch = async (branch: string) => {
     if (!onSwitchBranch) {
       return
@@ -115,7 +128,12 @@ export const CodingStatusRow = memo(function CodingStatusRow({
   }
 
   if (!status) {
-    return null
+    return (
+      <StatusRow className="coding-status-bar min-h-7 rounded-t-[inherit] rounded-b-none border-b border-(--ui-stroke-tertiary) px-3.5 py-1.5 hover:bg-transparent">
+        <span className="flex-1" />
+        {tokenUsage}
+      </StatusRow>
+    )
   }
 
   const branchLabel = status.detached ? s.detached : status.branch || s.noBranch
@@ -287,6 +305,8 @@ export const CodingStatusRow = memo(function CodingStatusRow({
               </ActionsMenu>
             )}
           </div>
+
+          {tokenUsage}
 
           {/* The counts describe what's in the review pane, so clicking them
               opens it. `contents` again: the two spans stay direct flex children

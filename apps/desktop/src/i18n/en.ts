@@ -2680,6 +2680,7 @@ export const en: Translations = {
       detached: 'detached',
       clean: 'Clean',
       changed: count => `${count} changed`,
+      tokenTotals: (input, output) => `${input} in · ${output} out`,
       ahead: count => `${count} ahead`,
       behind: count => `${count} behind`,
       review: 'Review',

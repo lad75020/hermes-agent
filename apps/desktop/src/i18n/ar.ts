@@ -1963,6 +1963,7 @@ export const ar = defineLocale({
       detached: 'منفصل',
       clean: 'نظيف',
       changed: count => `${count} مُغيَّر`,
+      tokenTotals: (input, output) => `${input} إدخال · ${output} إخراج`,
       ahead: count => `${count} متقدم`,
       behind: count => `${count} متأخر`,
       review: 'مراجعة',

@@ -2226,6 +2226,7 @@ export const zhHant = defineLocale({
       detached: '分離 HEAD',
       clean: '乾淨',
       changed: count => `${count} 處變更`,
+      tokenTotals: (input, output) => `輸入 ${input} · 輸出 ${output}`,
       ahead: count => `領先 ${count}`,
       behind: count => `落後 ${count}`,
       review: '審查',

@@ -72,7 +72,7 @@ import { startSessionDrag } from './session-drag'
 import { SessionStatusDot } from './session-status-dot'
 import { useSessionTileActions } from './session-tile-actions'
 import { tileOwnerRoute } from './session-tile-owner'
-import { type SessionView, SessionViewProvider } from './session-view'
+import { EMPTY_SESSION_USAGE, type SessionView, SessionViewProvider } from './session-view'
 import { SessionContextMenu } from './sidebar/session-actions-menu'
 import { lastVisibleMessageIsUser } from './thread-loading'
 
@@ -151,7 +151,8 @@ function buildTileView(storedSessionId: string): SessionView {
     $runtimeId,
     // Constant for the tile's lifetime — a plain atom, not a computed.
     $storedId: atom(storedSessionId),
-    $turnStartedAt: computed($state, state => state?.turnStartedAt ?? null)
+    $turnStartedAt: computed($state, state => state?.turnStartedAt ?? null),
+    $usage: computed($state, state => state?.usage ?? EMPTY_SESSION_USAGE)
   }
 }
 

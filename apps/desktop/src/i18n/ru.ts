@@ -2716,6 +2716,7 @@ export const ru = defineLocale({
       detached: 'отсоединена',
       clean: 'Чисто',
       changed: count => `${count} изменено`,
+      tokenTotals: (input, output) => `${input} вход · ${output} выход`,
       ahead: count => `${count} впереди`,
       behind: count => `${count} позади`,
       review: 'Проверить',

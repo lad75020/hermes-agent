@@ -2,12 +2,17 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { atom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { type SessionView, SessionViewProvider } from '@/app/chat/session-view'
 import { $notifications, clearNotifications } from '@/store/notifications'
+import { $currentUsage } from '@/store/session'
 
 vi.mock('@/store/coding-status', () => ({
   registerRepoStatusCwd: () => undefined,
-  repoStatusForCwd: () =>
-    atom({
+  repoStatusForCwd: (cwd?: string) =>
+    atom(
+      cwd === '/not-a-repo'
+        ? null
+        : {
       added: 12,
       ahead: 0,
       behind: 0,
@@ -16,7 +21,8 @@ vi.mock('@/store/coding-status', () => ({
       detached: false,
       removed: 3,
       untracked: 0
-    }),
+          }
+    ),
   repoWorktreesForCwd: () => atom([])
 }))
 
@@ -25,6 +31,48 @@ const { CodingStatusRow } = await import('./coding-row')
 describe('CodingStatusRow', () => {
   afterEach(() => {
     cleanup()
+    $currentUsage.set({ calls: 0, input: 0, output: 0, total: 0 })
+  })
+
+  it('shows this session total token input and output immediately before the line count', () => {
+    $currentUsage.set({ calls: 2, input: 1_230, output: 456, total: 1_686 })
+
+    render(<CodingStatusRow onOpen={() => undefined} repoPath="/repo" />)
+
+    const usage = screen.getByText('1.2k in · 456 out')
+    const lineCount = screen.getByText('12').closest('button')
+
+    expect(usage.getAttribute('data-slot')).toBe('session-token-usage')
+    expect(lineCount).not.toBeNull()
+    expect(usage.compareDocumentPosition(lineCount!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('reads token totals from the tile session rather than the primary session', () => {
+    $currentUsage.set({ calls: 1, input: 999, output: 999, total: 1_998 })
+
+    const tileView = {
+      ...({} as SessionView),
+      $usage: atom({ calls: 3, input: 12_000, output: 3_400, total: 15_400 }),
+      kind: 'tile'
+    } satisfies SessionView
+
+    render(
+      <SessionViewProvider value={tileView}>
+        <CodingStatusRow onOpen={() => undefined} repoPath="/repo" />
+      </SessionViewProvider>
+    )
+
+    expect(screen.getByText('12k in · 3.4k out')).toBeTruthy()
+    expect(screen.queryByText('999 in · 999 out')).toBeNull()
+  })
+
+  it('keeps token totals visible when the session is outside a git repository', () => {
+    $currentUsage.set({ calls: 1, input: 81, output: 19, total: 100 })
+
+    render(<CodingStatusRow onOpen={() => undefined} repoPath="/not-a-repo" />)
+
+    expect(screen.getByText('81 in · 19 out')).toBeTruthy()
+    expect(screen.queryByText('bb/hitbox')).toBeNull()
   })
 
   it('opens the review pane from the branch and the diff counts, never the bar itself', () => {

@@ -332,6 +332,9 @@ export function useSessionTileDelegate({
             ...(typeof info?.provider === 'string' ? { provider: info.provider } : {}),
             ...(typeof info?.reasoning_effort === 'string' ? { reasoningEffort: info.reasoning_effort } : {}),
             ...(typeof info?.fast === 'boolean' ? { fast: info.fast } : {}),
+            ...(info?.usage
+              ? { usage: { calls: 0, input: 0, output: 0, total: 0, ...state.usage, ...info.usage } }
+              : {}),
             messages:
               state.messages.length > 0 ? state.messages : toChatMessages(prefetch?.messages ?? resumed?.messages ?? [])
           }),

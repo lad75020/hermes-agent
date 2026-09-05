@@ -2276,6 +2276,7 @@ export interface Translations {
       detached: string
       clean: string
       changed: (count: number) => string
+      tokenTotals: (input: string, output: string) => string
       ahead: (count: number) => string
       behind: (count: number) => string
       review: string
