@@ -2,8 +2,9 @@ import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { __resetBackendSkinSync, ingestBackendSkin } from './backend-sync'
+import { contrastRatio, mix } from './color'
 import { skinPref, ThemeProvider, useTheme } from './context'
-import { everforestTheme } from './presets'
+import { everforestTheme, githubContrastTheme } from './presets'
 
 // The live-authoring loop: Hermes writes/edits one skin file and every surface
 // repaints. An in-place edit keeps the NAME — only the palette moves.
@@ -159,5 +160,78 @@ describe('ThemeProvider highlight preview', () => {
 
     act(() => ctx.previewTheme('does-not-exist', 'dark'))
     expect(cssVar('--theme-foreground')).toBe(painted)
+  })
+})
+
+describe('GitHub Contrast readability settings', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+    __resetBackendSkinSync()
+  })
+
+  afterEach(cleanup)
+
+  it('restores default readability values when switching back to GitHub', () => {
+    let current!: ReturnType<typeof useTheme>
+
+    function Probe() {
+      current = useTheme()
+
+      return null
+    }
+
+    window.localStorage.setItem('hermes-desktop-theme-v2', 'github-contrast')
+    window.localStorage.setItem('hermes-desktop-mode-v1', 'light')
+
+    render(
+      <ThemeProvider>
+        <Probe />
+      </ThemeProvider>
+    )
+
+    expect(cssVar('--conversation-scaffold-opacity')).toBe('0.9')
+
+    act(() => current.setTheme('github'))
+
+    expect(window.document.documentElement.dataset.hermesTheme).toBe('github')
+    expect(cssVar('--theme-text-primary-strength')).toBe('94%')
+    expect(cssVar('--theme-text-secondary-strength')).toBe('74%')
+    expect(cssVar('--theme-text-tertiary-strength')).toBe('54%')
+    expect(cssVar('--theme-text-quaternary-strength')).toBe('36%')
+    expect(cssVar('--theme-scaffold-text-strength')).toBe('64%')
+    expect(cssVar('--theme-scaffold-meta-strength')).toBe('44%')
+    expect(cssVar('--conversation-scaffold-opacity')).toBe('0.67')
+  })
+
+  it.each(['light', 'dark'] as const)('applies AA transcript scaffolding in %s mode', mode => {
+    window.localStorage.setItem('hermes-desktop-theme-v2', 'github-contrast')
+    window.localStorage.setItem('hermes-desktop-mode-v1', mode)
+
+    render(
+      <ThemeProvider>
+        <div />
+      </ThemeProvider>
+    )
+
+    const palette = mode === 'dark' ? githubContrastTheme.darkColors! : githubContrastTheme.colors
+    const scaffoldOpacity = Number(cssVar('--conversation-scaffold-opacity'))
+    const strength = (name: string) => Number.parseFloat(cssVar(name)) / 100
+
+    const chatSurface = mix(palette.background, mode === 'dark' ? '#0d0d0e' : '#f3f3f3', mode === 'dark' ? 0.26 : 0.08)
+    const effectiveScaffold = (name: string) =>
+      mix(chatSurface, palette.foreground, strength(name) * scaffoldOpacity)
+
+    expect(window.document.documentElement.dataset.hermesTheme).toBe('github-contrast')
+    expect(window.document.documentElement.dataset.hermesMode).toBe(mode)
+    expect(cssVar('--theme-background-seed')).toBe(palette.background)
+    expect(cssVar('--theme-text-primary-strength')).toBe('100%')
+    expect(cssVar('--theme-text-secondary-strength')).toBe('90%')
+    expect(cssVar('--theme-text-tertiary-strength')).toBe('78%')
+    expect(cssVar('--theme-text-quaternary-strength')).toBe('66%')
+    expect(cssVar('--theme-scaffold-text-strength')).toBe('90%')
+    expect(cssVar('--theme-scaffold-meta-strength')).toBe('78%')
+    expect(scaffoldOpacity).toBe(0.9)
+    expect(contrastRatio(effectiveScaffold('--theme-scaffold-text-strength'), chatSurface)).toBeGreaterThanOrEqual(4.5)
+    expect(contrastRatio(effectiveScaffold('--theme-scaffold-meta-strength'), chatSurface)).toBeGreaterThanOrEqual(4.5)
   })
 })

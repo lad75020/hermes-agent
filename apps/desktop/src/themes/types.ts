@@ -55,6 +55,21 @@ export interface DesktopThemeTypography {
 }
 
 /**
+ * Optional readability knobs for themes that intentionally strengthen the
+ * shared semantic text ladder and transcript scaffolding. Values are 0..1 and
+ * fall back to the existing desktop defaults when omitted.
+ */
+export interface DesktopThemeReadability {
+  textPrimaryStrength: number
+  textSecondaryStrength: number
+  textTertiaryStrength: number
+  textQuaternaryStrength: number
+  scaffoldTextStrength: number
+  scaffoldMetaStrength: number
+  scaffoldOpacity: number
+}
+
+/**
  * Integrated-terminal ANSI palette (xterm `ITheme`, minus `background`).
  *
  * Populated only when a converted VS Code theme ships a full `terminal.ansi*`
@@ -94,6 +109,8 @@ export interface DesktopTheme {
   /** Hand-tuned dark palette. Skins like `nous` ship one. */
   darkColors?: DesktopThemeColors
   typography?: Partial<DesktopThemeTypography>
+  /** Optional per-theme strength overrides for semantic and scaffold text. */
+  readability?: Partial<DesktopThemeReadability>
   /** Light-variant terminal ANSI palette (also the fallback for dark). */
   terminal?: DesktopTerminalPalette
   /** Dark-variant terminal ANSI palette. Falls back to `terminal`. */

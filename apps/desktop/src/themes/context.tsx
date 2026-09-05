@@ -194,6 +194,21 @@ const NEUTRAL_CHROME = { light: '#f3f3f3', dark: '#0d0d0e' } as const
 // styles.css --dt-primary-solid-foreground fallback — keep in sync.
 const PRIMARY_SOLID_FOREGROUND = '#fcfcfc'
 
+// Keep these identical to styles.css fallbacks. Applying every value on every
+// theme switch prevents an opt-in high-contrast theme from leaving stale inline
+// strengths behind when the next theme uses the defaults.
+const DEFAULT_READABILITY = {
+  textPrimaryStrength: 0.94,
+  textSecondaryStrength: 0.74,
+  textTertiaryStrength: 0.54,
+  textQuaternaryStrength: 0.36,
+  scaffoldTextStrength: 0.64,
+  scaffoldMetaStrength: 0.44,
+  scaffoldOpacity: 0.67
+} as const
+
+const cssPercent = (strength: number): string => `${strength * 100}%`
+
 const chromeBackground = (background: string, isDark: boolean) =>
   mix(background, NEUTRAL_CHROME[isDark ? 'dark' : 'light'], isDark ? 0.26 : 0.08)
 
@@ -213,6 +228,7 @@ function applyTheme(theme: DesktopTheme, mode: 'light' | 'dark') {
   const root = document.documentElement
   const c = theme.colors
   const typo = { ...DEFAULT_TYPOGRAPHY, ...nousTheme.typography, ...theme.typography }
+  const readability = { ...DEFAULT_READABILITY, ...theme.readability }
   const rendered = renderedModeFor(c, mode)
   const isDark = rendered === 'dark'
   const midground = c.midground ?? c.ring
@@ -269,6 +285,13 @@ function applyTheme(theme: DesktopTheme, mode: 'light' | 'dark') {
     '--dt-destructive-foreground': c.destructiveForeground,
     '--dt-sidebar-border': c.sidebarBorder ?? c.border,
     '--dt-user-bubble-border': c.userBubbleBorder ?? c.border,
+    '--theme-text-primary-strength': cssPercent(readability.textPrimaryStrength),
+    '--theme-text-secondary-strength': cssPercent(readability.textSecondaryStrength),
+    '--theme-text-tertiary-strength': cssPercent(readability.textTertiaryStrength),
+    '--theme-text-quaternary-strength': cssPercent(readability.textQuaternaryStrength),
+    '--theme-scaffold-text-strength': cssPercent(readability.scaffoldTextStrength),
+    '--theme-scaffold-meta-strength': cssPercent(readability.scaffoldMetaStrength),
+    '--conversation-scaffold-opacity': String(readability.scaffoldOpacity),
     // Semantic success, bent toward the accent so it settles into the palette
     // instead of clashing with it. A green accent barely moves it (see
     // `harmonize`); a blue one turns the sidebar's finished dots teal rather

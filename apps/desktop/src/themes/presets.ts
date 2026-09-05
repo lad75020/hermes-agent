@@ -158,6 +158,55 @@ export const githubTheme: DesktopTheme = {
   }
 }
 
+/**
+ * GitHub Contrast — GitHub's surfaces and accents with a stronger neutral
+ * ladder. Background-bearing tokens, typography, and terminal colors are
+ * inherited unchanged; only foregrounds, borders, and readability strengths
+ * move. The scaffold strengths account for its resting opacity so both labels
+ * and metadata remain above WCAG AA in light and dark mode.
+ */
+export const githubContrastTheme: DesktopTheme = {
+  ...githubTheme,
+  name: 'github-contrast',
+  label: 'GitHub Contrast',
+  description: 'GitHub surfaces with high-contrast text and borders',
+  colors: {
+    ...githubTheme.colors,
+    foreground: '#0d1117',
+    cardForeground: '#0d1117',
+    mutedForeground: '#424a53',
+    popoverForeground: '#0d1117',
+    secondaryForeground: '#0d1117',
+    accentForeground: '#0d1117',
+    border: '#8c959f',
+    sidebarBorder: '#8c959f',
+    userBubbleBorder: '#8c959f'
+  },
+  darkColors: {
+    ...githubTheme.darkColors!,
+    foreground: '#f0f6fc',
+    cardForeground: '#f0f6fc',
+    mutedForeground: '#b1bac4',
+    popoverForeground: '#f0f6fc',
+    primaryForeground: '#0d1117',
+    secondaryForeground: '#f0f6fc',
+    accentForeground: '#f0f6fc',
+    border: '#6e7681',
+    midgroundForeground: '#0d1117',
+    sidebarBorder: '#6e7681',
+    userBubbleBorder: '#6e7681'
+  },
+  readability: {
+    textPrimaryStrength: 1,
+    textSecondaryStrength: 0.9,
+    textTertiaryStrength: 0.78,
+    textQuaternaryStrength: 0.66,
+    scaffoldTextStrength: 0.9,
+    scaffoldMetaStrength: 0.78,
+    scaffoldOpacity: 0.9
+  }
+}
+
 /** Catppuccin — Latte in light, Mocha in dark (Catppuccin.catppuccin-vsc). */
 
 /**
@@ -848,6 +897,7 @@ export const slateTheme: DesktopTheme = {
 export const BUILTIN_THEMES: Record<string, DesktopTheme> = {
   nous: nousTheme,
   github: githubTheme,
+  'github-contrast': githubContrastTheme,
   catppuccin: catppuccinTheme,
   everforest: everforestTheme,
   solarized: solarizedTheme,

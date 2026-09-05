@@ -202,6 +202,15 @@
     --theme-row-active-accent-mix: 8%;
     --theme-control-hover-accent-mix: 6%;
     --theme-control-active-accent-mix: 8%;
+    /* Readability strengths default to the exact pre-theme-knob values. Themes
+       may opt into a stronger ladder without changing every other preset. */
+    --theme-text-primary-strength: 94%;
+    --theme-text-secondary-strength: 74%;
+    --theme-text-tertiary-strength: 54%;
+    --theme-text-quaternary-strength: 36%;
+    --theme-scaffold-text-strength: 64%;
+    --theme-scaffold-meta-strength: 44%;
+    --conversation-scaffold-opacity: 0.67;
 
     --ui-base: var(--theme-foreground);
     --ui-accent: var(--theme-midground);
@@ -328,17 +337,17 @@
       var(--ui-accent) var(--theme-control-active-accent-mix),
       color-mix(in srgb, var(--ui-base) 5%, transparent)
     );
-    --ui-text-primary: color-mix(in srgb, var(--ui-base) 94%, transparent);
-    --ui-text-secondary: color-mix(in srgb, var(--ui-base) 74%, transparent);
-    --ui-text-tertiary: color-mix(in srgb, var(--ui-base) 54%, transparent);
-    --ui-text-quaternary: color-mix(in srgb, var(--ui-base) 36%, transparent);
+    --ui-text-primary: color-mix(in srgb, var(--ui-base) var(--theme-text-primary-strength), transparent);
+    --ui-text-secondary: color-mix(in srgb, var(--ui-base) var(--theme-text-secondary-strength), transparent);
+    --ui-text-tertiary: color-mix(in srgb, var(--ui-base) var(--theme-text-tertiary-strength), transparent);
+    --ui-text-quaternary: color-mix(in srgb, var(--ui-base) var(--theme-text-quaternary-strength), transparent);
     /* Transcript scaffolding — thinking headers, settled tool runs, the live
        activity ticker. One colour for all of them (see `ScaffoldRow`), pitched
        between the secondary and tertiary greys those lines used to pick
        individually, and dimmed once more by the fade rule below so the prose
        reading column stays primary. */
-    --conversation-scaffold-text: color-mix(in srgb, var(--ui-base) 64%, transparent);
-    --conversation-scaffold-meta: color-mix(in srgb, var(--ui-base) 44%, transparent);
+    --conversation-scaffold-text: color-mix(in srgb, var(--ui-base) var(--theme-scaffold-text-strength), transparent);
+    --conversation-scaffold-meta: color-mix(in srgb, var(--ui-base) var(--theme-scaffold-meta-strength), transparent);
     --ui-stroke-primary: color-mix(
       in srgb,
       var(--ui-accent) var(--theme-stroke-primary-accent-mix),
@@ -1948,7 +1957,7 @@ body.guest-pointer-lock :is(webview, iframe) {
    the tool group wrapper carries no mark and each row inside it carries its
    own — no two marked elements nest, so the fade never compounds. */
 [data-slot='aui_assistant-message-content'] [data-conversation-scaffold] {
-  opacity: 0.67;
+  opacity: var(--conversation-scaffold-opacity);
   transition: opacity 120ms ease-out;
 }
 
@@ -2969,7 +2978,8 @@ button[data-slot='aui_msg-reactions'] svg {
    Widgets on the shared shell (components/chat/widget-shell.ts →
    `--ui-widget-surface-background`) and any chat-surface card are matched on
    their class, so new ones inherit this without touching the list. */
-[data-hud-shell] [data-slot='composer-bounds']
+[data-hud-shell]
+  [data-slot='composer-bounds']
   :is(
     [data-slot='clarify-inline'],
     [data-slot='tool-block'],
