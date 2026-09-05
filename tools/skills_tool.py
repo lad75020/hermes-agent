@@ -232,11 +232,11 @@ def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False)
     return [dict(s) for s in skills]
 
 
-def _find_all_skills(*, skip_disabled: bool = False) -> list[dict[str, Any]]:
+def _find_all_skills(*, skip_disabled: bool = False, include_descriptions: bool = True) -> list[dict[str, Any]]:
     """Loadable skills (name, description, category): ``name`` is what skill_view() accepts —
     the declared name, or the exact relative path for a same-tier duplicate. Shadowed and
     unloadable copies are left out. ``skip_disabled=True`` ignores disabled state (config UI)."""
-    return [{"name": s["load_name"], "description": s["description"], "category": s["category"]}
+    return [{"name": s["load_name"], **({"description": s["description"]} if include_descriptions else {}), "category": s["category"]}
             for s in _skill_catalog(skip_disabled=skip_disabled) if s["load_name"]]
 
 

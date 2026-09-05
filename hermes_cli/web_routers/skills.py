@@ -353,7 +353,8 @@ async def get_skills(
         with _profile_scope(profile):
             config = load_config()
             disabled = get_disabled_skills(config)
-            skills = _find_all_skills(skip_disabled=True)
+            skills = _find_all_skills(
+                skip_disabled=True, include_descriptions=include_descriptions)
             usage = load_usage()
             # Set-based provenance (same classification as skill_usage.provenance,
             # without a per-skill manifest read): hub > bundled > external > agent.
