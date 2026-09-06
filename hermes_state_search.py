@@ -950,6 +950,49 @@ class SessionSearchMixin:
             compiled_groups.append(f"({' AND '.join(clauses)})")
         return " OR ".join(compiled_groups), params, snippet_term
 
+    @staticmethod
+    def _compile_content_like_boolean_query(query: str) -> Tuple[str, List[Any], Optional[str]]:
+        """Compile the supported boolean subset against message content only.
+
+        Conversation History intentionally searches user prompts and terminal answers, not
+        tool metadata. Keep this separate from the generic LIKE compiler, whose broader
+        content/tool-name/tool-call semantics are required by explicit tool searches.
+        """
+        groups: List[List[Tuple[str, bool]]] = [[]]
+        negate_next = False
+        for raw_token in _LIKE_TOKEN_RE.findall(query):
+            operator = raw_token.upper()
+            if operator == "OR":
+                if groups[-1]:
+                    groups.append([])
+                negate_next = False
+                continue
+            if operator in {"AND", "NEAR"}:
+                continue
+            if operator == "NOT":
+                negate_next = True
+                continue
+            term = raw_token.strip('"').strip("*").strip()
+            if term:
+                groups[-1].append((term, negate_next))
+                negate_next = False
+
+        compiled_groups: List[str] = []
+        params: List[Any] = []
+        snippet_term: Optional[str] = None
+        for group in groups:
+            if not group or not any(not negated for _, negated in group):
+                continue
+            clauses: List[str] = []
+            for term, negated in group:
+                comparison = "COALESCE(m.content, '') LIKE ? ESCAPE '\\'"
+                clauses.append(f"NOT {comparison}" if negated else comparison)
+                params.append(f"%{_escape_like(term)}%")
+                if snippet_term is None and not negated:
+                    snippet_term = term
+            compiled_groups.append(f"({' AND '.join(clauses)})")
+        return " OR ".join(compiled_groups), params, snippet_term
+
     def _search_messages_like_fallback(
         self, query: str, *, limit: int, offset: int, sort: Optional[str], **filters) -> List[Dict[str, Any]]:
         """Search canonical messages while derived FTS state is stale."""
@@ -996,6 +1039,190 @@ class SessionSearchMixin:
         return matches
 
     # ── search_messages ────────────────────────────────────────────────────
+
+    def search_conversations(
+        self, query: str, source_filter: List[str] = None, exclude_sources: List[str] = None,
+        role_filter: List[str] = None, limit: int = 20, offset: int = 0,
+        include_inactive: bool = False, final_answers_only: bool = False,
+        snapshot_max_message_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Search message content and paginate distinct sessions with a stable snapshot.
+
+        Conversation-oriented callers must apply ``limit`` and ``offset`` after grouping by
+        ``session_id``. Applying them to message hits first lets one noisy transcript consume
+        an entire page and makes older matching conversations appear to be missing.
+
+        Indexed roles use FTS against content only; an explicit tool-role search or stale FTS
+        state falls back to canonical content LIKE matching. Every matching message belonging
+        to a selected session is returned for API compatibility. ``snapshot_max_message_id``
+        freezes later pages against concurrent inserts, while exact totals remain available
+        even when an offset is past the final page.
+        """
+        safe_offset = max(0, int(offset))
+        empty = {
+            "matches": [], "matched_messages": 0, "matched_sessions": 0,
+            "next_offset": safe_offset,
+            "snapshot_max_message_id": max(0, int(snapshot_max_message_id or 0)),
+        }
+        if not query or not query.strip() or limit <= 0:
+            return empty
+
+        sanitized = self._sanitize_fts5_query(query)
+        _, _, snippet_term = self._compile_content_like_boolean_query(sanitized)
+        if not sanitized or snippet_term is None:
+            return empty
+
+        if snapshot_max_message_id is None:
+            snapshot_row = self._read_one("SELECT COALESCE(MAX(id), 0) AS max_id FROM messages")
+            snapshot_max_message_id = int(snapshot_row["max_id"] if snapshot_row is not None else 0)
+        else:
+            snapshot_max_message_id = max(0, int(snapshot_max_message_id))
+
+        filters = dict(
+            include_inactive=include_inactive,
+            source_filter=source_filter,
+            exclude_sources=exclude_sources,
+            role_filter=role_filter,
+        )
+
+        def execute(match_from: str, where: List[str], params: List[Any]) -> Optional[Dict[str, Any]]:
+            _search_filter_clauses(where, params, **filters)
+            where.append("m.id <= ?")
+            params.append(snapshot_max_message_id)
+            if final_answers_only:
+                where.append(
+                    "(m.role != 'assistant' OR m.tool_calls IS NULL "
+                    "OR trim(m.tool_calls) IN ('', '[]', 'null'))")
+
+            sql = f"""
+                WITH matching AS MATERIALIZED (
+                    SELECT m.id, m.session_id, m.role, m.content, m.timestamp, m.tool_name,
+                           s.source, s.model, s.started_at AS session_started,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY m.session_id
+                               ORDER BY m.timestamp DESC, m.id DESC
+                           ) AS session_rank
+                    FROM {match_from}
+                    JOIN sessions s ON s.id = m.session_id
+                    WHERE {' AND '.join(where)}
+                ), conversations AS MATERIALIZED (
+                    SELECT session_id, timestamp, id
+                    FROM matching
+                    WHERE session_rank = 1
+                ), totals AS (
+                    SELECT COUNT(*) AS matched_messages,
+                           COUNT(DISTINCT session_id) AS matched_sessions
+                    FROM matching
+                ), selected AS MATERIALIZED (
+                    SELECT session_id, timestamp AS page_timestamp, id AS page_id
+                    FROM conversations
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT ? OFFSET ?
+                )
+                SELECT m.id, m.session_id, m.role,
+                       substr(COALESCE(m.content, ''),
+                              max(1, instr(COALESCE(m.content, ''), ?) - 40), 120) AS snippet,
+                       m.timestamp, m.tool_name, m.source, m.model, m.session_started,
+                       totals.matched_messages, totals.matched_sessions,
+                       selected.page_timestamp, selected.page_id
+                FROM totals
+                LEFT JOIN selected ON 1 = 1
+                LEFT JOIN matching m ON m.session_id = selected.session_id
+                ORDER BY selected.page_timestamp DESC, selected.page_id DESC,
+                         m.timestamp DESC, m.id DESC
+            """
+            try:
+                raw_rows = [dict(row) for row in self._read_all(
+                    sql, [*params, int(limit), safe_offset, snippet_term])]
+            except sqlite3.OperationalError:
+                return None
+            except sqlite3.DatabaseError as exc:
+                if not self._enter_fts_fail_open(exc):
+                    raise
+                return None
+
+            matched_messages = int(raw_rows[0]["matched_messages"] or 0) if raw_rows else 0
+            matched_sessions = int(raw_rows[0]["matched_sessions"] or 0) if raw_rows else 0
+            rows = [row for row in raw_rows if row.get("id") is not None]
+            page_session_count = len({row["session_id"] for row in rows})
+            for row in rows:
+                row.pop("matched_messages", None)
+                row.pop("matched_sessions", None)
+                row.pop("page_timestamp", None)
+                row.pop("page_id", None)
+            return {
+                "matches": self._finalize_search_matches(rows),
+                "matched_messages": matched_messages,
+                "matched_sessions": matched_sessions,
+                "next_offset": safe_offset + page_session_count,
+                "snapshot_max_message_id": snapshot_max_message_id,
+            }
+
+        def execute_content_like(*, cjk_or_terms: bool = False) -> Dict[str, Any]:
+            if cjk_or_terms:
+                terms = _non_operator_tokens(sanitized.strip('"').strip()) or [sanitized]
+                content_comparison = "COALESCE(m.content, '') LIKE ? ESCAPE '\\'"
+                where = [f"({' OR '.join([content_comparison] * len(terms))})"]
+                params = [f"%{_escape_like(term)}%" for term in terms]
+            else:
+                predicate, params, _ = self._compile_content_like_boolean_query(sanitized)
+                if not predicate:
+                    return {
+                        **empty,
+                        "snapshot_max_message_id": snapshot_max_message_id,
+                    }
+                where = [f"({predicate})"]
+            return execute("messages m", where, params) or {
+                **empty,
+                "snapshot_max_message_id": snapshot_max_message_id,
+            }
+
+        self._refresh_fts_stale_state()
+        wants_tool_rows = bool(role_filter) and "tool" in role_filter
+        if wants_tool_rows or self._fts_stale:
+            return execute_content_like()
+        if not self._fts_enabled:
+            return {
+                **empty,
+                "snapshot_max_message_id": snapshot_max_message_id,
+            }
+
+        if self._contains_cjk(sanitized):
+            raw_query = sanitized.strip('"').strip()
+            match_query = _quote_fts_tokens(raw_query)
+            if self._fts_cjk_available and not self._has_lone_cjk_run(raw_query):
+                result = execute(
+                    "messages_fts_cjk JOIN messages m ON m.id = messages_fts_cjk.rowid",
+                    ["messages_fts_cjk.content MATCH ?"], [match_query])
+                if result is not None:
+                    return result
+            if self._trigram_route_ok(raw_query):
+                result = execute(
+                    "messages_fts_trigram JOIN messages m ON m.id = messages_fts_trigram.rowid",
+                    ["messages_fts_trigram.content MATCH ?"], [match_query])
+                if result is not None:
+                    return result
+            return execute_content_like(cjk_or_terms=True)
+
+        result = execute(
+            "messages_fts JOIN messages m ON m.id = messages_fts.rowid",
+            ["messages_fts.content MATCH ?"], [sanitized])
+        if result is None:
+            return {
+                **empty,
+                "snapshot_max_message_id": snapshot_max_message_id,
+            }
+        if result["matched_sessions"] == 0 and self._trigram_available \
+                and self._trigram_eligible_tokens(sanitized):
+            fallback = execute(
+                "messages_fts_trigram JOIN messages m ON m.id = messages_fts_trigram.rowid",
+                ["messages_fts_trigram.content MATCH ?"],
+                [_quote_fts_tokens(sanitized.strip('"').strip())])
+            if fallback is not None:
+                result = fallback
+        return {
+            **result,
+        }
 
     def search_messages(
         self, query: str, source_filter: List[str] = None, exclude_sources: List[str] = None,

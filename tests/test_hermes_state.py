@@ -618,6 +618,27 @@ class TestMessageStorage:
         assert messages[0]["content"] == "Hello"
         assert messages[1]["role"] == "assistant"
 
+    def test_history_summary_messages_fetches_only_first_prompt_and_final_answer(self, db):
+        for session_id in ("s1", "s2"):
+            db.create_session(session_id=session_id, source="cli")
+
+        db.append_message("s1", role="user", content="first prompt")
+        db.append_message("s1", role="assistant", content="tool preface", tool_calls=[{"id": "call-1"}])
+        db.append_message("s1", role="tool", content="large tool output")
+        db.append_message("s1", role="user", content="follow-up")
+        db.append_message("s1", role="assistant", content="final answer")
+        db.append_message("s2", role="user", content="second prompt")
+
+        summaries = db.get_history_summary_messages(["s1", "s2", "s1"])
+
+        assert summaries == {
+            "s1": [
+                {**db.get_messages("s1")[0]},
+                {**db.get_messages("s1")[-1]},
+            ],
+            "s2": [{**db.get_messages("s2")[0]}],
+        }
+
 
 
     def test_startup_heals_null_active_rows(self, tmp_path):
@@ -865,6 +886,123 @@ class TestFTS5Search:
         assert any("docker" in s.lower() or "Docker" in s for s in snippets)
         # Results never carry full content; snippet + metadata only.
         assert all("content" not in r for r in results)
+
+    def test_conversation_search_pages_user_prompts_and_terminal_answers(self, db):
+        """Intermediate tool-call turns must neither match nor consume a conversation page."""
+        for index in range(30):
+            session_id = f"session-{index:02d}"
+            db.create_session(session_id=session_id, source="cli")
+            db.append_message(
+                session_id,
+                role="user",
+                content=f"HermesiOS result {index}",
+                timestamp=float(index),
+            )
+
+        db.create_session(session_id="noisy-session", source="desktop")
+        for index in range(40):
+            db.append_message(
+                "noisy-session",
+                role="assistant",
+                content=f"HermesiOS intermediate tool call {index}",
+                tool_calls=[{"id": str(index), "type": "function"}],
+                timestamp=100.0 + index,
+            )
+        db.append_message(
+            "noisy-session",
+            role="assistant",
+            content="HermesiOS terminal answer",
+            finish_reason="stop",
+            timestamp=200.0,
+        )
+
+        first_page = db.search_conversations(
+            "HermesiOS", role_filter=["user", "assistant"], limit=25,
+            final_answers_only=True)
+        second_page = db.search_conversations(
+            "HermesiOS", role_filter=["user", "assistant"], limit=25, offset=25,
+            final_answers_only=True)
+
+        assert len(first_page["matches"]) == 25
+        assert len({row["session_id"] for row in first_page["matches"]}) == 25
+        assert first_page["matches"][0]["session_id"] == "noisy-session"
+        assert first_page["matched_messages"] == 31
+        assert first_page["matched_sessions"] == 31
+        assert len(second_page["matches"]) == 6
+        assert not ({row["session_id"] for row in first_page["matches"]}
+                    & {row["session_id"] for row in second_page["matches"]})
+
+    def test_conversation_search_preserves_totals_and_all_hits_past_last_page(self, db):
+        db.create_session(session_id="multi-hit", source="cli")
+        db.append_message("multi-hit", role="user", content="HermesiOS first", timestamp=1.0)
+        db.append_message("multi-hit", role="user", content="HermesiOS second", timestamp=2.0)
+        db.create_session(session_id="single-hit", source="cli")
+        db.append_message("single-hit", role="assistant", content="HermesiOS answer", timestamp=3.0)
+
+        first_page = db.search_conversations(
+            "HermesiOS", role_filter=["user", "assistant"], limit=2,
+            final_answers_only=True)
+        out_of_range = db.search_conversations(
+            "HermesiOS", role_filter=["user", "assistant"], limit=2, offset=99,
+            final_answers_only=True)
+
+        assert len(first_page["matches"]) == 3
+        assert [row["session_id"] for row in first_page["matches"]].count("multi-hit") == 2
+        assert first_page["matched_messages"] == 3
+        assert first_page["matched_sessions"] == 2
+        assert first_page["next_offset"] == 2
+        assert out_of_range["matches"] == []
+        assert out_of_range["matched_messages"] == 3
+        assert out_of_range["matched_sessions"] == 2
+        assert out_of_range["next_offset"] == 99
+
+    def test_conversation_search_snapshot_stabilizes_offset_pages(self, db):
+        for index in range(5):
+            session_id = f"stable-{index}"
+            db.create_session(session_id=session_id, source="cli")
+            db.append_message(
+                session_id, role="user", content="HermesiOS", timestamp=float(index))
+
+        first_page = db.search_conversations(
+            "HermesiOS", role_filter=["user"], limit=2)
+        snapshot = first_page["snapshot_max_message_id"]
+
+        db.create_session(session_id="late-arrival", source="cli")
+        db.append_message(
+            "late-arrival", role="user", content="HermesiOS", timestamp=100.0)
+
+        second_page = db.search_conversations(
+            "HermesiOS", role_filter=["user"], limit=2, offset=2,
+            snapshot_max_message_id=snapshot)
+
+        first_ids = {row["session_id"] for row in first_page["matches"]}
+        second_ids = {row["session_id"] for row in second_page["matches"]}
+        assert first_ids == {"stable-4", "stable-3"}
+        assert second_ids == {"stable-2", "stable-1"}
+        assert not first_ids & second_ids
+        assert second_page["matched_sessions"] == 5
+        assert second_page["snapshot_max_message_id"] == snapshot
+
+    def test_conversation_search_uses_content_fts_for_indexed_roles(self, db):
+        db.create_session(session_id="content-hit", source="cli")
+        db.append_message("content-hit", role="user", content="HermesiOS", timestamp=1.0)
+        db.create_session(session_id="metadata-only", source="cli")
+        db.append_message(
+            "metadata-only", role="user", content="unrelated", tool_name="HermesiOS",
+            timestamp=2.0)
+
+        statements = []
+        read_all = db._read_all
+
+        def trace_read_all(sql, params=()):
+            statements.append(sql)
+            return read_all(sql, params)
+
+        db._read_all = trace_read_all
+        result = db.search_conversations("HermesiOS", role_filter=["user"], limit=10)
+
+        assert {row["session_id"] for row in result["matches"]} == {"content-hit"}
+        assert any("messages_fts.content MATCH ?" in statement for statement in statements)
 
 
 

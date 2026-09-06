@@ -654,6 +654,42 @@ class SessionMessagesMixin:
                 rows.reverse()
         return [self._row_to_message_dict(row, warn_context="get_messages", summary_flag=True) for row in rows]
 
+    def get_history_summary_messages(self, session_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+        """Load each session's first active prompt and final terminal answer in one bounded query."""
+        unique_ids = list(dict.fromkeys(session_id for session_id in session_ids if session_id))
+        summaries: Dict[str, List[Dict[str, Any]]] = {session_id: [] for session_id in unique_ids}
+        if not unique_ids:
+            return summaries
+
+        rows = self._read_all(
+            f"""
+            WITH selected AS (
+                SELECT session_id,
+                       MIN(CASE WHEN role = 'user' THEN id END) AS prompt_id,
+                       MAX(CASE
+                           WHEN role = 'assistant'
+                            AND (tool_calls IS NULL OR trim(tool_calls) IN ('', '[]', 'null'))
+                           THEN id END) AS answer_id
+                FROM messages
+                WHERE active = 1 AND session_id IN ({_placeholders(unique_ids)})
+                GROUP BY session_id
+            ), chosen AS (
+                SELECT prompt_id AS id FROM selected WHERE prompt_id IS NOT NULL
+                UNION ALL
+                SELECT answer_id AS id FROM selected WHERE answer_id IS NOT NULL
+            )
+            SELECT messages.*
+            FROM messages JOIN chosen USING (id)
+            ORDER BY messages.session_id, messages.id
+            """,
+            tuple(unique_ids),
+        )
+        for row in rows:
+            message = self._row_to_message_dict(
+                row, warn_context="get_history_summary_messages", summary_flag=True)
+            summaries[row["session_id"]].append(message)
+        return summaries
+
     def find_pr_url_messages(self, session_ids: List[str]) -> List[Dict[str, Any]]:
         """Tool results containing ``/pull/``: a deliberately loose scan, oldest-first so the caller takes the last."""
         ids = [s for s in session_ids if s]

@@ -114,11 +114,51 @@ def _prune_sessions(body: SessionPrune):
 
 
 _ACTIVE_WINDOW_S = 300
+_HISTORY_SUMMARY_CONTENT_LIMIT = 8_000
+_HISTORY_SUMMARY_TRUNCATION_SUFFIX = "\n\n[Content truncated in history search.]"
 
 
 def _csv(value: Optional[str]) -> List[str]:
     """Split a comma-separated query param into stripped, non-empty items."""
     return [s.strip() for s in (value or "").split(",") if s.strip()]
+
+
+def _history_conversation_messages(messages: list[dict]) -> list[dict]:
+    """Keep prompts and terminal assistant answers; omit tool transcript payloads."""
+    filtered = []
+    for message in messages:
+        role = str(message.get("role") or "").lower()
+        if role == "user":
+            filtered.append(message)
+            continue
+        if role != "assistant":
+            continue
+        tool_calls = message.get("tool_calls")
+        if tool_calls is None or tool_calls == [] or (
+                isinstance(tool_calls, str) and tool_calls.strip() in ("", "[]", "null")):
+            filtered.append(message)
+    return filtered
+
+
+def _history_summary_wire_message(message: dict) -> dict:
+    """Project one History-card message and cap content so search responses stay bounded."""
+    content = message.get("content")
+    comparable = content if isinstance(content, str) else json.dumps(
+        content, ensure_ascii=False, separators=(",", ":"), default=str)
+    truncated = len(comparable) > _HISTORY_SUMMARY_CONTENT_LIMIT
+    if truncated:
+        content = comparable[:_HISTORY_SUMMARY_CONTENT_LIMIT] + _HISTORY_SUMMARY_TRUNCATION_SUFFIX
+
+    projected = {
+        "role": str(message.get("role") or "message").lower(),
+        "content": content,
+    }
+    projected.update(
+        (key, message[key]) for key in ("id", "timestamp", "tool_name")
+        if message.get(key) is not None)
+    if truncated:
+        projected["content_truncated"] = True
+    return projected
 
 
 def _is_active(row: dict, now: float) -> bool:
@@ -392,57 +432,94 @@ async def search_sessions(
 @search_router.get("/api/sessions/search/conversations")
 async def search_session_conversations(
     q: str = "", limit: int = 20, offset: int = 0, source: Optional[str] = None,
-    role: Optional[str] = None, profile: Optional[str] = None):
-    """Search message content and expand each matching session to its full conversation."""
+    role: Optional[str] = None, profile: Optional[str] = None,
+    snapshot_max_message_id: Optional[int] = None, message_view: str = "full"):
+    """Search message content and expand each matching session at the requested detail level."""
     try:
         safe_limit = max(1, min(int(limit), 100))
         safe_offset = max(0, int(offset))
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Invalid limit or offset") from exc
+    if message_view not in ("full", "history", "summary"):
+        raise HTTPException(status_code=400, detail="Invalid message view")
 
     if not q or not q.strip():
         return {
             "results": [], "limit": safe_limit, "offset": safe_offset,
-            "matched_messages": 0, "matched_sessions": 0}
+            "matched_messages": 0, "matched_sessions": 0, "has_more": False}
+
+    requested_roles = _csv(role)
+    history_roles = ("user", "assistant")
+    role_filter = (
+        list(history_roles) if not requested_roles
+        else [item for item in requested_roles if item in history_roles]
+    )
+    if not role_filter:
+        return {
+            "results": [], "limit": safe_limit, "offset": safe_offset,
+            "matched_messages": 0, "matched_sessions": 0, "has_more": False}
 
     with http_failure(
             "GET /api/sessions/search/conversations failed", 500,
             detail="Conversation search failed"):
-        db = _open_session_db_for_profile(profile, read_only=True)
-        try:
-            matches = db.search_messages(
-                query=q,
-                source_filter=_csv(source) or None,
-                role_filter=_csv(role) or None,
-                limit=safe_limit,
-                offset=safe_offset,
-            )
-            sessions_by_id: dict[str, dict] = {}
-            for match in matches:
-                session_id = match.get("session_id")
-                if not session_id:
-                    continue
-                if session_id in sessions_by_id:
-                    sessions_by_id[session_id]["matches"].append(match)
-                    continue
-                session = db.get_session(session_id)
-                if not session:
-                    continue
-                sessions_by_id[session_id] = {
-                    "session_id": session_id,
-                    "session": session,
-                    "matches": [match],
-                    "messages": db.get_messages(session_id),
+        def search_and_expand() -> dict:
+            db = _open_session_db_for_profile(profile, read_only=True)
+            try:
+                search = db.search_conversations(
+                    query=q,
+                    source_filter=_csv(source) or None,
+                    role_filter=role_filter,
+                    limit=safe_limit,
+                    offset=safe_offset,
+                    final_answers_only=True,
+                    snapshot_max_message_id=snapshot_max_message_id,
+                )
+                matches = search["matches"]
+                sessions_by_id: dict[str, dict] = {}
+                for match in matches:
+                    session_id = match.get("session_id")
+                    if not session_id:
+                        continue
+                    if session_id in sessions_by_id:
+                        sessions_by_id[session_id]["matches"].append(match)
+                        continue
+                    session = db.get_session(session_id)
+                    if not session:
+                        continue
+                    sessions_by_id[session_id] = {
+                        "session_id": session_id,
+                        "session": session,
+                        "matches": [match],
+                        "messages": [],
+                    }
+                if message_view == "summary":
+                    summaries = db.get_history_summary_messages(list(sessions_by_id))
+                    for session_id, payload in sessions_by_id.items():
+                        payload["messages"] = [
+                            _history_summary_wire_message(message)
+                            for message in summaries.get(session_id, [])
+                        ]
+                else:
+                    for session_id, payload in sessions_by_id.items():
+                        messages = db.get_messages(session_id)
+                        payload["messages"] = (
+                            _history_conversation_messages(messages)
+                            if message_view == "history" else messages)
+                next_offset = int(search["next_offset"])
+                return {
+                    "results": list(sessions_by_id.values()),
+                    "limit": safe_limit,
+                    "offset": safe_offset,
+                    "matched_messages": search["matched_messages"],
+                    "matched_sessions": search["matched_sessions"],
+                    "has_more": next_offset < search["matched_sessions"],
+                    "next_offset": next_offset,
+                    "snapshot_max_message_id": search["snapshot_max_message_id"],
                 }
-            return {
-                "results": list(sessions_by_id.values()),
-                "limit": safe_limit,
-                "offset": safe_offset,
-                "matched_messages": len(matches),
-                "matched_sessions": len(sessions_by_id),
-            }
-        finally:
-            db.close()
+            finally:
+                db.close()
+
+        return await asyncio.to_thread(search_and_expand)
 
 
 @manage_router.post("/api/sessions/bulk-delete")

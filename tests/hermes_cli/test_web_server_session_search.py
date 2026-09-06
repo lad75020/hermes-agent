@@ -149,20 +149,31 @@ class _ConversationSessionDB:
         self.closed = False
         self.search_kwargs = None
 
-    def search_messages(self, **kwargs):
+    def search_conversations(self, **kwargs):
         self.search_kwargs = kwargs
-        return [
-            {"session_id": "session-a", "role": "user", "snippet": "first"},
-            {"session_id": "session-a", "role": "assistant", "snippet": "second"},
-            {"session_id": "missing", "role": "user", "snippet": "orphan"},
-        ]
+        return {
+            "matches": [
+                {"session_id": "session-a", "role": "assistant", "snippet": "representative"},
+                {"session_id": "session-a", "role": "user", "snippet": "another hit"},
+            ],
+            "matched_messages": 7,
+            "matched_sessions": 6,
+            "next_offset": 3,
+            "snapshot_max_message_id": 42,
+        }
 
     def get_session(self, session_id):
         return {"id": session_id, "title": "Conversation A"} if session_id == "session-a" else None
 
     def get_messages(self, session_id):
-        assert session_id == "session-a"
-        return [{"role": "user", "content": "full conversation"}]
+        raise AssertionError("summary view must not load the complete transcript")
+
+    def get_history_summary_messages(self, session_ids):
+        assert session_ids == ["session-a"]
+        return {"session-a": [
+            {"role": "user", "content": "full conversation"},
+            {"role": "assistant", "content": "terminal answer", "tool_calls": None},
+        ]}
 
     def close(self):
         self.closed = True
@@ -178,29 +189,59 @@ def test_full_conversation_search_is_profile_scoped_and_expands_matches(monkeypa
     )
 
     response = asyncio.run(_rt_sessions.search_session_conversations(
-        q="needle", limit=5, offset=2, source="cli, desktop", role="user", profile="Work"))
+        q="needle", limit=5, offset=2, source="cli, desktop",
+        role="user,assistant,tool", profile="Work", snapshot_max_message_id=42,
+        message_view="summary"))
 
     assert opened == [("Work", True)]
     assert db.search_kwargs == {
         "query": "needle",
         "source_filter": ["cli", "desktop"],
-        "role_filter": ["user"],
+        "role_filter": ["user", "assistant"],
         "limit": 5,
         "offset": 2,
+        "final_answers_only": True,
+        "snapshot_max_message_id": 42,
     }
     assert response == {
         "results": [{
             "session_id": "session-a",
             "session": {"id": "session-a", "title": "Conversation A"},
             "matches": [
-                {"session_id": "session-a", "role": "user", "snippet": "first"},
-                {"session_id": "session-a", "role": "assistant", "snippet": "second"},
+                {"session_id": "session-a", "role": "assistant", "snippet": "representative"},
+                {"session_id": "session-a", "role": "user", "snippet": "another hit"},
             ],
-            "messages": [{"role": "user", "content": "full conversation"}],
+            "messages": [
+                {"role": "user", "content": "full conversation"},
+                {"role": "assistant", "content": "terminal answer"},
+            ],
         }],
         "limit": 5,
         "offset": 2,
-        "matched_messages": 3,
-        "matched_sessions": 1,
+        "matched_messages": 7,
+        "matched_sessions": 6,
+        "has_more": True,
+        "next_offset": 3,
+        "snapshot_max_message_id": 42,
     }
     assert db.closed is True
+
+
+def test_history_summary_wire_message_is_minimal_and_content_bounded():
+    message = {
+        "id": 7,
+        "role": "assistant",
+        "content": "x" * 20_000,
+        "timestamp": 123.0,
+        "tool_name": None,
+        "reasoning": "must not reach the wire",
+        "display_metadata": {"large": "payload"},
+    }
+
+    result = _rt_sessions._history_summary_wire_message(message)
+
+    assert set(result) == {"id", "role", "content", "timestamp", "content_truncated"}
+    assert result["content_truncated"] is True
+    assert result["content"].startswith("x" * 8_000)
+    assert result["content"].endswith("[Content truncated in history search.]")
+    assert len(result["content"]) < 8_100
