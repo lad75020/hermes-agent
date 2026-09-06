@@ -129,6 +129,66 @@ HARDLINE_PATTERNS_COMPILED = [
 # Commands that hand a quoted argument to another shell to EXECUTE: quoted text is code, not
 # prose, so quote-masked hardline rules scan the raw string.
 _SHELL_CARRIER_NAMES = frozenset({"eval", "sh", "bash", "zsh", "ksh", "dash", "source", "."})
+_HERMES_HOME_DELETE_DESCRIPTION = "recursive delete of Hermes home directory"
+_HERMES_HOME_SYMBOLIC_ROOTS = (
+    "$HERMES_HOME", "${HERMES_HOME}", "~/.hermes",
+    "$HOME/.hermes", "${HOME}/.hermes",
+)
+_WHOLE_DIRECTORY_SUFFIXES = ("", "/", "/*", "/{*,.*}", "/{*,.[!.]*,..?*}")
+
+
+def _is_hermes_home_delete_target(target: str) -> bool:
+    """Return whether one ``rm`` operand names the active Hermes root or all of its contents."""
+    roots = set(_HERMES_HOME_SYMBOLIC_ROOTS)
+    try:
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+
+        for path in (get_hermes_home(), get_default_hermes_root()):
+            expanded = path.expanduser()
+            roots.update((str(expanded), str(expanded.resolve(strict=False))))
+    except Exception:
+        # Symbolic spellings still provide a deterministic floor if path resolution fails.
+        pass
+
+    candidate = target.replace("\\", "/")
+    return any(
+        candidate == root.replace("\\", "/").rstrip("/") + suffix
+        for root in roots
+        for suffix in _WHOLE_DIRECTORY_SUFFIXES
+    )
+
+
+def _is_recursive_rm_of_hermes_home(command: str) -> bool:
+    """Detect an actual recursive ``rm`` command targeting the Hermes data root.
+
+    This is structural rather than a flat regex so quoted prose is ignored, GNU
+    option permutation (``rm TARGET -rf``) is honored, and shell-carrier payloads
+    receive the same treatment through ``_command_detection_variants``.
+    """
+    for variant in _command_detection_variants(command):
+        for segment in _iter_top_level_shell_segments(variant):
+            for start, _, word in _iter_shell_command_word_spans(segment):
+                executable = os.path.basename(_deobfuscate_shell_word_for_detection(word)).lower()
+                if executable != "rm":
+                    continue
+                tokens = _shell_segment_tokens(segment, start)
+                if not tokens:
+                    continue
+                recursive = False
+                operands = []
+                options = True
+                for token in tokens[1:]:
+                    if options and token == "--":
+                        options = False
+                    elif options and token.startswith("-") and token != "-":
+                        recursive = recursive or token == "--recursive" or (
+                            not token.startswith("--") and "r" in token[1:].lower()
+                        )
+                    else:
+                        operands.append(token)
+                if recursive and any(_is_hermes_home_delete_target(target) for target in operands):
+                    return True
+    return False
 
 
 def _contains_shell_carrier(command: str) -> bool:
@@ -173,6 +233,8 @@ def detect_hardline_command(command: str) -> tuple:
     """Check hardline patterns (NEVER bypassable, even in YOLO) -> (is_hardline, description)."""
     if _command_parser_limit_exceeded(command):
         return (True, _PARSER_LIMIT_DESCRIPTION)
+    if _is_recursive_rm_of_hermes_home(command):
+        return (True, _HERMES_HOME_DELETE_DESCRIPTION)
     normalized = _normalize_command_for_detection(command)
     _, malformed_grep = _grep_safe_detection_variant(normalized)
     if malformed_grep:

@@ -561,6 +561,59 @@ def test_check_all_command_guards_blocks_hardline(clean_session):
     assert "BLOCKED (hardline)" in result["message"]
 
 
+def test_recursive_delete_of_hermes_home_never_reaches_smart_approval(
+        clean_session, monkeypatch, tmp_path):
+    """The active Hermes data root is never eligible for LLM auto-approval."""
+    hermes_home = tmp_path / "portable-hermes"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "smart")
+
+    smart_calls = []
+    monkeypatch.setattr(
+        "tools.approval._smart_verdict",
+        lambda *args, **kwargs: smart_calls.append((args, kwargs)) or "approve",
+    )
+
+    commands = [
+        "rm -rf $HERMES_HOME",
+        "rm -rf ${HERMES_HOME}/",
+        'rm -rf "$HERMES_HOME"/*',
+        "rm -rf ~/.hermes",
+        "rm -rf $HOME/.hermes/*",
+        f'rm -rf "{hermes_home}"',
+        f"rm {hermes_home} -rf",
+        'bash -c \'rm -rf "$HERMES_HOME"\'',
+        'true && sudo /bin/rm -Rf "${HERMES_HOME}"/*',
+        'rm -rf "$HERMES_HOME"/{*,.[!.]*,..?*}',
+    ]
+    for command in commands:
+        is_hardline, description = detect_hardline_command(command)
+        assert is_hardline, command
+        assert description == "recursive delete of Hermes home directory", command
+
+        result = check_all_command_guards(command, "local")
+        assert result["approved"] is False, command
+        assert result.get("hardline") is True, command
+
+    assert smart_calls == []
+
+
+def test_recursive_delete_below_hermes_home_is_not_hardline(monkeypatch, tmp_path):
+    """Targeted cache cleanup remains in the ordinary approval tier."""
+    hermes_home = tmp_path / "portable-hermes"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    for command in (
+        "rm -rf $HERMES_HOME/cache/stale",
+        f"rm -rf {hermes_home}/cache/stale",
+        'echo "rm -rf $HERMES_HOME"',
+    ):
+        is_hardline, description = detect_hardline_command(command)
+        assert not is_hardline, f"{command!r} was blocked as {description!r}"
+
+
 def test_yolo_env_var_cannot_bypass_hardline(clean_session, monkeypatch):
     """HERMES_YOLO_MODE=1 must not bypass the hardline floor."""
     monkeypatch.setenv("HERMES_YOLO_MODE", "1")
