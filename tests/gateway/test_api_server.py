@@ -2933,6 +2933,7 @@ class TestSessionIdHeader:
         mock_result = {"final_response": "Continuing!", "messages": [], "api_calls": 1}
         mock_db = MagicMock()
         mock_db.get_messages_as_conversation.return_value = []
+        mock_db.resolve_resume_session_id.side_effect = lambda sid: sid
         adapter._session_db = mock_db
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
@@ -2976,6 +2977,7 @@ class TestSessionIdHeader:
         ]
         mock_db = MagicMock()
         mock_db.get_messages_as_conversation.return_value = db_history
+        mock_db.resolve_resume_session_id.side_effect = lambda sid: sid
         auth_adapter._session_db = mock_db
         app = _create_app(auth_adapter)
         async with TestClient(TestServer(app)) as cli:
@@ -3043,6 +3045,7 @@ class TestSessionKeyHeader:
         mock_result = {"final_response": "ok", "messages": [], "api_calls": 1}
         mock_db = MagicMock()
         mock_db.get_messages_as_conversation.return_value = []
+        mock_db.resolve_resume_session_id.side_effect = lambda sid: sid
         auth_adapter._session_db = mock_db
         app = _create_app(auth_adapter)
         async with TestClient(TestServer(app)) as cli:

@@ -138,6 +138,10 @@ export function openSession(
     const focused = focusOpenSession(storedSessionId, workspaceScope)
 
     if (focused) {
+      if (focusedSessionNeedsRoute(focused, $workspaceIsPage.get())) {
+        navigate(sessionRoute(storedSessionId))
+      }
+
       return
     }
 
