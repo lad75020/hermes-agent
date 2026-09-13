@@ -624,7 +624,8 @@ export const FIELD_DESCRIPTIONS: Record<string, string> = defineFieldCopy({
     enabled: 'Enable local or provider-backed speech transcription.',
     echoTranscripts: 'Post the raw 🎙️ transcript of voice messages back to the chat.',
     apple: {
-      language: 'Optional language tag (for example fr-FR). Blank uses the global STT language, then the environment hint or Mac locale; not automatic language detection.',
+      language:
+        'Optional language tag (for example fr-FR). Blank uses the global STT language, then the environment hint or Mac locale; not automatic language detection.',
       downloadAssets: 'Download required Apple Speech assets before transcription. Requires macOS 26 or later.',
       timeoutSeconds: 'Maximum time to wait for Apple on-device transcription. Requires macOS 26 or later.'
     },

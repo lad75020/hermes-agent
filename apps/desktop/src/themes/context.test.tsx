@@ -218,8 +218,8 @@ describe('GitHub Contrast readability settings', () => {
     const strength = (name: string) => Number.parseFloat(cssVar(name)) / 100
 
     const chatSurface = mix(palette.background, mode === 'dark' ? '#0d0d0e' : '#f3f3f3', mode === 'dark' ? 0.26 : 0.08)
-    const effectiveScaffold = (name: string) =>
-      mix(chatSurface, palette.foreground, strength(name) * scaffoldOpacity)
+
+    const effectiveScaffold = (name: string) => mix(chatSurface, palette.foreground, strength(name) * scaffoldOpacity)
 
     expect(window.document.documentElement.dataset.hermesTheme).toBe('github-contrast')
     expect(window.document.documentElement.dataset.hermesMode).toBe(mode)
