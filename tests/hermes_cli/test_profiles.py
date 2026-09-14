@@ -105,12 +105,16 @@ class TestGetProfileDir:
         result = get_profile_dir("default")
         assert result == tmp_path / ".hermes"
 
-    def test_named_profile_returns_legacy_mixed_case_directory(self, profile_env):
-        legacy_dir = profile_env / ".hermes" / "profiles" / "Ollama"
-        legacy_dir.mkdir(parents=True)
+    @pytest.mark.parametrize("name", ["..", "../outside", "../../tmp", "a/b", "a\\b", ".hidden", "has space"])
+    def test_traversal_and_invalid_names_rejected(self, name, profile_env):
+        # The name becomes a path component under profiles/; invalid ids must
+        # raise instead of escaping the root.
+        with pytest.raises(ValueError):
+            get_profile_dir(name)
 
-        assert get_profile_dir("ollama") == legacy_dir
-        assert get_profile_dir("Ollama") == legacy_dir
+    @pytest.mark.parametrize("name", ["..", "../outside", "a/b"])
+    def test_profile_exists_false_for_invalid_names(self, name, profile_env):
+        assert profiles.profile_exists(name) is False
 
 
 # ===================================================================
@@ -546,14 +550,6 @@ class TestListProfiles:
         assert "alpha" in names
         assert "beta" in names
 
-    def test_includes_legacy_mixed_case_profile_dirs_normalized(self, profile_env):
-        legacy_dir = profile_env / ".hermes" / "profiles" / "Ollama"
-        legacy_dir.mkdir(parents=True)
-
-        assert "ollama" in [profile.name for profile in list_profiles()]
-        assert "ollama" in profiles.list_profile_names()
-        assert ("ollama", legacy_dir) in profiles_to_serve(multiplex=True)
-
 
 # ===================================================================
 # TestActiveProfile
@@ -782,6 +778,52 @@ class TestRenameProfile:
         assert "hermes.ssi_health" not in cfg["hosts"]
         assert cfg["hosts"]["hermes_heimdall"]["aiPeer"] == "ssi_health"
         assert cfg["hosts"]["hermes_heimdall"]["peerName"] == "user-peer"
+
+    def test_multiplexed_rename_unroutes_old_then_hot_serves_new(self, profile_env):
+        """Under a live multiplexer the old name is tombstoned + unrouted BEFORE the directory
+        moves and the new name is hot-served after, so a stale runtime mkdir of the old home is
+        refused instead of resurrecting a ghost served profile (#109267)."""
+        from hermes_constants import mkdir_under_hermes_home
+        tmp_path = profile_env
+        create_profile("oldname", no_alias=True)
+        old_dir = tmp_path / ".hermes" / "profiles" / "oldname"
+        new_dir = tmp_path / ".hermes" / "profiles" / "newname"
+
+        calls = []
+
+        def _record_notify(name):
+            # Snapshot the world at each multiplexer signal to pin ordering.
+            calls.append((name, old_dir.exists(), new_dir.exists(), profiles.named_profile_is_deleted(old_dir)))
+            if name == "oldname" and old_dir.exists():
+                # A still-live component of the multiplexer writing into the old home mid-teardown.
+                with pytest.raises(FileNotFoundError):
+                    mkdir_under_hermes_home(old_dir / "logs")
+
+        with patch("hermes_cli.profiles.check_alias_collision", return_value="skip"), \
+             patch("hermes_cli.profiles._live_default_multiplexer", return_value=True), \
+             patch("hermes_cli.profiles._notify_multiplexer", side_effect=_record_notify):
+            rename_profile("oldname", "newname")
+
+        # (name, old_exists, new_exists, old_tombstoned): unroute first, hot-serve last.
+        assert calls[0] == ("oldname", True, False, True)
+        assert calls[-1] == ("newname", False, True, False)
+        assert not old_dir.exists() and new_dir.is_dir()
+        assert not profiles.named_profile_is_deleted(old_dir)  # a future 'oldname' is not born deleted
+
+    def test_unmultiplexed_rename_does_not_signal_multiplexer(self, profile_env):
+        """No live multiplexer → rename must neither tombstone nor ping (single-profile installs)."""
+        tmp_path = profile_env
+        create_profile("oldname", no_alias=True)
+        old_dir = tmp_path / ".hermes" / "profiles" / "oldname"
+
+        with patch("hermes_cli.profiles.check_alias_collision", return_value="skip"), \
+             patch("hermes_cli.profiles._live_default_multiplexer", return_value=False), \
+             patch("hermes_cli.profiles._notify_multiplexer") as notify:
+            new_dir = rename_profile("oldname", "newname")
+
+        notify.assert_not_called()
+        assert not (tmp_path / ".hermes" / "profiles" / ".deleted").exists()
+        assert not old_dir.exists() and new_dir.is_dir()
 
 
 # ===================================================================
@@ -1130,32 +1172,6 @@ class TestProfilesToServe:
         assert serve["default"] == _get_default_hermes_home()
         assert serve["coder"] == get_profile_dir("coder")
 
-    def test_empty_allowlist_serves_only_default(self, profile_env):
-        create_profile("worker", no_alias=True)
-
-        serve = dict(profiles_to_serve(multiplex=True, profile_allowlist=[]))
-
-        assert serve == {"default": _get_default_hermes_home()}
-
-    def test_allowlist_normalizes_deduplicates_and_keeps_default(self, profile_env):
-        create_profile("worker", no_alias=True)
-        create_profile("guest", no_alias=True)
-
-        serve = dict(
-            profiles_to_serve(
-                multiplex=True,
-                profile_allowlist=[" Worker ", "worker", "default", "missing"],
-            )
-        )
-
-        assert set(serve) == {"default", "worker"}
-        assert serve["worker"] == get_profile_dir("worker")
-
-
-
-        assert set(serve) == {"default", "worker"}
-        assert serve["worker"] == get_profile_dir("worker")
-
 
 # ---------------------------------------------------------------------------
 # resolve_profile_env spelling preservation (#82581 junction follow-up)
@@ -1200,4 +1216,5 @@ class TestResolveProfileEnvSpelling:
         # No HERMES_HOME: the platform default root applies (existing contract).
         monkeypatch.delenv("HERMES_HOME", raising=False)
         assert Path(resolve_profile_env("default")) == _get_default_hermes_home()
+
 

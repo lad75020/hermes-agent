@@ -22,7 +22,6 @@ except ImportError:  # pragma: no cover - mirrors api_server's optional import
 
 # Logger parity with the origin module (moved log records keep their name).
 logger = logging.getLogger("gateway.platforms.api_server")
-MAX_CHAT_COMPLETIONS_TOOL_OUTPUT_EVENT_CHARS = 65_536
 
 async def _iter_stream_items(stream_q, agent_task, response):
     """Yield agent stream items until EOS, writing SSE keepalives while idle.
@@ -378,30 +377,6 @@ class _ResponsesStream:
 class OpenAICompatRoutesMixin:
     """/v1/chat/completions and /v1/responses handlers + SSE writers."""
 
-    @staticmethod
-    def _chat_completion_debug_payload(value: Any) -> Dict[str, Any]:
-        """Return a bounded, JSON-safe tool-output payload for debug SSE events."""
-        structured: Any = None
-        if isinstance(value, str):
-            text = value
-            try:
-                structured = json.loads(value)
-            except (TypeError, ValueError):
-                pass
-        else:
-            try:
-                text = json.dumps(value, default=str, ensure_ascii=False)
-                structured = value
-            except Exception:
-                text = str(value)
-        truncated = len(text) > MAX_CHAT_COMPLETIONS_TOOL_OUTPUT_EVENT_CHARS
-        if truncated:
-            text = text[:MAX_CHAT_COMPLETIONS_TOOL_OUTPUT_EVENT_CHARS]
-        payload: Dict[str, Any] = {"output": text, "truncated": truncated}
-        if structured is not None:
-            payload["structured"] = structured
-        return payload
-
     def _select_request_route(
         self, body: Dict[str, Any], *, session_id, gateway_session_key, model_alias) -> tuple:
         """Resolve the model_routes alias + per-request overrides ->
@@ -446,6 +421,8 @@ class OpenAICompatRoutesMixin:
             body = await request.json()
         except Exception:
             return _error_response("Invalid JSON in request body", 400)
+        from gateway.platforms.api_server import _request_relay_metadata
+        relay_metadata = _request_relay_metadata(body)
         messages = body.get("messages")
         if not messages or not isinstance(messages, list):
             return _invalid_request("Missing or invalid 'messages' field")
@@ -477,10 +454,17 @@ class OpenAICompatRoutesMixin:
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
-        # X-Hermes-Session-Id continues an existing session (history from state.db, not the body).
-        # No-key mode is loopback-only; connect() rejects network-accessible binds without a key.
+        # X-Hermes-Session-Id continues an existing session (history from state.db, not the body);
+        # requires a configured API key or any client could read history by guessing ids.
         provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
         if provided_session_id:
+            if not self._api_key:
+                logger.warning(
+                    "Session continuation via X-Hermes-Session-Id rejected: "
+                    "no API key configured.  Set API_SERVER_KEY to enable "
+                    "session continuity.")
+                return _error_response("Session continuation requires API key authentication. "
+                        "Configure API_SERVER_KEY to enable this feature.", 403)
             # Same guard as the native gateway: ids are interpolated into on-disk filenames.
             from gateway.session import _is_path_unsafe
             if re.search(r'[\r\n\x00]', provided_session_id) or _is_path_unsafe(provided_session_id):
@@ -511,11 +495,6 @@ class OpenAICompatRoutesMixin:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
-        raw_api_request_id = request.headers.get("X-Hermes-Request-Id", "")
-        api_request_id = self._normalize_api_request_id(raw_api_request_id)
-        if raw_api_request_id and not api_request_id:
-            return _error_response(
-                "Invalid X-Hermes-Request-Id", 400, code="invalid_request_id")
         route, agent_overrides, selection_error = self._select_request_route(
             body, session_id=session_id, gateway_session_key=gateway_session_key,
             model_alias=model_name)
@@ -525,6 +504,7 @@ class OpenAICompatRoutesMixin:
             user_message=user_message, conversation_history=history,
             ephemeral_system_prompt=system_prompt, session_id=session_id,
             gateway_session_key=gateway_session_key, **agent_overrides, route=route,
+            relay_metadata=relay_metadata,
             # #98619: only an explicitly provided X-Hermes-Session-Id is wake-capable (the
             # header is 403-gated on API_SERVER_KEY, so the wake self-post can authenticate
             # and the client can resume the session by sending it again). A fingerprint-derived
@@ -536,7 +516,6 @@ class OpenAICompatRoutesMixin:
             # tool_call_ids with an emitted "running": a "completed" without one (internal/
             # filtered tools) is dropped rather than orphaned on the wire.
             _started_tool_call_ids: set[str] = set()
-            _reasoning_summary_parts: List[str] = []
 
             def _on_tool_start(tool_call_id, function_name, function_args):
                 """``hermes.tool.progress`` status=running; ``_``-prefixed tools stay off the wire."""
@@ -555,34 +534,12 @@ class OpenAICompatRoutesMixin:
                 _started_tool_call_ids.discard(tool_call_id)
                 _stream_q.put_threadsafe(("__tool_progress__", {
                     "tool": function_name, "toolCallId": tool_call_id, "status": "completed"}))
-                payload = self._chat_completion_debug_payload(function_result)
-                payload.update({
-                    "tool": function_name, "toolCallId": tool_call_id,
-                    "status": "completed"})
-                _stream_q.put_threadsafe(("__tool_output__", payload))
-
-            def _on_reasoning_summary(text):
-                if not text:
-                    return
-                delta = str(text)
-                _reasoning_summary_parts.append(delta)
-                payload: Dict[str, Any] = {
-                    "delta": delta, "summary": "".join(_reasoning_summary_parts)}
-                try:
-                    message = json.loads(delta)
-                except (TypeError, ValueError):
-                    message = None
-                if isinstance(message, dict) and message.get("type") == "context_compression":
-                    payload["message"] = message
-                _stream_q.put_threadsafe(("__reasoning_summary__", payload))
 
             # tool_progress_callback deliberately NOT wired: it would duplicate the structured
             # start/complete callbacks (which carry the tool_call id).
             agent_task, agent_ref = self._spawn_stream_agent(
                 _stream_q, tool_start_callback=_on_tool_start,
-                tool_complete_callback=_on_tool_complete,
-                reasoning_callback=_on_reasoning_summary, **run_kwargs)
-            self._track_api_request(api_request_id, agent_ref, agent_task)
+                tool_complete_callback=_on_tool_complete, **run_kwargs)
             # #13437 identity contract: an explicit-header client keeps addressing the id it
             # sent; the response echoes that stable id while reads/writes adopt the live tip,
             # so a rotation mid-turn (after these headers are prepared) never changes what the
@@ -593,14 +550,12 @@ class OpenAICompatRoutesMixin:
                 agent_task, agent_ref, session_id=(provided_session_id or session_id),
                 gateway_session_key=gateway_session_key)
 
-        agent_ref = [None]
-
         async def _compute_completion():
-            return await self._run_agent(agent_ref=agent_ref, **run_kwargs)
+            return await self._run_agent(**run_kwargs)
         outcome, err = await self._run_idempotent(
             request, body, _compute_completion, log_label="chat completions",
             fingerprint_keys=["model", "provider", "model_options", "messages", "tools", "tool_choice", "stream"],
-            request_id=api_request_id, agent_ref=agent_ref,
+            route="chat_completions",
         )
         if err is not None:
             return err
@@ -627,9 +582,6 @@ class OpenAICompatRoutesMixin:
             response_headers["X-Hermes-Completed"] = "false"
             response_headers["X-Hermes-Partial"] = "true" if is_partial else "false"
             return web.json_response(err_body, status=502, headers=response_headers)
-        self._maybe_auto_title_api_session(
-            result.get("session_id", session_id), final_response,
-            result.get("messages") or history)
         # Soft partial (some text, run incomplete): 200 + finish_reason="length"/Hermes extras.
         response_data = {
             "id": completion_id, "object": "chat.completion", "created": created,
@@ -648,32 +600,28 @@ class OpenAICompatRoutesMixin:
 
     async def _run_idempotent(
         self, request: "web.Request", body: Dict[str, Any], compute, *,
-        log_label: str, fingerprint_keys: List[str], request_id: str = "",
-        agent_ref: Optional[list] = None) -> tuple:
-        """Run ``compute()`` once per Idempotency-Key + body fingerprint ->
-        ``((result, usage), None)`` or ``(None, 500 response)``."""
-        from gateway.platforms.api_server import (
-            _error_response, _idem_cache, _make_request_fingerprint)
+        log_label: str, fingerprint_keys: List[str], route: str) -> tuple:
+        """Run ``compute()`` once per (principal scope, logical route, Idempotency-Key) + body fingerprint
+        -> ``((result, usage), None)`` or ``(None, 500 response)``.
+
+        ``_idem_cache`` is process-global: under ``gateway.multiplex_profiles`` every profile's
+        ``/p/<profile>/v1/...`` mirror shares it, so the key carries ``_run_idempotency_scope`` (the same
+        ``sha256(profile, expected API key)`` namespace the durable ``/v1/runs`` API uses) — a client key
+        colliding across profiles, or a rotated API_SERVER_KEY, never replays another principal's response.
+        ``route`` is the logical endpoint (``/v1/...`` and its ``/p/<profile>/v1/...`` alias are the same
+        route), folded into the key because the store keeps the fingerprint only as the slot's value.
+        """
+        from gateway.platforms.api_server import _error_response, _idem_cache, _make_request_fingerprint
         idempotency_key = request.headers.get("Idempotency-Key")
-
-        async def _tracked_compute():
-            task = asyncio.ensure_future(compute())
-            self._track_api_request(request_id, agent_ref or [None], task)
-            return await task
-
-        compute_coro = _tracked_compute if request_id else compute
         try:
             if idempotency_key:
+                principal_scope = self._run_idempotency_scope(request)
+                scoped_key = f"{principal_scope}\0{route}\0{idempotency_key}"
                 fp = _make_request_fingerprint(body, keys=fingerprint_keys)
-                result, usage = await _idem_cache.get_or_set(idempotency_key, fp, compute_coro)
+                result, usage = await _idem_cache.get_or_set(scoped_key, fp, compute)
             else:
-                result, usage = await compute_coro()
+                result, usage = await compute()
             return (result, usage), None
-        except asyncio.CancelledError:
-            if not request_id:
-                raise
-            return None, _error_response(
-                "Request cancelled", 499, code="request_cancelled")
         except Exception as e:
             logger.error("Error running agent for %s: %s", log_label, e, exc_info=True)
             return None, _error_response(f"Internal server error: {e}", 500, err_type="server_error")
@@ -718,10 +666,6 @@ class OpenAICompatRoutesMixin:
                 if isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__tool_progress__":
                     # Custom event: tool lifecycle for frontends without markers in history.
                     await response.write(_sse_frame(delta[1], event="hermes.tool.progress"))
-                elif isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__tool_output__":
-                    await response.write(_sse_frame(delta[1], event="Hermes.tool.output"))
-                elif isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__reasoning_summary__":
-                    await response.write(_sse_frame(delta[1], event="Hermes.reasoning.summary"))
                 else:
                     await response.write(_sse_frame(_chunk({"content": delta})))
             # The agent can fail after the queue drains (task raises / result flagged failed or
@@ -835,6 +779,8 @@ class OpenAICompatRoutesMixin:
             body = await request.json()
         except Exception:
             return _invalid_request("Invalid JSON in request body")
+        from gateway.platforms.api_server import _request_relay_metadata
+        relay_metadata = _request_relay_metadata(body)
         raw_input = body.get("input")
         if raw_input is None:
             return _error_response("Missing 'input' field", 400)
@@ -906,11 +852,6 @@ class OpenAICompatRoutesMixin:
             or self._declared_conversation_session(gateway_session_key)
             or str(uuid.uuid4()))
         stream = _coerce_request_bool(body.get("stream"), default=False)
-        raw_api_request_id = request.headers.get("X-Hermes-Request-Id", "")
-        api_request_id = self._normalize_api_request_id(raw_api_request_id)
-        if raw_api_request_id and not api_request_id:
-            return _error_response(
-                "Invalid X-Hermes-Request-Id", 400, code="invalid_request_id")
         route, agent_overrides, selection_error = self._select_request_route(
             body, session_id=session_id, gateway_session_key=gateway_session_key,
             model_alias=body.get("model"))
@@ -920,7 +861,7 @@ class OpenAICompatRoutesMixin:
             user_message=user_message, conversation_history=conversation_history,
             ephemeral_system_prompt=instructions, session_id=session_id,
             gateway_session_key=gateway_session_key, bind_declared_conversation=_declared_selected,
-            **agent_overrides, route=route)
+            **agent_overrides, route=route, relay_metadata=relay_metadata)
         if stream:
             _stream_q = ThreadSafeAsyncQueue()
 
@@ -940,7 +881,6 @@ class OpenAICompatRoutesMixin:
                 _stream_q, tool_progress_callback=_on_tool_progress,
                 tool_start_callback=_on_tool_start, tool_complete_callback=_on_tool_complete,
                 **run_kwargs)
-            self._track_api_request(api_request_id, agent_ref, agent_task)
             return await self._write_sse_responses(
                 request=request, response_id=f"resp_{uuid.uuid4().hex[:28]}",
                 model=body.get("model", self._model_name), created_at=int(time.time()),
@@ -949,14 +889,12 @@ class OpenAICompatRoutesMixin:
                 instructions=instructions, conversation=conversation, store=store,
                 session_id=session_id, gateway_session_key=gateway_session_key)
 
-        agent_ref = [None]
-
         async def _compute_response():
-            return await self._run_agent(agent_ref=agent_ref, **run_kwargs)
+            return await self._run_agent(**run_kwargs)
         outcome, err = await self._run_idempotent(
             request, body, _compute_response, log_label="responses",
             fingerprint_keys=["input", "instructions", "previous_response_id", "conversation", "model", "provider", "model_options", "tools"],
-            request_id=api_request_id, agent_ref=agent_ref,
+            route="responses",
         )
         if err is not None:
             return err
@@ -973,8 +911,6 @@ class OpenAICompatRoutesMixin:
         _result_sid = result.get("session_id") if isinstance(result, dict) else None
         _effective_session_id = (
             _result_sid if isinstance(_result_sid, str) and _result_sid else session_id)
-        self._maybe_auto_title_api_session(
-            _effective_session_id, final_response, result.get("messages") or full_history)
         # Output items = current turn only (AIAgent returns a full transcript; mocked paths
         # only the current-turn suffix).
         output_start_index = self._response_messages_turn_start_index(

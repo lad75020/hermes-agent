@@ -25,7 +25,6 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from cron.scheduler import run_job
-from cron.scheduler_preflight import _preflight_check_provider_key
 
 
 def _base_job(**overrides):
@@ -195,13 +194,6 @@ class TestCreateJobSnapshot:
         assert job["provider_snapshot"] is None
         resolver.assert_not_called()
 
-    def test_new_job_persists_no_fallback_as_false_by_default(self, monkeypatch):
-        jobs = self._isolate_storage(monkeypatch)
-
-        job = jobs.create_job(prompt="do a thing", schedule="every 1 hour")
-
-        assert job["no_fallback"] is False
-
     def test_snapshot_resolution_error_fails_open_to_none(self, monkeypatch):
         """If resolution raises at creation, snapshot is None — creation never breaks."""
         jobs = self._isolate_storage(monkeypatch)
@@ -230,109 +222,132 @@ class TestRuntimeResolutionTargetModel:
         assert resolve_kwargs["requested"] == "openrouter"
 
 
-class TestNoFallbackCronJobs:
-    def test_preflight_requires_primary_credentials_when_job_disables_fallback(
-        self, monkeypatch
-    ):
-        """A global fallback must not hide a missing pinned local credential."""
-        from hermes_cli.auth import AuthError
+class TestResnapshot:
+    """resnapshot_job / resnapshot_all_unpinned — 'adopt the current global
+    default without pinning' (#44585 companion). These refresh an unpinned
+    job's snapshot(s) to the CURRENT global resolution while leaving the job
+    unpinned, so it keeps tracking future global changes."""
 
-        monkeypatch.setattr(
-            "hermes_cli.runtime_provider.resolve_runtime_provider",
-            lambda **_kwargs: (_ for _ in ()).throw(
-                AuthError("OLLAMA_API_KEY missing", provider="ollama")
-            ),
-        )
+    @staticmethod
+    def _install_store(monkeypatch, initial_jobs):
+        """Install an in-memory cron job store backed by a real list so
+        resnapshot functions can load/save against it."""
+        import contextlib
+        import cron.jobs as jobs
 
-        reason = _preflight_check_provider_key(
-            {
-                "id": "local-only",
-                "provider": "ollama",
-                "model": "qwen3.8:27b-mlx",
-                "no_fallback": True,
-            },
-            {
-                "fallback_providers": [
-                    {"provider": "anthropic", "model": "claude-sonnet-4-6"}
-                ]
-            },
-        )
+        store = [dict(j) for j in initial_jobs]  # deep-ish copy per job
 
-        assert reason is not None
-        assert "credential missing" in reason
+        @contextlib.contextmanager
+        def _lock():
+            yield
 
-    def test_run_job_does_not_resolve_or_pass_global_fallbacks_for_local_only_job(
-        self, monkeypatch, tmp_path
-    ):
-        """A no_fallback job stops at its primary and gives the agent no chain."""
-        from hermes_cli.auth import AuthError
+        monkeypatch.setattr(jobs, "_jobs_lock", _lock, raising=True)
+        monkeypatch.setattr(jobs, "load_jobs", lambda: [dict(j) for j in store], raising=True)
 
-        (tmp_path / "config.yaml").write_text(
-            "model:\n  default: qwen3.8:27b-mlx\n"
-            "cron:\n  preflight: false\n"
-            "fallback_providers:\n"
-            "  - provider: anthropic\n"
-            "    model: claude-sonnet-4-6\n"
-        )
-        resolve = MagicMock(
-            side_effect=AuthError("primary unavailable", provider="ollama")
-        )
-        fake_db = MagicMock()
-        with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("cron.scheduler._get_hermes_home", return_value=tmp_path), \
-             patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
-             patch("hermes_cli.env_loader.load_hermes_dotenv"), \
-             patch("hermes_cli.env_loader.reset_secret_source_cache"), \
-             patch("hermes_state_registry.acquire", return_value=fake_db), \
-             patch("hermes_cli.runtime_provider.resolve_runtime_provider", resolve), \
-             patch("run_agent.AIAgent") as agent_cls:
-            success, _output, _final_response, error = run_job(
-                _base_job(
-                    provider="ollama",
-                    model="qwen3.8:27b-mlx",
-                    no_fallback=True,
-                )
-            )
+        def _save(job_list):
+            store[:] = [dict(j) for j in job_list]
 
-        assert success is False
-        assert error is not None
-        assert resolve.call_count == 1
-        agent_cls.assert_not_called()
+        monkeypatch.setattr(jobs, "save_jobs", _save, raising=True)
+        return jobs, store
 
-    def test_run_job_passes_no_fallback_model_chain_to_local_only_agent(
-        self, tmp_path
-    ):
-        """Even after primary resolution, the agent must not receive a fallback chain."""
-        (tmp_path / "config.yaml").write_text(
-            "model:\n  default: qwen3.8:27b-mlx\n"
-            "fallback_providers:\n"
-            "  - provider: anthropic\n"
-            "    model: claude-sonnet-4-6\n"
-        )
-        runtime = {
-            "api_key": "test-key",
-            "base_url": "http://localhost:11434/v1",
-            "provider": "ollama",
-            "api_mode": "chat_completions",
+    def _make_job(self, job_id, **overrides):
+        job = {
+            "id": job_id,
+            "name": f"job {job_id}",
+            "prompt": "do a thing",
+            "model": None,
+            "provider": None,
+            "model_snapshot": "old-model",
+            "provider_snapshot": "old-provider",
+            "base_url": None,
+            "no_agent": False,
         }
-        fake_db = MagicMock()
-        with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("cron.scheduler._get_hermes_home", return_value=tmp_path), \
-             patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
-             patch("hermes_cli.env_loader.load_hermes_dotenv"), \
-             patch("hermes_cli.env_loader.reset_secret_source_cache"), \
-             patch("hermes_state_registry.acquire", return_value=fake_db), \
-             patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=runtime), \
-             patch("run_agent.AIAgent") as agent_cls:
-            agent_cls.return_value.run_conversation.return_value = {"final_response": "ok"}
-            success, _output, _final_response, error = run_job(
-                _base_job(
-                    provider="ollama",
-                    model="qwen3.8:27b-mlx",
-                    no_fallback=True,
-                )
-            )
+        job.update(overrides)
+        return job
 
-        assert success is True
-        assert error is None
-        assert agent_cls.call_args.kwargs["fallback_model"] is None
+    def test_resnapshot_unpinned_refreshes_to_current(self, monkeypatch, tmp_path):
+        jobs_mod, store = self._install_store(
+            monkeypatch, [self._make_job("j1", model_snapshot="old-model")]
+        )
+        (tmp_path / "config.yaml").write_text("model:\n  default: new-model\n")
+        monkeypatch.setattr("cron.jobs.get_hermes_home", lambda: tmp_path, raising=True)
+        with patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value={"provider": "openrouter"},
+        ):
+            updated = jobs_mod.resnapshot_job("j1")
+
+        assert updated is not None
+        assert updated["model"] is None, "job must stay unpinned"
+        assert updated["model_snapshot"] == "new-model"
+        assert updated["provider_snapshot"] == "openrouter"
+        # Persisted too.
+        assert store[0]["model_snapshot"] == "new-model"
+        assert store[0]["provider_snapshot"] == "openrouter"
+
+    def test_resnapshot_pinned_job_keeps_none_snapshot(self, monkeypatch, tmp_path):
+        # A fully-pinned job already carries None snapshots; resnapping must not
+        # clobber them into a global default.
+        jobs_mod, store = self._install_store(
+            monkeypatch,
+            [
+                self._make_job(
+                    "j1",
+                    model="my-pinned-model",
+                    provider="openrouter",
+                    model_snapshot=None,
+                    provider_snapshot=None,
+                )
+            ],
+        )
+        (tmp_path / "config.yaml").write_text("model:\n  default: new-model\n")
+        monkeypatch.setattr("cron.jobs.get_hermes_home", lambda: tmp_path, raising=True)
+        with patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value={"provider": "openrouter"},
+        ):
+            updated = jobs_mod.resnapshot_job("j1")
+
+        # Pinned axes stay pinned: model unchanged, snapshots still None.
+        assert updated["model"] == "my-pinned-model"
+        assert updated["model_snapshot"] is None
+        assert updated["provider_snapshot"] is None
+
+    def test_resnapshot_missing_job_returns_none(self, monkeypatch, tmp_path):
+        jobs_mod, _store = self._install_store(monkeypatch, [])
+        assert jobs_mod.resnapshot_job("nope") is None
+
+    def test_resnapshot_all_skips_no_agent_and_fully_pinned(self, monkeypatch, tmp_path):
+        jobs_mod, store = self._install_store(
+            monkeypatch,
+            [
+                # unpinned, model-only → should be refreshed (provider axis too)
+                self._make_job("j1", model_snapshot="old", provider_snapshot="old"),
+                # no_agent → skipped entirely
+                self._make_job("j2", no_agent=True, model_snapshot="old", provider_snapshot="old"),
+                # fully pinned → skipped (nothing unpinned)
+                self._make_job(
+                    "j3",
+                    model="pm", provider="pp",
+                    model_snapshot=None, provider_snapshot=None,
+                ),
+            ],
+        )
+        (tmp_path / "config.yaml").write_text("model:\n  default: new-model\n")
+        monkeypatch.setattr("cron.jobs.get_hermes_home", lambda: tmp_path, raising=True)
+        with patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value={"provider": "openrouter"},
+        ):
+            updated = jobs_mod.resnapshot_all_unpinned()
+
+        ids = [j["id"] for j in updated]
+        assert ids == ["j1"], "only the unpinned agent job is refreshed"
+        by_id = {j["id"]: j for j in store}
+        assert by_id["j1"]["model_snapshot"] == "new-model"
+        assert by_id["j1"]["provider_snapshot"] == "openrouter"
+        # no_agent job keeps its (irrelevant) old snapshot untouched.
+        assert by_id["j2"]["model_snapshot"] == "old"
+        # pinned job keeps None.
+        assert by_id["j3"]["model_snapshot"] is None
+
