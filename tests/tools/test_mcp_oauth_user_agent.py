@@ -1,9 +1,10 @@
-"""Tests for the per-server ``oauth.user_agent`` on MCP OAuth token requests.
+"""Tests for User-Agent handling on MCP OAuth requests.
 
 Some authorization servers and WAFs reject httpx's default User-Agent on the
-token endpoint (#75576). The header is opt-in, per-server, and applied ONLY to
-the two token-endpoint requests (authorization-code exchange and refresh) —
-never to MCP traffic or discovery.
+token endpoint (#75576), while others reject SDK-generated discovery requests
+that omit User-Agent entirely. ``oauth.user_agent`` remains an opt-in token
+request override; other OAuth auxiliary requests receive a safe default without
+changing MCP traffic.
 
 The tests drive the REAL provider classes' request builders end to end: the
 ``httpx.Request`` the SDK would send is what gets inspected, not a mocked
@@ -96,7 +97,9 @@ def _ready_for_token_requests(provider):
 def _build_provider_via(builder, monkeypatch, tmp_path, cfg):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     _set_interactive_stdin(monkeypatch)
-    return builder("srv", "https://mcp.example.com/mcp", cfg)
+    return builder(
+        "srv", "https://mcp.example.com/mcp", {"redirect_port": 33333, **cfg}
+    )
 
 
 def _manager_builder(server_name, server_url, cfg):
@@ -104,6 +107,69 @@ def _manager_builder(server_name, server_url, cfg):
 
     reset_manager_for_tests()
     return MCPOAuthManager().get_or_build_provider(server_name, server_url, cfg)
+
+
+@pytest.mark.parametrize("builder", [
+    pytest.param(build_oauth_auth, id="build_oauth_auth"),
+    pytest.param(_manager_builder, id="oauth_manager"),
+])
+def test_sdk_metadata_and_registration_requests_have_a_nonempty_default_user_agent(
+    builder, tmp_path, monkeypatch
+):
+    """A WAF must not reject the SDK's raw discovery or DCR requests."""
+    from tools.mcp_tool import sdk_httpx
+
+    httpx = sdk_httpx()
+    assert httpx is not None
+    provider = _build_provider_via(builder, monkeypatch, tmp_path, {})
+    resource_request = httpx.Request("POST", "https://mcp.example.com/mcp")
+
+    async def oauth_auxiliary_requests():
+        flow = provider.async_auth_flow(resource_request)
+        try:
+            outgoing_resource = await flow.__anext__()
+            assert outgoing_resource is resource_request
+            assert "User-Agent" not in outgoing_resource.headers
+            unauthorized = httpx.Response(401, request=resource_request)
+            prm_request = await flow.asend(unauthorized)
+            asm_request = await flow.asend(httpx.Response(
+                200,
+                request=prm_request,
+                json={
+                    "resource": "https://mcp.example.com",
+                    "authorization_servers": ["https://auth.example.com"],
+                },
+            ))
+            registration_request = await flow.asend(httpx.Response(
+                200,
+                request=asm_request,
+                json={
+                    "issuer": "https://auth.example.com",
+                    "authorization_endpoint": "https://auth.example.com/authorize",
+                    "token_endpoint": "https://auth.example.com/token",
+                    "registration_endpoint": "https://auth.example.com/register",
+                    "response_types_supported": ["code"],
+                },
+            ))
+            return prm_request, asm_request, registration_request
+        finally:
+            await flow.aclose()
+
+    prm_request, asm_request, registration_request = asyncio.run(
+        oauth_auxiliary_requests()
+    )
+
+    assert [request.method for request in (prm_request, asm_request, registration_request)] == [
+        "GET", "GET", "POST",
+    ]
+    assert all(
+        request.headers.get("User-Agent", "").strip()
+        for request in (prm_request, asm_request, registration_request)
+    )
+    assert prm_request.headers.get("MCP-Protocol-Version")
+    assert asm_request.headers.get("MCP-Protocol-Version")
+    assert registration_request.headers.get("Content-Type") == "application/json"
+    assert str(registration_request.url) == "https://auth.example.com/register"
 
 
 @pytest.mark.parametrize("builder", [
@@ -132,12 +198,10 @@ def test_token_requests_carry_the_configured_user_agent(
     pytest.param(build_oauth_auth, id="build_oauth_auth"),
     pytest.param(_manager_builder, id="oauth_manager"),
 ])
-def test_unconfigured_user_agent_leaves_the_default_header(
+def test_unconfigured_token_requests_get_a_nonempty_default_user_agent(
     builder, tmp_path, monkeypatch
 ):
-    """No config → httpx's own default, exactly as before the feature."""
-    import httpx
-
+    """No config still produces WAF-compatible token requests."""
     provider = _build_provider_via(builder, monkeypatch, tmp_path, {})
     _ready_for_token_requests(provider)
 
@@ -146,9 +210,8 @@ def test_unconfigured_user_agent_leaves_the_default_header(
     )
     refresh = asyncio.run(provider._refresh_token())
 
-    default_ua = httpx.Request("POST", "https://x.example/").headers.get("User-Agent")
-    assert exchange.headers.get("User-Agent") == default_ua
-    assert refresh.headers.get("User-Agent") == default_ua
+    assert exchange.headers.get("User-Agent", "").strip()
+    assert refresh.headers.get("User-Agent", "").strip()
 
 
 def test_user_agent_does_not_disturb_token_auth_preparation(tmp_path, monkeypatch):

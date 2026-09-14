@@ -351,7 +351,10 @@ async def test_initialize_prefetches_oauth_metadata_when_missing(
     # MockTransport that mimics BetterStack's split-origin discovery:
     #   PRM at mcp.example.com/.well-known/oauth-protected-resource -> points to auth.example.com
     #   ASM at auth.example.com/.well-known/oauth-authorization-server -> token_endpoint at auth.example.com/oauth/token
+    discovery_requests: list[httpx.Request] = []
+
     def mock_handler(request: httpx.Request) -> httpx.Response:
+        discovery_requests.append(request)
         url = str(request.url)
         if url.endswith("/.well-known/oauth-protected-resource"):
             return httpx.Response(
@@ -418,6 +421,11 @@ async def test_initialize_prefetches_oauth_metadata_when_missing(
     )
     assert str(provider.context.oauth_metadata.token_endpoint) == (
         "https://auth.example.com/oauth/token"
+    )
+    assert discovery_requests
+    assert all(
+        request.headers.get("User-Agent", "").strip()
+        for request in discovery_requests
     )
 
 

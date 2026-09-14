@@ -15,11 +15,15 @@ if TYPE_CHECKING:
     from tools.mcp_oauth import HermesTokenStorage
 logger = logging.getLogger(__name__)
 
+_DEFAULT_OAUTH_USER_AGENT = "HermesAgent/1.0"
+
 
 class HermesProviderMixin:
-    """Token-endpoint fixes layered over the SDK's ``OAuthClientProvider`` (must precede it in
+    """OAuth request fixes layered over the SDK's ``OAuthClientProvider`` (must precede it in
     the MRO; subclasses set ``_hermes_logger`` to keep their own logger name).
 
+    - SDK-generated OAuth auxiliary requests receive a default ``User-Agent`` when absent;
+      the original MCP resource request is never changed.
     - Supabase-style dynamic registration returns a ``client_secret`` but omits
       ``token_endpoint_auth_method``; the SDK then treats the client as public and the token
       endpoint rejects the exchange (looping the browser page) — coerce ``client_secret_post``.
@@ -47,12 +51,33 @@ class HermesProviderMixin:
                 "background reconnects cannot start a device login")
         return await super()._perform_authorization()
 
+    def _prepare_oauth_request(self, request):
+        """Add the safe default User-Agent only when the request has none."""
+        if not request.headers.get("User-Agent", "").strip():
+            request.headers["User-Agent"] = _DEFAULT_OAUTH_USER_AGENT
+        return request
+
     def _prepare_token_request(self, request):
         """Stamp the configured User-Agent onto a token/refresh request."""
         ua = getattr(self, "_hermes_token_user_agent", None)  # tests build via __new__
         if ua:
             request.headers["User-Agent"] = ua
-        return request
+        return self._prepare_oauth_request(request)
+
+    async def async_auth_flow(self, request):  # type: ignore[override]
+        """Stamp every SDK-generated OAuth request without altering MCP traffic."""
+        inner = super().async_auth_flow(request)
+        try:
+            outgoing = await inner.__anext__()
+            while True:
+                if outgoing is not request:
+                    self._prepare_oauth_request(outgoing)
+                incoming = yield outgoing
+                outgoing = await inner.asend(incoming)
+        except StopAsyncIteration:
+            return
+        finally:
+            await inner.aclose()
 
     def _coerce_client_secret_post(self) -> None:
         """Same rule as ``HermesTokenStorage._coerce_secret_auth_method``, applied to the
