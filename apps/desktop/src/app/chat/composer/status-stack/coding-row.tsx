@@ -1,3 +1,4 @@
+import { compactNumber } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
 import { memo, useEffect } from 'react'
 
@@ -18,7 +19,6 @@ import { DiffCount } from '@/components/ui/diff-count'
 import type { HermesGitBranch } from '@/global'
 import { useI18n } from '@/i18n'
 import { displayPath } from '@/lib/display-path'
-import { compactNumber } from '@/lib/format'
 import { openWorktreeDialog, registerRepoStatusCwd, repoStatusForCwd, repoWorktreesForCwd } from '@/store/coding-status'
 import { notifyError } from '@/store/notifications'
 import { $pullRequestsByBranch, branchPrKey, refreshPullRequests } from '@/store/pull-requests'
