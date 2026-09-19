@@ -1,6 +1,6 @@
 """OpenAI-compatible API server platform adapter (aiohttp).
 
-Serves /v1/chat/completions, /v1/responses, /v1/models, /v1/profiles, /v1/capabilities, /api/sessions,
+Serves /v1/chat/completions, /v1/responses, /v1/models, /v1/capabilities, /api/sessions,
 /v1/runs, /api/jobs and /health* (full table: ``APIServerAdapter._http_route_table``); any
 OpenAI-compatible frontend connects at http://localhost:8642/v1 with API_SERVER_KEY. Under
 ``gateway.multiplex_profiles`` secondary profiles live at ``/p/<profile>/...``.
@@ -67,10 +67,9 @@ _BROWSER_CONTROL_PROTOCOL_VERSION = 1
 _STATIC_FEATURE_FLAGS = {
     "run_status": True, "run_events_sse": True, "run_stop": True, "run_steer": True,
     "run_approval_response": True, "tool_progress_events": True, "approval_events": True,
-    "chat_completions_tool_output_events": True,
-    "chat_completions_reasoning_summary_events": True,
     "session_resources": True, "model_options": True, "session_chat": True,
     "session_chat_streaming": True, "session_fork": True, "session_model_lock": True,
+    "reasoning_streaming": True,
     "admin_config_rw": False, "jobs_admin": False, "memory_write_api": False,
     "skills_api": True, "audio_api": False, "realtime_voice": False,
     "session_continuity_header": "X-Hermes-Session-Id",
@@ -78,19 +77,14 @@ _STATIC_FEATURE_FLAGS = {
 # /v1/capabilities "endpoints" table: name -> (method, path).
 _CAPABILITY_ENDPOINTS = (
     ("health", ("GET", "/health")), ("health_detailed", ("GET", "/health/detailed")),
-    ("models", ("GET", "/v1/models")), ("profiles", ("GET", "/v1/profiles")),
-    ("model_options", ("GET", "/api/model/options")),
+    ("models", ("GET", "/v1/models")), ("model_options", ("GET", "/api/model/options")),
     ("chat_completions", ("POST", "/v1/chat/completions")),
     ("responses", ("POST", "/v1/responses")), ("runs", ("POST", "/v1/runs")),
     ("run_status", ("GET", "/v1/runs/{run_id}")),
     ("run_events", ("GET", "/v1/runs/{run_id}/events")),
     ("run_approval", ("POST", "/v1/runs/{run_id}/approval")),
     ("run_steer", ("POST", "/v1/runs/{run_id}/steer")),
-    ("run_stop", ("POST", "/v1/runs/{run_id}/stop")),
-    ("approvals", ("GET", "/v1/approvals")),
-    ("approval_resolve", ("POST", "/v1/approvals/resolve")),
-    ("request_cancel", ("POST", "/v1/requests/{request_id}/cancel")),
-    ("skills", ("GET", "/v1/skills")),
+    ("run_stop", ("POST", "/v1/runs/{run_id}/stop")), ("skills", ("GET", "/v1/skills")),
     ("toolsets", ("GET", "/v1/toolsets")), ("sessions", ("GET", "/api/sessions")),
     ("session_create", ("POST", "/api/sessions")),
     ("session", ("GET", "/api/sessions/{session_id}")),
@@ -123,6 +117,7 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.display_config import resolve_display_setting
 from gateway.platforms import api_server_room_dispatch as _room_dispatch
 from gateway.platforms import api_server_room_grants as _room_grants
 from gateway.platforms import api_server_runs as _api_runs
@@ -811,9 +806,7 @@ class ResponseStore:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": (
-        "Authorization, Content-Type, Idempotency-Key, X-Hermes-Request-Id, "
-        "X-Hermes-Session-Id, X-Hermes-Session-Key")}
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key, X-Hermes-Session-Id"}
 _SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
@@ -1094,6 +1087,16 @@ class _ProviderAuthResolutionError(RuntimeError):
     """Provider credential resolution failed. Typed so callers never mislabel other
     RuntimeErrors from run_conversation() (e.g. a closed OpenAI client) as auth failures."""
 
+    def user_text(self) -> str:
+        """Raw-surface failure line. A quota/429 cap with valid credentials must not be labelled an
+        authentication failure — the cause chain (RuntimeError -> AuthError) tells them apart (#89401)."""
+        from hermes_cli.auth import is_rate_limited_auth_error
+
+        cause = self.__cause__
+        cause = getattr(cause, "__cause__", None) if isinstance(cause, RuntimeError) else cause
+        label = "Provider rate-limited" if is_rate_limited_auth_error(cause) else "Provider authentication failed"
+        return f"⚠️ {label}: {self}"
+
 
 class _SessionEventQueue:
     """Ordered SSE event queue for one /api/sessions/{id}/chat/stream run. ``payload`` stamps
@@ -1158,6 +1161,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     # restored — what next?", so a resumed turn should complete the interrupted work rather than acknowledge
     # (#57056).
     interactive_resume: bool = False
+    # Opt-in cap (chars) on tool outputs / tool-call arguments in the stored /v1/responses
+    # transcript; 0 = store verbatim (gateway.api_server.history_tool_output_max_chars, #82513).
+    _history_tool_output_max_chars: int = 0
 
     # Admission-gated OpenAI-compatible entry points (bodies live in the mixin).
     _handle_chat_completions = _admit_api_agent_request(OpenAICompatRoutesMixin._handle_chat_completions)
@@ -1188,11 +1194,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self._site: Optional["web.TCPSite"] = None
         self._response_store = ResponseStore()
         _api_runs._initialize_run_state(self, store_factory=RunIdempotencyStore)
-        # OpenAI-compatible requests opt into explicit cancellation with
-        # X-Hermes-Request-Id, then POST /v1/requests/{request_id}/cancel.
-        self._active_api_agents: Dict[str, Any] = {}
-        self._active_api_agent_refs: Dict[str, list] = {}
-        self._active_api_tasks: Dict[str, "asyncio.Task"] = {}
         self._session_db: Optional[Any] = None  # explicit override (tests/manual wiring)
         self._session_dbs: Dict[str, Any] = {}  # per-profile-home SessionDB cache
         self._session_db_cache_lock = threading.Lock()
@@ -1202,6 +1203,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self._last_resolved_model: Dict[str, str] = {}
         self._session_db_lock: Optional[asyncio.Lock] = None  # single-flight for lazy init
         self._max_concurrent_runs: int = self._resolve_max_concurrent_runs()  # 0 disables
+        self._history_tool_output_max_chars = self._resolve_api_server_int(
+            "history_tool_output_max_chars", default=0)
         # In-flight _run_agent() turns (/v1/runs tracks its own via _active_run_tasks).
         # Concurrency cap shared across all agent-serving endpoints (/v1/chat/completions, /v1/responses,
         # /v1/runs, /api/sessions/{id}/chat[/stream]). Read from config.yaml
@@ -1304,12 +1307,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     @staticmethod
     def _resolve_max_concurrent_runs() -> int:
         """gateway.api_server.max_concurrent_runs (0 disables; default 10; negatives -> 0)."""
-        default = 10
+        return APIServerAdapter._resolve_api_server_int("max_concurrent_runs", default=10)
+
+    @staticmethod
+    def _resolve_api_server_int(key: str, *, default: int) -> int:
+        """Integer setting under gateway.api_server (unreadable config -> default; negatives -> 0)."""
         try:
             from hermes_cli.config import cfg_get, load_config
-            raw = cfg_get(
-                load_config(), "gateway", "api_server", "max_concurrent_runs", default=default)
-            value = int(raw)
+            value = int(cfg_get(load_config(), "gateway", "api_server", key, default=default))
         except Exception:
             return default
         return max(0, value)
@@ -1326,83 +1331,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             if profile and profile not in {"default", "custom"}:
                 profile_name = profile
         return resolve_effective_model(explicit, profile_name, "hermes-agent")
-
-    @staticmethod
-    def _normalize_api_request_id(value: Any) -> str:
-        """Return a safe client-supplied cancellation id or an empty string."""
-        request_id = str(value or "").strip()
-        if not request_id or len(request_id) > 128:
-            return ""
-        if re.search(r"[\r\n\x00]", request_id):
-            return ""
-        if not re.fullmatch(r"[A-Za-z0-9_.:-]+", request_id):
-            return ""
-        return request_id
-
-    def _track_api_request(self, request_id: str, agent_ref: list, task: "asyncio.Task") -> None:
-        """Track an active chat/responses request for explicit cancellation."""
-        request_id = self._normalize_api_request_id(request_id)
-        if not request_id:
-            return
-        self._active_api_agent_refs[request_id] = agent_ref
-        self._active_api_tasks[request_id] = task
-
-        def _cleanup(done_task):
-            if self._active_api_tasks.get(request_id) is done_task:
-                self._active_api_tasks.pop(request_id, None)
-                self._active_api_agents.pop(request_id, None)
-                self._active_api_agent_refs.pop(request_id, None)
-
-        task.add_done_callback(_cleanup)
-
-    @staticmethod
-    def _profile_reasoning_supported(model: Optional[str], provider: Optional[str]) -> bool:
-        """Return whether a profile's selected model appears to support reasoning."""
-        raw_model = (model or "").strip()
-        if not raw_model:
-            return False
-        try:
-            from agent.models_dev import get_model_capabilities
-            caps = get_model_capabilities((provider or "").strip(), raw_model)
-            if caps is not None and bool(getattr(caps, "supports_reasoning", False)):
-                return True
-        except Exception as exc:
-            logger.debug(
-                "Unable to resolve reasoning capabilities for profile model %s/%s: %s",
-                provider, model, exc)
-
-        value = raw_model.lower()
-        exact = {
-            "o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini",
-            "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5.1", "gpt-5.1-codex",
-            "gpt-5.5", "gpt-5.5-pro"}
-        if value in exact:
-            return True
-        prefixes = (
-            "openai/o", "openai/gpt-5", "gpt-5",
-            "anthropic/claude-3.7", "anthropic/claude-sonnet-4", "anthropic/claude-opus-4",
-            "anthropic/claude-haiku-4", "google/gemini-2.5", "google/gemini-3",
-            "gemini-2.5", "gemini-3", "x-ai/grok-3", "x-ai/grok-4", "grok-3", "grok-4",
-            "deepseek/deepseek-r1", "deepseek/deepseek-v3.1", "deepseek/deepseek-v4",
-            "qwen/qwq", "qwen/qwen3", "qwen/qwen-plus", "qwen/qwen-max",
-            "moonshotai/kimi", "z-ai/glm-4.5", "z-ai/glm-5", "minimax/minimax-m2",
-            "mistralai/mistral-medium", "nvidia/nemotron", "arcee-ai/trinity", "perceptron/")
-        if any(value.startswith(prefix) for prefix in prefixes):
-            return True
-        markers = (
-            "-thinking", ":thinking", "thinking", "reasoning", "deepseek-r1", "qwq", "qwen3",
-            "gemini-2.5", "gemini-3", "claude-3.7", "claude-sonnet-4", "claude-opus-4",
-            "grok-3", "grok-4")
-        provider_value = (provider or "").lower()
-        return any(marker in value for marker in markers) or (
-            "openai" in provider_value and value.startswith("o"))
-
-    @classmethod
-    def _profile_supported_parameters(
-        cls, model: Optional[str], provider: Optional[str]) -> list[str]:
-        """Build OpenAI/OpenRouter-style parameter hints for a profile."""
-        return ["reasoning", "reasoning_effort"] if cls._profile_reasoning_supported(
-            model, provider) else []
 
     def _cors_headers_for_origin(self, origin: str) -> Optional[Dict[str, str]]:
         """Return CORS headers for an allowed browser origin."""
@@ -1650,12 +1578,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("GET", "/health/detailed", self._handle_health_detailed),
             ("GET", "/v1/health", self._handle_health),
             ("GET", "/v1/models", self._handle_models),
-            ("GET", "/v1/profiles", self._handle_profiles),
             ("GET", "/api/model/options", self._handle_model_options),
             ("GET", "/v1/capabilities", self._handle_capabilities),
-            ("GET", "/v1/approvals", self._handle_approvals),
-            ("POST", "/v1/approvals/resolve", self._handle_approval_resolve),
-            ("POST", "/v1/approvals/{session_key}/resolve", self._handle_approval_resolve),
             # Browser-control (gated on browser.extension_control.enabled + API key): POST
             # mints a short-lived ticket, WS consumes it; artifacts are bounded + scope-bound.
             ("POST", "/v1/browser-control/register", self._handle_browser_control_register),
@@ -1678,7 +1602,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("POST", "/v1/responses", self._handle_responses),
             ("GET", "/v1/responses/{response_id}", self._handle_get_response),
             ("DELETE", "/v1/responses/{response_id}", self._handle_delete_response),
-            ("POST", "/v1/requests/{request_id}/cancel", self._handle_cancel_request),
             # Platform event ingress: authenticated by the target adapter's own verifier,
             # NOT API_SERVER_KEY (external platforms hold no API server key).
             ("POST", "/api/platforms/{platform}/events", self._handle_platform_event_callback),
@@ -1757,14 +1680,17 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _parse_session_key_header(
         self, request: "web.Request") -> tuple[Optional[str], Optional["web.Response"]]:
         """Validate ``X-Hermes-Session-Key`` (per-channel memory scope) -> ``(key_or_None, None)``
-        or ``(None, error)``.
-
-        Local divergence: no-key mode is intentionally allowed for Laurent's VPN-local workflow.
-        Production ``connect()`` still requires an API key for non-loopback exposure.
-        """
+        or ``(None, error)``. Requires API-key auth so a client can't guess another scope."""
         raw = request.headers.get("X-Hermes-Session-Key", "").strip()
         if not raw:
             return None, None
+        if not self._api_key:
+            logger.warning(
+                "X-Hermes-Session-Key rejected: no API key configured. "
+                "Set API_SERVER_KEY to enable long-term memory scoping.")
+            return None, _error_response(
+                "X-Hermes-Session-Key requires API key authentication. "
+                "Configure API_SERVER_KEY to enable this feature.", 403)
         # Control characters could enable header injection on the echo path.
         if re.search(r'[\r\n\x00]', raw):
             return None, _invalid_request("Invalid session key")
@@ -1840,21 +1766,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         except Exception as e:
             logger.debug("SessionDB unavailable for API server: %s", e)
             return None
-
-    def _maybe_auto_title_api_session(
-        self, session_id: Optional[str], assistant_response: str,
-        conversation_history: Optional[List[Dict[str, Any]]] = None,
-    ) -> None:
-        """Schedule a title for an API-created session from its first response."""
-        if not session_id or not assistant_response:
-            return
-        try:
-            from agent.title_generator import maybe_auto_title_from_response
-            maybe_auto_title_from_response(
-                self._ensure_session_db(), session_id, assistant_response,
-                conversation_history or [])
-        except Exception:
-            logger.debug("Failed to schedule API session auto-title", exc_info=True)
 
     # -- Agent creation ---------------------------------------------------------------
 
@@ -2255,8 +2166,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _create_agent(
         self, ephemeral_system_prompt: Optional[str] = None, session_id: Optional[str] = None,
         stream_delta_callback=None, tool_progress_callback=None, tool_start_callback=None,
-        tool_complete_callback=None, reasoning_callback=None,
-        gateway_session_key: Optional[str] = None,
+        tool_complete_callback=None, interim_assistant_callback=None, reasoning_callback=None,
+        status_callback=None, gateway_session_key: Optional[str] = None,
         requested_model: Optional[str] = None, requested_provider: Optional[str] = None,
         model_options: Optional[Dict[str, Any]] = None, route: Optional[Dict[str, Any]] = None,
         session_model: Optional[str] = None, confirmed_runtime_lock: bool = False,
@@ -2280,6 +2191,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # A fallback-provider runtime carries its own ``model``: pop it (overrides config, and
         # must not collide with the ``**runtime_kwargs`` spread).
         model = runtime_kwargs.pop("model", None) or _resolve_gateway_model()
+        runtime_kwargs.pop("_fallback_notice", None)  # raw API surface: the switch is already logged
         request_reasoning_config = _request_reasoning_config(model_options)
         request_service_tier = _request_service_tier(model_options)
         model, session_override, request_model, request_provider = self._select_agent_runtime(
@@ -2289,6 +2201,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             gateway_session_key=gateway_session_key, session_id=session_id)
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+        # Same gate the messaging gateway and TUI apply: ``display.interim_assistant_messages``
+        # off means no callback is installed, so mid-turn commentary never leaves the agent.
+        if not resolve_display_setting(user_config, "api_server", "interim_assistant_messages", True):
+            interim_assistant_callback = None
         max_iterations = _current_max_iterations()
         if room_dispatch is not None:
             from gateway.hosted_room_execution_policy import RoomExecutionPolicy
@@ -2309,7 +2225,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "tool_progress_callback": tool_progress_callback,
             "tool_start_callback": tool_start_callback,
             "tool_complete_callback": tool_complete_callback,
+            "interim_assistant_callback": interim_assistant_callback,
             "reasoning_callback": reasoning_callback,
+            "status_callback": status_callback,
             "session_db": self._ensure_session_db(),
             # Same fallback provider chain as Telegram/Discord/Slack.
             "fallback_model": None if confirmed_runtime_lock else GatewayRunner._load_fallback_model(),
@@ -2379,110 +2297,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             _model(alias, route_cfg.get("model", alias), model_name)
             for alias, route_cfg in self._model_routes.items() if alias != model_name)
         return web.json_response({"object": "list", "data": models})
-
-    @_require_auth
-    async def _handle_profiles(self, request: "web.Request") -> "web.Response":
-        """GET /v1/profiles — list profiles available to multiplex API clients."""
-        try:
-            from hermes_cli.profiles import list_profiles
-            profiles = list_profiles()
-        except Exception as exc:
-            logger.error("Error listing Hermes profiles: %s", exc, exc_info=True)
-            return _error_response(
-                f"Unable to list Hermes profiles: {exc}", 500, err_type="server_error")
-
-        data = []
-        for profile in profiles:
-            supported_parameters = self._profile_supported_parameters(
-                profile.model, profile.provider)
-            supports_reasoning = any(
-                parameter in {"reasoning", "reasoning_effort"}
-                for parameter in supported_parameters)
-            data.append({
-                "id": profile.name,
-                "object": "hermes.profile",
-                "name": profile.name,
-                "is_default": profile.is_default,
-                "model": profile.model,
-                "provider": profile.provider,
-                "gateway_running": profile.gateway_running,
-                "skill_count": profile.skill_count,
-                "supported_parameters": supported_parameters,
-                "supports_reasoning": supports_reasoning,
-                "reasoning": {
-                    "supported": supports_reasoning,
-                    "effort_levels": ["low", "medium", "high"] if supports_reasoning else []},
-            })
-        return web.json_response({"object": "list", "data": data})
-
-    @_require_auth
-    async def _handle_approvals(self, request: "web.Request") -> "web.Response":
-        """GET /v1/approvals — list pending approval requests in this process."""
-        try:
-            from tools.approval import snapshot_gateway_approvals
-            approvals = snapshot_gateway_approvals()
-        except Exception as exc:
-            logger.exception("[api_server] approval listing failed")
-            return _error_response(str(exc), 500, err_type="server_error")
-        return web.json_response({
-            "object": "hermes.approval_list", "approvals": approvals, "count": len(approvals)})
-
-    @_require_auth
-    async def _handle_approval_resolve(self, request: "web.Request") -> "web.Response":
-        """Resolve a pending approval by session key (FIFO unless resolve_all)."""
-        try:
-            body = await request.json()
-        except Exception:
-            return _error_response("Invalid JSON", 400)
-        session_key = str(
-            body.get("session_key") or request.match_info.get("session_key") or "").strip()
-        if not session_key:
-            return _error_response("session_key is required", 400)
-        raw_choice = str(body.get("choice") or "").strip().lower()
-        choice = {"approve": "once", "allow": "once", "yes": "once", "no": "deny"}.get(
-            raw_choice, raw_choice)
-        if choice not in {"once", "session", "always", "deny"}:
-            return _error_response(
-                "choice must be one of: once, session, always, deny", 400,
-                code="invalid_approval_choice")
-        resolve_all = any(
-            _coerce_request_bool(body.get(key), default=False) for key in ("all", "resolve_all"))
-        try:
-            from tools.approval import resolve_gateway_approval
-            resolved = resolve_gateway_approval(session_key, choice, resolve_all=resolve_all)
-        except Exception as exc:
-            logger.exception("[api_server] approval resolution failed for session %s", session_key)
-            return _error_response(str(exc), 500)
-        if resolved <= 0:
-            return _error_response(
-                f"No pending approval for session: {session_key}", 404,
-                code="approval_not_pending")
-        return web.json_response({
-            "object": "hermes.approval_response", "session_key": session_key,
-            "choice": choice, "resolve_all": resolve_all, "resolved": resolved})
-
-    @_require_auth
-    async def _handle_cancel_request(self, request: "web.Request") -> "web.Response":
-        """Interrupt an active Chat Completions or Responses request by client id."""
-        request_id = self._normalize_api_request_id(request.match_info.get("request_id", ""))
-        if not request_id:
-            return _error_response("Invalid request id", 400, code="invalid_request_id")
-
-        agent = self._active_api_agents.get(request_id)
-        agent_ref = self._active_api_agent_refs.get(request_id)
-        if agent is None and agent_ref:
-            with suppress(Exception):
-                agent = agent_ref[0]
-        task = self._active_api_tasks.get(request_id)
-        if agent is None and task is None:
-            return _error_response(
-                f"Request not found: {request_id}", 404, code="request_not_found")
-        if agent is not None:
-            with suppress(Exception):
-                agent.interrupt("Cancel requested via API")
-        if task is not None and not task.done():
-            task.cancel()
-        return web.json_response({"request_id": request_id, "status": "cancelling"})
 
     @_require_auth
     async def _handle_model_options(self, request: "web.Request") -> "web.Response":
@@ -3437,6 +3251,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             elif event_type in {"tool.started", "tool.completed", "tool.failed"}:
                 events.enqueue(event_type, {"message_id": message_id, "tool_name": tool_name, "preview": preview, "args": args})
 
+        def _commentary(text: str, *, already_streamed: bool = False) -> None:
+            # Mid-turn assistant commentary (Codex ``phase="commentary"``, text beside tool calls)
+            # as its own typed event — never folded into ``assistant.completed`` (#67580).
+            if isinstance(text, str) and text.strip():
+                events.enqueue("assistant.commentary", {
+                    "message_id": message_id, "text": text, "already_streamed": bool(already_streamed)})
+
         async def _run_and_signal() -> None:
             try:
                 await queue.put(_event_payload("run.started", {
@@ -3447,7 +3268,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 history = await self._conversation_history_for_session(session_id)
                 result, usage = await self._run_agent(
                     conversation_history=history, stream_delta_callback=_delta,
-                    tool_progress_callback=_tool_progress, active_run_id=run_id, **ctx["run_kwargs"])
+                    tool_progress_callback=_tool_progress, interim_assistant_callback=_commentary,
+                    active_run_id=run_id, **ctx["run_kwargs"])
                 is_dict = isinstance(result, dict)
                 final_response = _resolve_media_to_data_urls(result.get("final_response", "") if is_dict else "")
                 effective_session_id = result.get("session_id", session_id) if is_dict else session_id
@@ -3945,8 +3767,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self, user_message: str, conversation_history: List[Dict[str, str]],
         ephemeral_system_prompt: Optional[str] = None, session_id: Optional[str] = None,
         stream_delta_callback=None, tool_progress_callback=None, tool_start_callback=None,
-        tool_complete_callback=None, reasoning_callback=None,
-        agent_ref: Optional[list] = None, active_run_id: Optional[str] = None,
+        tool_complete_callback=None, interim_assistant_callback=None, reasoning_callback=None,
+        status_callback=None, agent_ref: Optional[list] = None, active_run_id: Optional[str] = None,
         gateway_session_key: Optional[str] = None, requested_model: Optional[str] = None,
         requested_provider: Optional[str] = None, model_options: Optional[Dict[str, Any]] = None,
         route: Optional[Dict[str, Any]] = None, session_model: Optional[str] = None,
@@ -3986,7 +3808,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         ephemeral_system_prompt=ephemeral_system_prompt, session_id=session_id,
                         stream_delta_callback=stream_delta_callback, tool_progress_callback=tool_progress_callback,
                         tool_start_callback=tool_start_callback, tool_complete_callback=tool_complete_callback,
-                        reasoning_callback=reasoning_callback,
+                        interim_assistant_callback=interim_assistant_callback,
+                        reasoning_callback=reasoning_callback, status_callback=status_callback,
                         gateway_session_key=gateway_session_key, requested_model=requested_model,
                         requested_provider=requested_provider, model_options=model_options, route=route,
                         session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock)
@@ -4032,10 +3855,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 except _ProviderAuthResolutionError as exc:
                     # Typed provider-auth failure only, handled once for every caller in
                     # run.py's response shape (text, no HTTP error).
-                    logger.warning("Provider authentication failed for session=%s: %s",
+                    logger.warning("Provider resolution failed for session=%s: %s",
                                    session_id or "", exc)
                     return (
-                        {"final_response": f"⚠️ Provider authentication failed: {exc}", "messages": [],
+                        {"final_response": exc.user_text(), "messages": [],
                          "api_calls": 0, "tools": [],
                          **({"_notification_presentation_suppressed": True} if muted else {})},
                         {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
