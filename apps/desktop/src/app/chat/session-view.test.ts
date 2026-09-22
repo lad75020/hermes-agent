@@ -2,7 +2,7 @@ import { cleanup } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { createClientSessionState } from '@/lib/chat-runtime'
-import { $activeSessionId, $busy, $messages, $selectedStoredSessionId } from '@/store/session'
+import { $activeSessionId, $busy, $currentUsage, $messages, $selectedStoredSessionId } from '@/store/session'
 import { $sessionStates, dropSessionState, publishSessionState } from '@/store/session-states'
 
 import { PRIMARY_SESSION_VIEW } from './session-view'
@@ -35,6 +35,7 @@ describe('primary session view reads its own session slice', () => {
     $selectedStoredSessionId.set(null)
     $messages.set([])
     $busy.set(false)
+    $currentUsage.set({ calls: 0, input: 0, output: 0, total: 0 })
   })
 
   afterEach(cleanup)
@@ -65,14 +66,28 @@ describe('primary session view reads its own session slice', () => {
     expect(PRIMARY_SESSION_VIEW.$busy.get()).toBe(false)
   })
 
+  it('shows usage from the active session slice instead of the global draft mirror', () => {
+    $currentUsage.set({ calls: 9, input: 900, output: 90, total: 990 })
+    publishSessionState('runtime-foreground', {
+      ...stateWith('runtime-foreground', 'foreground turn', false),
+      usage: { calls: 2, input: 200, output: 20, total: 220 }
+    })
+
+    $activeSessionId.set('runtime-foreground')
+
+    expect(PRIMARY_SESSION_VIEW.$usage.get()).toEqual({ calls: 2, input: 200, output: 20, total: 220 })
+  })
+
   it('falls back to the draft atoms while the chat has no runtime session yet', () => {
     $messages.set([message('draft-msg', 'unsent draft')])
     $busy.set(true)
+    $currentUsage.set({ calls: 1, input: 100, output: 10, total: 110 })
 
     expect(PRIMARY_SESSION_VIEW.$runtimeId.get()).toBeNull()
     expect(PRIMARY_SESSION_VIEW.$messages.get()).toEqual([message('draft-msg', 'unsent draft')])
     expect(PRIMARY_SESSION_VIEW.$busy.get()).toBe(true)
     expect(PRIMARY_SESSION_VIEW.$messagesEmpty.get()).toBe(false)
+    expect(PRIMARY_SESSION_VIEW.$usage.get()).toEqual({ calls: 1, input: 100, output: 10, total: 110 })
   })
 
   it('does not mark B busy when A is still running and B has no slice yet', () => {

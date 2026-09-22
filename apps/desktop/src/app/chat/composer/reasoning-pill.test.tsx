@@ -31,7 +31,8 @@ const tileView = (reasoningEffort: string, reasoningEffortWire = ''): SessionVie
   $reasoningEffortWire: atom(reasoningEffortWire),
   $runtimeId: atom('tile-runtime'),
   $storedId: atom('stored-tile'),
-  $turnStartedAt: atom<number | null>(null)
+  $turnStartedAt: atom<number | null>(null),
+  $usage: atom({ calls: 0, input: 0, output: 0, total: 0 })
 })
 
 afterEach(() => {
