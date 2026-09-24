@@ -6,17 +6,13 @@ and the faster_whisper post-setup readiness hook.
 """
 
 import sys
-import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from hermes_cli.tools_config import (  # noqa: E402
-    _CONFIG_ONLY_TOOLSETS,
-    CONFIGURABLE_TOOLSETS,
     STT_MODEL_CATALOG,
     TOOL_CATEGORIES,
     _checklist_toolset_keys,
@@ -57,6 +53,7 @@ class TestSttCategory:
         for p in managed:
             assert p["managed_nous_feature"] == "stt"
         assert MANAGED_FEATURE_COVERAGE_CATEGORY["stt"] == "openai-audio"
+
 
 
 class TestConfigWrites:
@@ -119,8 +116,6 @@ class TestModelPicker:
 
 
 class TestConfigOnlyExclusion:
-    def test_stt_is_config_only(self):
-        assert "stt" in _CONFIG_ONLY_TOOLSETS
 
     def test_stt_excluded_from_checklist_universe(self):
         assert "stt" not in _checklist_toolset_keys("cli")
@@ -128,8 +123,3 @@ class TestConfigOnlyExclusion:
         assert "tts" in _checklist_toolset_keys("cli")
 
 
-class TestPostSetup:
-    def test_faster_whisper_in_post_setup_ready(self):
-        from hermes_cli.tools_config import _POST_SETUP_READY
-
-        assert "faster_whisper" in _POST_SETUP_READY

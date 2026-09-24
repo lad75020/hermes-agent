@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { ENUM_OPTIONS, FREE_INPUT_KEYS, SECTIONS } from './constants'
+import { FREE_INPUT_KEYS, SECTIONS } from './constants'
 import { voiceProviderKeys } from './voice-provider-fields'
 
 const voiceKeys = SECTIONS.find(s => s.id === 'voice')?.keys ?? []

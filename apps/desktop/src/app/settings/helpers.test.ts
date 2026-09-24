@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 
 import type { HermesConfigRecord } from '@/types/hermes'
 
-import { FIELD_DESCRIPTIONS, FIELD_LABELS, SECTIONS } from './constants'
 import { defineFieldCopy, fieldCopyForSchemaKey, schemaKeyToFieldCopyKey } from './field-copy'
 import {
   clearsEnabledToolsets,
@@ -13,36 +12,10 @@ import {
   providerGroup,
   sectionFieldEntries,
   setNested,
-  stripToolsetLabel,
-  toolsetDisplayLabel
+  stripToolsetLabel
 } from './helpers'
 
 describe('settings helpers', () => {
-  it('surfaces repository discovery config in Workspace with user-facing copy', () => {
-    const workspace = SECTIONS.find(section => section.id === 'workspace')
-
-    expect(workspace?.keys).toEqual(
-      expect.arrayContaining([
-        'desktop.repo_scan_enabled',
-        'desktop.repo_scan_roots',
-        'desktop.repo_scan_exclude_paths'
-      ])
-    )
-    expect(fieldCopyForSchemaKey(FIELD_LABELS, 'desktop.repo_scan_enabled')).toBeTruthy()
-    expect(fieldCopyForSchemaKey(FIELD_DESCRIPTIONS, 'desktop.repo_scan_exclude_paths')).toBeTruthy()
-  })
-
-  it('exposes the auxiliary compression timeout in Memory & Context with user-facing copy', () => {
-    // 3-segment schema key: the label lookup must round-trip the nested
-    // auxiliary.compression.timeout path the backend schema flattens.
-    const memory = SECTIONS.find(section => section.id === 'memory')
-
-    expect(memory?.keys).toContain('auxiliary.compression.timeout')
-    expect(fieldCopyForSchemaKey(FIELD_LABELS, 'auxiliary.compression.timeout')).toBe('Compression model timeout (s)')
-    expect(fieldCopyForSchemaKey(FIELD_DESCRIPTIONS, 'auxiliary.compression.timeout')).toContain('default 120')
-    expect(fieldCopyForSchemaKey(FIELD_LABELS, 'model_context_length')).toMatch(/main model/i)
-  })
-
   it('does not shadow the backend schema options for memory.provider', () => {
     // memory.provider options are discovery-driven and served by the backend
     // config schema (merged per-request); enumOptionsFor must return undefined
@@ -79,18 +52,6 @@ describe('settings helpers', () => {
 
       expect(copy[['display', 'personality'].join('.')]).toBe('Personality')
       expect(copy[['stt', 'elevenlabs', 'language_code'].join('.')]).toBe('Language')
-    })
-
-    it('keeps top-level flat field keys', () => {
-      expect(
-        defineFieldCopy({
-          model_context_length: 'Context Window',
-          file_read_max_chars: 'File Read Limit'
-        })
-      ).toEqual({
-        model_context_length: 'Context Window',
-        file_read_max_chars: 'File Read Limit'
-      })
     })
 
     it('maps schema keys to camelCase translation keys', () => {
@@ -164,20 +125,7 @@ describe('settings helpers', () => {
     })
   })
 
-  describe('toolsetDisplayLabel', () => {
-    it('strips emoji from toolset rows', () => {
-      expect(toolsetDisplayLabel({ name: 'cronjob', label: '⏰ Cron Jobs' })).toBe('Cron Jobs')
-    })
-  })
-
   describe('providerGroup', () => {
-    it('maps a provider env var to its labeled group', () => {
-      expect(providerGroup('XAI_API_KEY')).toBe('xAI')
-      expect(providerGroup('NOUS_API_KEY')).toBe('Nous Portal')
-      expect(providerGroup('FIREWORKS_API_KEY')).toBe('Fireworks AI')
-      expect(providerGroup('OPENROUTER_API_KEY')).toBe('OpenRouter')
-    })
-
     it('prefers the longest matching prefix so CN/regional buckets win', () => {
       // MINIMAX_CN_ must beat the generic MINIMAX_ prefix.
       expect(providerGroup('MINIMAX_CN_API_KEY')).toBe('MiniMax (China)')

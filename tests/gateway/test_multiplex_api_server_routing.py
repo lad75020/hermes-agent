@@ -77,6 +77,7 @@ class TestApiServerRouteTable:
         assert "/p/{profile}/api/sessions/{session_id}/model" in mirrored
 
 
+
 class TestApiServerModelsUnderProfile:
     def test_resolve_model_name_follows_active_profile(self, monkeypatch):
         """When the request is scoped to a named profile, advertise that name."""
