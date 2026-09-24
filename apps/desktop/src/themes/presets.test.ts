@@ -101,14 +101,14 @@ describe('GitHub Contrast', () => {
       [githubTheme.darkColors!, githubContrastTheme.darkColors!]
     ]) {
       expect(contrastRatio(contrast.foreground, contrast.background)).toBeGreaterThan(
-        contrastRatio(base.foreground, base.background) + 1
+        contrastRatio(base.foreground, base.background)! + 1
       )
       expect(contrastRatio(contrast.mutedForeground, contrast.muted)).toBeGreaterThan(
-        contrastRatio(base.mutedForeground, base.muted) + 2
+        contrastRatio(base.mutedForeground, base.muted)! + 2
       )
       expect(contrastRatio(contrast.border, contrast.background)).toBeGreaterThanOrEqual(3)
       expect(contrastRatio(contrast.border, contrast.background)).toBeGreaterThan(
-        contrastRatio(base.border, base.background) * 1.5
+        contrastRatio(base.border, base.background)! * 1.5
       )
     }
   })
