@@ -12,7 +12,6 @@ import {
   nousAltTheme
 } from './presets'
 
-
 // #40364: none of the UI text/mono fonts carry emoji glyphs, so every font
 // stack must end with a color-emoji fallback or emoji render as tofu on
 // platforms whose default font lacks them (e.g. Linux).
@@ -65,14 +64,14 @@ describe('GitHub Contrast', () => {
       [githubTheme.darkColors!, githubContrastTheme.darkColors!]
     ]) {
       expect(contrastRatio(contrast.foreground, contrast.background)).toBeGreaterThan(
-        contrastRatio(base.foreground, base.background) + 1
+        contrastRatio(base.foreground, base.background)! + 1
       )
       expect(contrastRatio(contrast.mutedForeground, contrast.muted)).toBeGreaterThan(
-        contrastRatio(base.mutedForeground, base.muted) + 2
+        contrastRatio(base.mutedForeground, base.muted)! + 2
       )
       expect(contrastRatio(contrast.border, contrast.background)).toBeGreaterThanOrEqual(3)
       expect(contrastRatio(contrast.border, contrast.background)).toBeGreaterThan(
-        contrastRatio(base.border, base.background) * 1.5
+        contrastRatio(base.border, base.background)! * 1.5
       )
     }
   })

@@ -148,6 +148,20 @@ def test_unpinned_job_agent_inherits_the_global_chain_mid_run(tmp_path):
     assert agent_kwargs["fallback_model"] == _CHAIN
 
 
+def test_no_fallback_job_never_uses_global_chain(tmp_path):
+    job = _job(no_fallback=True)
+    success, error, requested, agent_kwargs = _run(
+        tmp_path, job, primary_error=AuthError("No credentials stored"))
+    assert success is False
+    assert "No credentials stored" in (error or "")
+    assert "openrouter" not in requested
+    assert agent_kwargs == {}
+
+    success, error, _requested, agent_kwargs = _run(tmp_path, job)
+    assert (success, error) == (True, None)
+    assert agent_kwargs["fallback_model"] is None
+
+
 def test_legacy_snapshot_keys_are_not_a_pin(tmp_path):
     """Records written before jobs followed the main model carry *_snapshot keys; they follow the
     main model now, so they keep the chain too."""

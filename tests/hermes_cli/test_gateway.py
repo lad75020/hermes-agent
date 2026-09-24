@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 import textwrap
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -67,7 +67,7 @@ def _install_fake_gateway_run(monkeypatch, start_gateway):
 def test_run_gateway_refreshes_ollama_models_before_start(monkeypatch):
     calls = []
 
-    async def start_gateway(*, replace, verbosity):
+    async def start_gateway(*, replace, force, verbosity):
         calls.append("start")
         return True
 

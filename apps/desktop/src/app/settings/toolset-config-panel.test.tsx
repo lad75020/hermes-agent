@@ -189,9 +189,10 @@ describe('ToolsetConfigPanel', () => {
     const select = screen.getByRole('combobox')
     fireEvent.keyDown(select, { key: 'ArrowDown' })
     fireEvent.click(await screen.findByRole('option', { name: 'English' }))
-    await waitFor(() => expect(saveHermesConfig).toHaveBeenCalledWith({ stt: {
-      provider: 'apple', apple: { language: 'en-US', download_assets: false, timeout_seconds: 180 }
-    } }), { timeout: 3000 })
+    await waitFor(() => expect(saveHermesConfigRecord).toHaveBeenCalledWith(
+      { stt: { apple: { language: 'en-US' } } },
+      undefined
+    ), { timeout: 3000 })
   })
 
   it('renders inline voice/model fields for a TTS provider row carrying tts_provider', async () => {

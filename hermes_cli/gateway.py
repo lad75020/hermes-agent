@@ -4104,6 +4104,14 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         except Exception:
             pass  # best-effort; don't block gateway startup
 
+    # Keep the standalone gateway's local Ollama picker current, as the desktop
+    # backend does at startup. A stopped Ollama daemon must not prevent boot.
+    try:
+        from hermes_cli.ollama_refresh import refresh_ollama_provider_models
+        refresh_ollama_provider_models()
+    except Exception:
+        logger.debug("Ollama model refresh failed at gateway startup", exc_info=True)
+
     from gateway.run import start_gateway
     print("┌─────────────────────────────────────────────────────────┐")
     print("│           ☤ Hermes Gateway Starting...                 │")

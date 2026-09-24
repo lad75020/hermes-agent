@@ -94,6 +94,7 @@ function view(sessionId: string): SessionView {
     $runtimeId: atom(sessionId),
     $storedId: atom(sessionId),
     $turnStartedAt: atom(null),
+    $usage: atom({ calls: 0, input: 0, output: 0, total: 0 }),
     kind: 'primary'
   }
 }

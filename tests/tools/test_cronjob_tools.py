@@ -242,6 +242,19 @@ class TestUnifiedCronjobTool:
         assert listing["jobs"][0]["name"] == "Server Check"
         assert listing["jobs"][0]["state"] == "scheduled"
 
+    def test_no_fallback_survives_create_and_update(self):
+        from cron.jobs import get_job
+
+        created = json.loads(cronjob(
+            action="create", prompt="Local-only task", schedule="every 1h", no_fallback=True))
+        assert created["success"] is True
+        job_id = created["job_id"]
+        assert get_job(job_id)["no_fallback"] is True
+
+        updated = json.loads(cronjob(action="update", job_id=job_id, no_fallback=False))
+        assert updated["success"] is True
+        assert get_job(job_id)["no_fallback"] is False
+
     def test_create_with_natural_weekday_schedule(self):
         # The documented "every monday 9am" form must create a real cron job
         # through the tool path, not error out (issue: parser rejected it).

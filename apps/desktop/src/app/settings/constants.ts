@@ -250,8 +250,9 @@ export const ENUM_OPTIONS: Record<string, string[]> = {
   'stt.elevenlabs.model_id': ['scribe_v2', 'scribe_v1'],
   'stt.local.model': ['tiny', 'base', 'small', 'medium', 'large-v3'],
   // Speech-to-text backends — kept in sync with the stt block in
-  // hermes_cli/config.py (local/groq/openai/mistral/elevenlabs).
-  'stt.provider': ['local', 'groq', 'openai', 'mistral', 'xai', 'elevenlabs'],
+  // hermes_cli/config_defaults.py (local/apple/groq/openai/mistral/xai/elevenlabs).
+  'stt.provider': ['local', 'apple', 'groq', 'openai', 'mistral', 'xai', 'elevenlabs'],
+  'stt.apple.language': ['', 'fr-FR', 'en-US'],
   // How the desktop voice conversation is wired — tools/voice_live.py owns the
   // gpt-live branch (one full-duplex voice model delegating to Hermes).
   'voice.voice_chat_mode': ['chained', 'gpt-live'],
@@ -481,6 +482,11 @@ export const FIELD_LABELS: Record<string, string> = defineFieldCopy({
     local: {
       model: 'Local Transcription Model',
       language: 'Transcription Language'
+    },
+    apple: {
+      language: 'Apple STT Language',
+      downloadAssets: 'Download Apple Speech Assets',
+      timeoutSeconds: 'Apple STT Timeout (seconds)'
     },
     openai: {
       model: 'OpenAI STT Model'
@@ -797,6 +803,9 @@ export const SECTIONS: DesktopConfigSection[] = [
       'tts.deepinfra.voice',
       'stt.local.model',
       'stt.local.language',
+      'stt.apple.language',
+      'stt.apple.download_assets',
+      'stt.apple.timeout_seconds',
       'stt.openai.model',
       'stt.groq.model',
       'stt.mistral.model',

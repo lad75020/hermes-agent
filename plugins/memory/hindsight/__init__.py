@@ -34,7 +34,7 @@ from utils import read_json_or_empty
 
 from .embedded import (
     _RETRIABLE_CONNECTION_MARKERS, _build_embedded_profile_env,
-    _check_local_runtime, _embedded_llm_api_key, _embedded_profile_env_path,
+    _check_local_runtime, _create_embedded_client, _embedded_llm_api_key, _embedded_profile_env_path,
     _export_port_health_grace_timeout, _load_simple_env, _local_runtime_hint, _materialize_embedded_profile_env,
     _may_rewrite_profile_env,
 )
@@ -422,7 +422,7 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "api_url", "description": "Hindsight API URL", "default": _DEFAULT_LOCAL_URL, "when": {"mode": "local_external"}},
             {"key": "api_key", "description": "API key (optional)", "secret": True, "env_var": "HINDSIGHT_API_KEY", "when": {"mode": "local_external"}},
             # Local embedded mode
-            {"key": "llm_provider", "description": "LLM provider", "default": "openai", "choices": ["openai", "anthropic", "gemini", "groq", "openrouter", "minimax", "ollama", "lmstudio", "openai_compatible"], "when": {"mode": "local_embedded"}},
+            {"key": "llm_provider", "description": "LLM provider", "default": "openai", "choices": ["openai", "openai-codex", "anthropic", "gemini", "groq", "openrouter", "minimax", "ollama", "lmstudio", "openai_compatible"], "when": {"mode": "local_embedded"}},
             {"key": "llm_base_url", "description": "Endpoint URL (e.g. http://192.168.1.10:8080/v1)", "default": "", "when": {"mode": "local_embedded", "llm_provider": "openai_compatible"}},
             {"key": "llm_api_key", "description": "LLM API key (optional for openai_compatible)", "secret": True, "env_var": "HINDSIGHT_LLM_API_KEY", "when": {"mode": "local_embedded"}},
             {"key": "llm_model", "description": "LLM model", "default": "gpt-4o-mini", "default_from": {"field": "llm_provider", "map": _PROVIDER_DEFAULT_MODELS}, "when": {"mode": "local_embedded"}},
@@ -471,8 +471,6 @@ class HindsightMemoryProvider(MemoryProvider):
         if not available:
             raise RuntimeError("Hindsight local runtime is unavailable" + (f": {reason}" if reason else ""))
         _ensure_client_dependency()
-        from hindsight import HindsightEmbedded
-        HindsightEmbedded.__del__ = lambda self: None
         cfg = self._config
         llm_provider = _daemon_llm_provider(cfg.get("llm_provider", ""))
         logger.debug("Creating HindsightEmbedded client (profile=%s, provider=%s)",
@@ -485,7 +483,7 @@ class HindsightMemoryProvider(MemoryProvider):
                       idle_timeout=self._idle_timeout)
         if self._llm_base_url:
             kwargs["llm_base_url"] = self._llm_base_url
-        return HindsightEmbedded(**kwargs)
+        return _create_embedded_client(**kwargs)
 
     def _new_cloud_client(self):
         _ensure_client_dependency()
@@ -610,6 +608,10 @@ class HindsightMemoryProvider(MemoryProvider):
                 return False
             time.sleep(0.05)
         return self._wait_for_server_retain_ops(expired, timeout)
+
+    def flush_pending(self, timeout: float = 30.0) -> bool:
+        """Wait for queued writes and server-side retain operations to finish."""
+        return self._wait_for_retains_drained(timeout)
 
     def _wait_for_server_retain_ops(self, _expired: Callable[[], bool], timeout: float) -> bool:
         """Poll tracked async retain ops until complete or *_expired()* (deadline

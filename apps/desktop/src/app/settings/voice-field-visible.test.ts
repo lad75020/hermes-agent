@@ -49,7 +49,7 @@ describe('voiceFieldVisible', () => {
     expect(voiceFieldVisible('stt.provider', config)).toBe(true)
   })
 
-    it('tracks a provider switch', () => {
+  it('tracks a provider switch', () => {
     expect(voiceFieldVisible('tts.openai.voice', cfg({ tts: { provider: 'openai', openai: {} } }))).toBe(true)
     expect(voiceFieldVisible('tts.edge.voice', cfg({ tts: { provider: 'openai', openai: {} } }))).toBe(false)
   })
