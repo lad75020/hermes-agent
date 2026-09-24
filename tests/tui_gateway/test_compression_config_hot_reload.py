@@ -69,6 +69,37 @@ def test_live_threshold_tokens_applies_on_next_turn_without_rebuild(monkeypatch)
     assert live_agent.compression_idle_compact_after_seconds == 1800
 
 
+def test_external_context_engine_keeps_its_own_threshold_policy(monkeypatch, caplog):
+    """A live config sync must not write built-in compressor fields onto LCM."""
+    class ExternalEngine:
+        __slots__ = ("context_length", "threshold_tokens", "model_thresholds")
+
+        def __init__(self):
+            self.context_length = 872_000
+            self.threshold_tokens = 610_400
+            self.model_thresholds = {}
+
+    engine = ExternalEngine()
+    agent = SimpleNamespace(
+        model="gpt-6-sol-900k", provider="openai-codex", context_compressor=engine,
+        compression_enabled=True, compression_idle_compact_after_seconds=0,
+        codex_responses_native_compaction=False,
+        codex_responses_compact_threshold=200_000,
+    )
+    session = {"agent": agent, "session_key": "external-engine"}
+    monkeypatch.setattr(server, "_load_cfg", lambda: {
+        "compression": {"threshold": 0.5, "threshold_tokens": 100_000,
+                        "enabled": True, "idle_compact_after_seconds": 1800},
+    })
+
+    server._sync_agent_compression_with_config("external-engine", session)
+
+    assert engine.threshold_tokens == 610_400
+    assert engine.model_thresholds == {}
+    assert agent.compression_idle_compact_after_seconds == 1800
+    assert "Could not apply live compression config" not in caplog.text
+
+
 def test_live_codex_native_compaction_applies_on_next_turn(monkeypatch):
     session, _ = _session_with_compressor()
 

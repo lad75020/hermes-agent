@@ -116,6 +116,13 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     cc = getattr(agent, "context_compressor", None)
     if cc is None:
         return
+    # External context engines (including LCM) own their own compaction policy.
+    # These fields and coercion helpers belong to the built-in compressor only;
+    # setting some of them on a plugin before failing at the cap leaves a partial,
+    # misleading live update. LCM_* settings take effect when its engine starts.
+    from agent.context_compressor import ContextCompressor
+    if not isinstance(cc, ContextCompressor):
+        return
     # tail_mode: unknown/absent values land on the ctor default ("lean"), matching agent_init.
     default_tail = str(_compressor_ctor_default("tail_mode", "lean"))
     mode = str(compression.get("tail_mode", default_tail) or default_tail).strip().lower()
