@@ -706,6 +706,27 @@ def test_explicit_workspace_preserves_seed_and_replays_copied_members(locked_pro
     assert (recorded / "uv.lock").read_bytes() == recorded_lock
 
 
+def test_tool_only_plugin_pyproject_locks_as_virtual_member(locked_project, tmp_path):
+    """A lint-only pyproject is not a package but must be a valid uv workspace member."""
+    from pm.workspace import _generate_pyproject
+    import tomllib
+
+    source, uv, env = locked_project
+    plugin = tmp_path / "plugins" / "hermes-lcm"
+    plugin.mkdir(parents=True)
+    original = '[tool.ruff]\ntarget-version = "py311"\n'
+    (plugin / "pyproject.toml").write_text(original, encoding="utf-8")
+    root = tmp_path / "generated"
+    _generate_pyproject([plugin], root, source=source)
+    [member_name] = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["uv"]["workspace"]["members"]
+    member = root / member_name / "pyproject.toml"
+    assert (plugin / "pyproject.toml").read_text() == original
+    assert tomllib.loads(member.read_text())["tool"]["ruff"]["target-version"] == "py311"
+    _run([str(uv), "lock", "--python", sys.executable], cwd=root, env=env)
+    lock = tomllib.loads((root / "uv.lock").read_text())
+    assert any(package["name"].startswith("hermes-plugin-hermes-lcm-") for package in lock["package"])
+
+
 @pytest.mark.parametrize("failure", ["facts", "missing-cfg", "restart"])
 def test_real_sync_retains_selection_until_commit(locked_project, tmp_path, monkeypatch, failure):
     import importlib
