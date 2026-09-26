@@ -13,14 +13,14 @@ vi.mock('@/store/coding-status', () => ({
       cwd === '/not-a-repo'
         ? null
         : {
-      added: 12,
-      ahead: 0,
-      behind: 0,
-      branch: 'bb/hitbox',
-      defaultBranch: 'main',
-      detached: false,
-      removed: 3,
-      untracked: 0
+            added: 12,
+            ahead: 0,
+            behind: 0,
+            branch: 'bb/hitbox',
+            defaultBranch: 'main',
+            detached: false,
+            removed: 3,
+            untracked: 0
           }
     ),
   repoWorktreesForCwd: () => atom([])
