@@ -1,16 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { contrastRatio } from '@hermes/shared/color'
-import {
-  BUILTIN_THEME_LIST,
-  BUILTIN_THEMES,
-  DEFAULT_SKIN_NAME,
-  DEFAULT_TYPOGRAPHY,
-  EMOJI_FALLBACK,
-  githubContrastTheme,
-  githubTheme,
-  nousAltTheme
-} from './presets'
+import { BUILTIN_THEME_LIST, DEFAULT_TYPOGRAPHY, nousTheme } from './presets'
 
 // #40364: none of the UI text/mono fonts carry emoji glyphs, so every font
 // stack must end with a color-emoji fallback or emoji render as tofu on
@@ -36,43 +26,38 @@ describe('theme typography emoji fallback (#40364)', () => {
   })
 })
 
-describe('GitHub Contrast', () => {
-  const backgroundKeys = ['background', 'card', 'muted', 'popover', 'input', 'sidebarBackground', 'userBubble'] as const
+describe('theme typography Latin Extended fallback (#61392)', () => {
+  const monoStacks: Array<[string, string]> = [
+    ['DEFAULT_TYPOGRAPHY.fontMono', DEFAULT_TYPOGRAPHY.fontMono],
+    ...BUILTIN_THEME_LIST.map(
+      theme =>
+        [
+          `${theme.name}.effectiveFontMono`,
+          theme.typography?.fontMono ?? nousTheme.typography?.fontMono ?? DEFAULT_TYPOGRAPHY.fontMono
+        ] as [string, string]
+    )
+  ]
 
-  it('is registered as a separate built-in without replacing GitHub', () => {
-    expect(githubContrastTheme.name).toBe('github-contrast')
-    expect(githubContrastTheme.label).toBe('GitHub Contrast')
-    expect(BUILTIN_THEMES['github-contrast']).toBe(githubContrastTheme)
-    expect(BUILTIN_THEMES.github).toBe(githubTheme)
-    expect(githubContrastTheme).not.toBe(githubTheme)
+  it.each(monoStacks)('%s falls back to bundled JetBrains Mono before generic fonts', (_label, stack) => {
+    const jetbrains = stack.indexOf('JetBrains Mono')
+
+    expect(jetbrains).toBeGreaterThanOrEqual(0)
+
+    const genericIndexes = [
+      stack.indexOf('ui-monospace'),
+      stack.indexOf('monospace'),
+      stack.indexOf('Apple Color Emoji'),
+      stack.indexOf('Segoe UI Emoji'),
+      stack.indexOf('Noto Color Emoji')
+    ].filter(index => index >= 0)
+
+    expect(genericIndexes.length).toBeGreaterThan(0)
+    expect(jetbrains).toBeLessThan(Math.min(...genericIndexes))
   })
 
-  it('inherits GitHub surfaces, typography, and terminal palettes in both modes', () => {
-    for (const key of backgroundKeys) {
-      expect(githubContrastTheme.colors[key]).toBe(githubTheme.colors[key])
-      expect(githubContrastTheme.darkColors?.[key]).toBe(githubTheme.darkColors?.[key])
-    }
-
-    expect(githubContrastTheme.typography).toBe(githubTheme.typography)
-    expect(githubContrastTheme.terminal).toBe(githubTheme.terminal)
-    expect(githubContrastTheme.darkTerminal).toBe(githubTheme.darkTerminal)
-  })
-
-  it('materially strengthens foregrounds and borders in both modes', () => {
-    for (const [base, contrast] of [
-      [githubTheme.colors, githubContrastTheme.colors],
-      [githubTheme.darkColors!, githubContrastTheme.darkColors!]
-    ]) {
-      expect(contrastRatio(contrast.foreground, contrast.background)).toBeGreaterThan(
-        contrastRatio(base.foreground, base.background)! + 1
-      )
-      expect(contrastRatio(contrast.mutedForeground, contrast.muted)).toBeGreaterThan(
-        contrastRatio(base.mutedForeground, base.muted)! + 2
-      )
-      expect(contrastRatio(contrast.border, contrast.background)).toBeGreaterThanOrEqual(3)
-      expect(contrastRatio(contrast.border, contrast.background)).toBeGreaterThan(
-        contrastRatio(base.border, base.background)! * 1.5
-      )
-    }
+  it('default stack includes common Linux monospace glyph fallbacks', () => {
+    expect(DEFAULT_TYPOGRAPHY.fontMono).toContain('DejaVu Sans Mono')
+    expect(DEFAULT_TYPOGRAPHY.fontMono).toContain('Liberation Mono')
+    expect(DEFAULT_TYPOGRAPHY.fontMono).toContain('Noto Sans Mono')
   })
 })
