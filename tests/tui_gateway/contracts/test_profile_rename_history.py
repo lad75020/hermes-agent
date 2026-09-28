@@ -16,6 +16,7 @@ def test_profile_rename_history_survives_result_validation():
     assert ProfilesListResult.model_validate({"profiles": []}).profiles == []
     legacy = ProfilesListResult.model_validate({"profiles": [{"name": "bot", "path": "/profiles/bot"}]})
     assert legacy.profiles[0].previous_names == []
+    assert legacy.profiles[0].path_identity is None
 
 
 def test_profile_rename_history_keeps_strict_result_validation():

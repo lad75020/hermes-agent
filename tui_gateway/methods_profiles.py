@@ -268,11 +268,13 @@ def _(rid, params: dict) -> dict:
     """List Hermes profiles. ``include_sessions`` (default true) adds ``last_session`` /
     ``worker_session`` / ``canonical_session`` so a roster paints previews without N calls."""
     from hermes_cli.profiles import list_profiles
+    from hermes_constants import hermes_home_identity
     include_sessions = is_truthy_value(params.get("include_sessions", True))
     out = []
     # Roster polls this every 5s: ``skill_count`` is the last known value, refreshed off-request.
     for p in list_profiles(lazy_skill_count=True):
-        row = {"name": p.name, "path": str(p.path), "is_default": bool(p.is_default), "model": p.model,
+        row = {"name": p.name, "path": str(p.path), "path_identity": hermes_home_identity(p.path),
+               "is_default": bool(p.is_default), "model": p.model,
                "provider": p.provider, "description": p.description or "",
                "display_name": p.display_name or "", "skill_count": p.skill_count or 0,
                "previous_names": list(p.previous_names or []), "role": p.role}

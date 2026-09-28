@@ -22660,6 +22660,18 @@
             "title": "Path",
             "type": "string"
           },
+          "path_identity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Path Identity"
+          },
           "is_default": {
             "default": false,
             "title": "Is Default",

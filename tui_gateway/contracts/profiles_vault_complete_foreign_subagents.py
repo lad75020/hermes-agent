@@ -149,6 +149,7 @@ class ProfileRow(Result):
 
     name: str
     path: str
+    path_identity: str | None = None
     is_default: bool = False
     model: str | None = None
     provider: str | None = None

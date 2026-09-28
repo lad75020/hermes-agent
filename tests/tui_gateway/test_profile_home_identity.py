@@ -20,7 +20,7 @@ def test_config_and_profile_inventory_share_resolved_home_identity(tmp_path, mon
     monkeypatch.setattr(
         profiles,
         "list_profiles",
-        lambda: [
+        lambda **kwargs: [
             SimpleNamespace(
                 name="default",
                 path=alias_home,
@@ -30,6 +30,8 @@ def test_config_and_profile_inventory_share_resolved_home_identity(tmp_path, mon
                 description="",
                 display_name="",
                 skill_count=0,
+                previous_names=[],
+                role=None,
             )
         ],
     )
@@ -66,8 +68,10 @@ def test_profile_identity_is_recomputed_after_symlink_retarget(tmp_path, monkeyp
         description="",
         display_name="",
         skill_count=0,
+        previous_names=[],
+        role=None,
     )
-    monkeypatch.setattr(profiles, "list_profiles", lambda: [profile])
+    monkeypatch.setattr(profiles, "list_profiles", lambda **kwargs: [profile])
 
     first_identity = server._methods["profiles.list"](
         "first", {"include_sessions": False}
@@ -93,7 +97,7 @@ def test_broken_profile_alias_has_no_usable_identity(tmp_path, monkeypatch):
     monkeypatch.setattr(
         profiles,
         "list_profiles",
-        lambda: [
+        lambda **kwargs: [
             SimpleNamespace(
                 name="default",
                 path=broken_alias,
@@ -103,6 +107,8 @@ def test_broken_profile_alias_has_no_usable_identity(tmp_path, monkeypatch):
                 description="",
                 display_name="",
                 skill_count=0,
+                previous_names=[],
+                role=None,
             )
         ],
     )

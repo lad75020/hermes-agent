@@ -1739,6 +1739,7 @@ export interface ProfilesListResult {
 export interface ProfileRow {
   name: string
   path: string
+  path_identity?: string | null
   is_default?: boolean
   model?: string | null
   provider?: string | null
