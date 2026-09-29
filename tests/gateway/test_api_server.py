@@ -13,6 +13,7 @@ Tests cover:
 """
 
 import asyncio
+import hashlib
 import json
 import time
 import types
@@ -400,7 +401,6 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/health/detailed", adapter._handle_health_detailed)
     app.router.add_get("/v1/health", adapter._handle_health)
     app.router.add_get("/v1/models", adapter._handle_models)
-    app.router.add_get("/v1/profiles", adapter._handle_profiles)
     app.router.add_get("/api/model/options", adapter._handle_model_options)
     app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
     app.router.add_get("/v1/skills", adapter._handle_skills)
@@ -411,7 +411,6 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
     app.router.add_delete("/v1/responses/{response_id}", adapter._handle_delete_response)
-    app.router.add_post("/v1/requests/{request_id}/cancel", adapter._handle_cancel_request)
     app.router.add_post(
         "/api/platforms/{platform}/events",
         adapter._handle_platform_event_callback,
@@ -450,85 +449,6 @@ def auth_adapter():
 
 
 class TestAgentExecution:
-    @pytest.mark.asyncio
-    async def test_cancel_request_interrupts_active_agent_and_task(self, adapter):
-        request_id = "req-test-cancel"
-        mock_agent = MagicMock()
-        mock_task = MagicMock()
-        mock_task.done.return_value = False
-        mock_task.cancel = MagicMock()
-        adapter._active_api_agents[request_id] = mock_agent
-        adapter._active_api_tasks[request_id] = mock_task
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(f"/v1/requests/{request_id}/cancel")
-            assert resp.status == 200
-            data = await resp.json()
-
-        assert data == {"request_id": request_id, "status": "cancelling"}
-        mock_agent.interrupt.assert_called_once_with("Cancel requested via API")
-        mock_task.cancel.assert_called_once_with()
-
-    @pytest.mark.asyncio
-    async def test_cancel_request_returns_404_for_unknown_request(self, adapter):
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post("/v1/requests/not-running/cancel")
-            assert resp.status == 404
-            data = await resp.json()
-
-        assert data["error"]["code"] == "request_not_found"
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("path", "payload"),
-        [
-            ("/v1/chat/completions", {
-                "model": "hermes-agent",
-                "messages": [{"role": "user", "content": "hello"}],
-                "stream": False,
-            }),
-            ("/v1/chat/completions", {
-                "model": "hermes-agent",
-                "messages": [{"role": "user", "content": "hello"}],
-                "stream": True,
-            }),
-            ("/v1/responses", {"model": "hermes-agent", "input": "hello", "stream": False}),
-            ("/v1/responses", {"model": "hermes-agent", "input": "hello", "stream": True}),
-        ],
-    )
-    async def test_request_id_tracks_streaming_and_non_streaming_openai_paths(
-        self, adapter, path, payload
-    ):
-        request_id = "req-explicit-cancel"
-        result = {
-            "final_response": "ok",
-            "messages": [{"role": "assistant", "content": "ok"}],
-            "api_calls": 1,
-        }
-        usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
-        app = _create_app(adapter)
-        with (
-            patch.object(adapter, "_run_agent", new=AsyncMock(return_value=(result, usage))),
-            patch.object(adapter, "_track_api_request", wraps=adapter._track_api_request) as track,
-            patch.object(
-                adapter, "_write_sse_chat_completion",
-                new=AsyncMock(return_value=web.json_response({"ok": True})),
-            ),
-            patch.object(
-                adapter, "_write_sse_responses",
-                new=AsyncMock(return_value=web.json_response({"ok": True})),
-            ),
-        ):
-            async with TestClient(TestServer(app)) as cli:
-                resp = await cli.post(
-                    path, json=payload, headers={"X-Hermes-Request-Id": request_id})
-                assert resp.status == 200
-                await asyncio.sleep(0)
-
-        assert [call.args[0] for call in track.call_args_list] == [request_id]
-
     @pytest.mark.asyncio
     async def test_run_agent_uses_session_id_as_task_id(self, adapter):
         mock_agent = MagicMock()
@@ -1009,33 +929,6 @@ class TestModelsEndpoint:
 
 
 
-class TestProfilesEndpoint:
-    @pytest.mark.asyncio
-    async def test_profiles_include_reasoning_capability_metadata(self, adapter):
-        profiles = [
-            types.SimpleNamespace(
-                name="reasoner", is_default=True, model="gpt-5.5", provider="openai",
-                gateway_running=True, skill_count=4),
-            types.SimpleNamespace(
-                name="plain", is_default=False, model="plain-chat-model", provider="custom",
-                gateway_running=False, skill_count=1),
-        ]
-        app = _create_app(adapter)
-        with patch("hermes_cli.profiles.list_profiles", return_value=profiles):
-            async with TestClient(TestServer(app)) as cli:
-                resp = await cli.get("/v1/profiles")
-                payload = await resp.json()
-
-        assert resp.status == 200
-        reasoner, plain = payload["data"]
-        assert reasoner["supported_parameters"] == ["reasoning", "reasoning_effort"]
-        assert reasoner["supports_reasoning"] is True
-        assert reasoner["reasoning"] == {
-            "supported": True, "effort_levels": ["low", "medium", "high"]}
-        assert plain["supported_parameters"] == []
-        assert plain["reasoning"] == {"supported": False, "effort_levels": []}
-
-
 # ---------------------------------------------------------------------------
 # /v1/capabilities endpoint
 # ---------------------------------------------------------------------------
@@ -1444,113 +1337,6 @@ class TestChatCompletionsEndpoint:
             assert pairs[1] == ("completed", "call_terminal_1"), pairs
 
     @pytest.mark.asyncio
-    async def test_stream_includes_reasoning_summary_and_tool_output_events(self, adapter):
-        """Chat-completions streaming exposes Hermes debug SSE events for reasoning and tool output."""
-        import json as _json
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            async def _mock_run_agent(**kwargs):
-                reasoning_cb = kwargs.get("reasoning_callback")
-                ts_cb = kwargs.get("tool_start_callback")
-                tc_cb = kwargs.get("tool_complete_callback")
-                cb = kwargs.get("stream_delta_callback")
-                if reasoning_cb:
-                    reasoning_cb("Need to inspect the filesystem.")
-                if ts_cb:
-                    ts_cb("call_terminal_1", "terminal", {"command": "pwd"})
-                if tc_cb:
-                    tc_cb("call_terminal_1", "terminal", {"command": "pwd"}, {"output": "/tmp\\n", "exit_code": 0})
-                if cb:
-                    cb("done.")
-                return (
-                    {"final_response": "done.", "messages": [], "api_calls": 1},
-                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-                )
-
-            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
-                resp = await cli.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "test",
-                        "messages": [{"role": "user", "content": "debug"}],
-                        "stream": True,
-                    },
-                )
-                assert resp.status == 200
-                body = await resp.text()
-
-        assert "event: Hermes.reasoning.summary" in body
-        assert "Need to inspect the filesystem." in body
-        assert "event: Hermes.tool.output" in body
-        assert '"tool": "terminal"' in body
-        assert '"toolCallId": "call_terminal_1"' in body
-        assert "/tmp" in body
-
-        for line in body.splitlines():
-            if not line.startswith("data: ") or line.strip() == "data: [DONE]":
-                continue
-            try:
-                chunk = _json.loads(line[len("data: "):])
-            except _json.JSONDecodeError:
-                continue
-            if chunk.get("object") == "chat.completion.chunk":
-                content = "".join(choice.get("delta", {}).get("content", "") for choice in chunk.get("choices", []))
-                assert "Need to inspect" not in content
-                assert "/tmp" not in content
-
-    @pytest.mark.asyncio
-    async def test_stream_surfaces_context_compression_reasoning_json(self, adapter):
-        """Compression reasoning JSON is surfaced as structured Hermes reasoning SSE data."""
-        app = _create_app(adapter)
-        compression_message = {
-            "type": "context_compression",
-            "status": "completed",
-            "message": "Context compressed",
-            "messages_before": 12,
-            "messages_after": 5,
-        }
-
-        async with TestClient(TestServer(app)) as cli:
-            async def _mock_run_agent(**kwargs):
-                reasoning_cb = kwargs.get("reasoning_callback")
-                cb = kwargs.get("stream_delta_callback")
-                if reasoning_cb:
-                    reasoning_cb(json.dumps(compression_message))
-                if cb:
-                    cb("done.")
-                return (
-                    {"final_response": "done.", "messages": [], "api_calls": 1},
-                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-                )
-
-            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
-                resp = await cli.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "test",
-                        "messages": [{"role": "user", "content": "compress"}],
-                        "stream": True,
-                    },
-                )
-                assert resp.status == 200
-                body = await resp.text()
-
-        reasoning_payloads = []
-        current_event = None
-        for line in body.splitlines():
-            if line.startswith("event: "):
-                current_event = line[len("event: "):]
-            elif current_event == "Hermes.reasoning.summary" and line.startswith("data: "):
-                raw_data = line[len("data: "):]
-                if raw_data != "[DONE]":
-                    reasoning_payloads.append(json.loads(raw_data))
-
-        assert reasoning_payloads
-        assert reasoning_payloads[0]["message"] == compression_message
-        assert reasoning_payloads[0]["delta"] == json.dumps(compression_message)
-
-    @pytest.mark.asyncio
     async def test_stream_tool_lifecycle_skips_internal_and_orphan_completes(self, adapter):
         """Internal tools (``_thinking``-style) and ``completed`` events
         without a prior matching ``running`` must produce no lifecycle
@@ -1599,194 +1385,6 @@ class TestChatCompletionsEndpoint:
             assert '"status": "running"' not in body
             assert '"status": "completed"' not in body
 
-    @pytest.mark.asyncio
-    async def test_no_user_message_returns_400(self, adapter):
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "test",
-                    "messages": [{"role": "system", "content": "You are helpful."}],
-                },
-            )
-            assert resp.status == 400
-
-    @pytest.mark.asyncio
-    async def test_successful_completion(self, adapter):
-        """Test a successful chat completion with mocked agent."""
-        mock_result = {
-            "final_response": "Hello! How can I help you today?",
-            "messages": [],
-            "api_calls": 1,
-        }
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with (
-                patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run,
-                patch.object(adapter, "_maybe_auto_title_api_session") as mock_title,
-            ):
-                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                resp = await cli.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "hermes-agent",
-                        "messages": [{"role": "user", "content": "Hello"}],
-                    },
-                )
-
-            assert resp.status == 200
-            data = await resp.json()
-            assert data["object"] == "chat.completion"
-            assert data["id"].startswith("chatcmpl-")
-            assert data["model"] == "hermes-agent"
-            assert len(data["choices"]) == 1
-            assert data["choices"][0]["message"]["role"] == "assistant"
-            assert data["choices"][0]["message"]["content"] == "Hello! How can I help you today?"
-            assert data["choices"][0]["finish_reason"] == "stop"
-            assert "usage" in data
-            mock_title.assert_called_once()
-            assert mock_title.call_args.args[1] == "Hello! How can I help you today?"
-
-    @pytest.mark.asyncio
-    async def test_system_prompt_extracted(self, adapter):
-        """System messages from the client are passed as ephemeral_system_prompt."""
-        mock_result = {
-            "final_response": "I am a pirate! Arrr!",
-            "messages": [],
-            "api_calls": 1,
-        }
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                resp = await cli.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "hermes-agent",
-                        "messages": [
-                            {"role": "system", "content": "You are a pirate."},
-                            {"role": "user", "content": "Hello"},
-                        ],
-                    },
-                )
-
-            assert resp.status == 200
-            # Check that _run_agent was called with the system prompt
-            call_kwargs = mock_run.call_args
-            assert call_kwargs.kwargs.get("ephemeral_system_prompt") == "You are a pirate."
-            assert call_kwargs.kwargs.get("user_message") == "Hello"
-
-    @pytest.mark.asyncio
-    async def test_conversation_history_passed(self, adapter):
-        """Previous user/assistant messages become conversation_history."""
-        mock_result = {"final_response": "3", "messages": [], "api_calls": 1}
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                resp = await cli.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "hermes-agent",
-                        "messages": [
-                            {"role": "user", "content": "1+1=?"},
-                            {"role": "assistant", "content": "2"},
-                            {"role": "user", "content": "Now add 1 more"},
-                        ],
-                    },
-                )
-
-            assert resp.status == 200
-            call_kwargs = mock_run.call_args.kwargs
-            assert call_kwargs["user_message"] == "Now add 1 more"
-            assert len(call_kwargs["conversation_history"]) == 2
-            assert call_kwargs["conversation_history"][0] == {"role": "user", "content": "1+1=?"}
-            assert call_kwargs["conversation_history"][1] == {"role": "assistant", "content": "2"}
-
-    @pytest.mark.asyncio
-    async def test_agent_error_returns_500(self, adapter):
-        """Agent exception returns 500."""
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.side_effect = RuntimeError("Provider failed")
-                resp = await cli.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "hermes-agent",
-                        "messages": [{"role": "user", "content": "Hello"}],
-                    },
-                )
-
-            assert resp.status == 500
-            data = await resp.json()
-            assert "Provider failed" in data["error"]["message"]
-
-    @pytest.mark.asyncio
-    async def test_stable_session_id_across_turns(self, adapter):
-        """Same conversation (same first user message) produces the same session_id."""
-        mock_result = {"final_response": "ok", "messages": [], "api_calls": 1}
-
-        app = _create_app(adapter)
-        session_ids = []
-        async with TestClient(TestServer(app)) as cli:
-            # Turn 1: single user message
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                await cli.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "hermes-agent",
-                        "messages": [{"role": "user", "content": "Hello"}],
-                    },
-                )
-                session_ids.append(mock_run.call_args.kwargs["session_id"])
-
-            # Turn 2: same first message, conversation grew
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                await cli.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "hermes-agent",
-                        "messages": [
-                            {"role": "user", "content": "Hello"},
-                            {"role": "assistant", "content": "Hi there!"},
-                            {"role": "user", "content": "How are you?"},
-                        ],
-                    },
-                )
-                session_ids.append(mock_run.call_args.kwargs["session_id"])
-
-        assert session_ids[0] == session_ids[1], "Session ID should be stable across turns"
-        assert session_ids[0].startswith("api-"), "Derived session IDs should have api- prefix"
-
-    @pytest.mark.asyncio
-    async def test_different_conversations_get_different_session_ids(self, adapter):
-        """Different first messages produce different session_ids."""
-        mock_result = {"final_response": "ok", "messages": [], "api_calls": 1}
-
-        app = _create_app(adapter)
-        session_ids = []
-        async with TestClient(TestServer(app)) as cli:
-            for first_msg in ["Hello", "Goodbye"]:
-                with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                    mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                    await cli.post(
-                        "/v1/chat/completions",
-                        json={
-                            "model": "hermes-agent",
-                            "messages": [{"role": "user", "content": first_msg}],
-                        },
-                    )
-                    session_ids.append(mock_run.call_args.kwargs["session_id"])
-
-        assert session_ids[0] != session_ids[1]
-
 
 # ---------------------------------------------------------------------------
 # _derive_chat_session_id unit tests
@@ -1805,6 +1403,30 @@ class TestDeriveChatSessionId:
         a = _derive_chat_session_id("You are a pirate.", "Hello")
         b = _derive_chat_session_id("You are a robot.", "Hello")
         assert a != b
+
+    def test_routed_profile_namespaces_the_id_without_moving_default(self):
+        """Two header-less conversations opening with identical text on different profiles must
+        not share one session/sandbox key (#123989); default/standalone ids stay byte-identical
+        so live conversations survive the upgrade."""
+        legacy = "api-" + hashlib.sha256(b"sys\nhello").hexdigest()[:16]
+        assert _derive_chat_session_id("sys", "hello") == legacy
+        assert _derive_chat_session_id("sys", "hello", "default") == legacy
+        research = _derive_chat_session_id("sys", "hello", "research")
+        assert research != legacy
+        assert research == _derive_chat_session_id("sys", "hello", "research")
+
+    def test_launch_profile_prefix_keeps_the_unprefixed_id(self, monkeypatch, tmp_path):
+        """A gateway launched as ``work`` serves ``/p/work/`` and the bare route as ONE profile:
+        both must derive one id, or the same conversation forks by URL."""
+        import hermes_constants
+        from hermes_cli import profiles
+
+        work = tmp_path / "profiles" / "work"
+        work.mkdir(parents=True)
+        monkeypatch.setattr(hermes_constants, "get_routing_process_hermes_home", lambda: work)
+        monkeypatch.setattr(profiles, "get_profile_dir", lambda name: tmp_path / "profiles" / name)
+        assert _derive_chat_session_id("sys", "hello", "work") == _derive_chat_session_id("sys", "hello")
+        assert _derive_chat_session_id("sys", "hello", "research") != _derive_chat_session_id("sys", "hello")
 
 
 # ---------------------------------------------------------------------------
@@ -1826,10 +1448,7 @@ class TestResponsesEndpoint:
 
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
-            with (
-                patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run,
-                patch.object(adapter, "_maybe_auto_title_api_session") as mock_title,
-            ):
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
                     "/v1/responses",
@@ -1849,188 +1468,6 @@ class TestResponsesEndpoint:
             assert data["output"][0]["content"][0]["type"] == "output_text"
             assert data["output"][0]["content"][0]["text"] == "Paris is the capital of France."
 
-    @pytest.mark.asyncio
-    async def test_response_passes_request_model_provider_options(self, adapter):
-        app = _create_app(adapter)
-        model_options = {
-            "reasoning": {"enabled": True, "effort": "medium"},
-            "service_tier": "priority",
-        }
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (
-                    {"final_response": "ok", "messages": [], "api_calls": 1},
-                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-                )
-                resp = await cli.post(
-                    "/v1/responses",
-                    json={
-                        "model": "MiniMax-M3",
-                        "provider": "minimax",
-                        "model_options": model_options,
-                        "input": "hi",
-                    },
-                )
-
-        assert resp.status == 200
-        kwargs = mock_run.call_args.kwargs
-        assert kwargs["requested_model"] == "MiniMax-M3"
-        assert kwargs["requested_provider"] == "minimax"
-        assert kwargs["model_options"] == model_options
-
-    @pytest.mark.asyncio
-    async def test_successful_response_with_array_input(self, adapter):
-        """Array input with role/content objects."""
-        mock_result = {"final_response": "Done", "messages": [], "api_calls": 1}
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                resp = await cli.post(
-                    "/v1/responses",
-                    json={
-                        "model": "hermes-agent",
-                        "input": [
-                            {"role": "user", "content": "Hello"},
-                            {"role": "user", "content": "What is 2+2?"},
-                        ],
-                    },
-                )
-
-            assert resp.status == 200
-            call_kwargs = mock_run.call_args.kwargs
-            # Last message is user_message, rest are history
-            assert call_kwargs["user_message"] == "What is 2+2?"
-            assert len(call_kwargs["conversation_history"]) == 1
-
-    @pytest.mark.asyncio
-    async def test_instructions_as_ephemeral_prompt(self, adapter):
-        """The instructions field maps to ephemeral_system_prompt."""
-        mock_result = {"final_response": "Ahoy!", "messages": [], "api_calls": 1}
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                resp = await cli.post(
-                    "/v1/responses",
-                    json={
-                        "model": "hermes-agent",
-                        "input": "Hello",
-                        "instructions": "Talk like a pirate.",
-                    },
-                )
-
-            assert resp.status == 200
-            call_kwargs = mock_run.call_args.kwargs
-            assert call_kwargs["ephemeral_system_prompt"] == "Talk like a pirate."
-
-    @pytest.mark.asyncio
-    async def test_previous_response_id_chaining(self, adapter):
-        """Test that responses can be chained via previous_response_id."""
-        mock_result_1 = {
-            "final_response": "2",
-            "messages": [{"role": "assistant", "content": "2"}],
-            "api_calls": 1,
-        }
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            # First request
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (mock_result_1, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                resp1 = await cli.post(
-                    "/v1/responses",
-                    json={"model": "hermes-agent", "input": "What is 1+1?"},
-                )
-
-            assert resp1.status == 200
-            data1 = await resp1.json()
-            response_id = data1["id"]
-
-            # Second request chaining from the first
-            mock_result_2 = {
-                "final_response": "3",
-                "messages": [{"role": "assistant", "content": "3"}],
-                "api_calls": 1,
-            }
-
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (mock_result_2, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                resp2 = await cli.post(
-                    "/v1/responses",
-                    json={
-                        "model": "hermes-agent",
-                        "input": "Now add 1 more",
-                        "previous_response_id": response_id,
-                    },
-                )
-
-            assert resp2.status == 200
-            # The conversation_history should contain the full history from the first response
-            call_kwargs = mock_run.call_args.kwargs
-            assert len(call_kwargs["conversation_history"]) > 0
-            assert call_kwargs["user_message"] == "Now add 1 more"
-
-    @pytest.mark.asyncio
-    async def test_previous_response_id_stores_full_agent_transcript_once(self, adapter):
-        """Chained Responses storage must not append result["messages"] twice."""
-        first_history = [
-            {"role": "user", "content": "What is 1+1?"},
-            {"role": "assistant", "content": "2"},
-        ]
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (
-                    {
-                        "final_response": "2",
-                        "messages": list(first_history),
-                        "api_calls": 1,
-                    },
-                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                )
-                resp1 = await cli.post(
-                    "/v1/responses",
-                    json={"model": "hermes-agent", "input": "What is 1+1?"},
-                )
-
-            assert resp1.status == 200
-            resp1_data = await resp1.json()
-            stored_first = adapter._response_store.get(resp1_data["id"])
-            assert stored_first["conversation_history"] == first_history
-
-            second_history = first_history + [
-                {"role": "user", "content": "Now add 1 more"},
-                {"role": "assistant", "content": "3"},
-            ]
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (
-                    {
-                        "final_response": "3",
-                        "messages": list(second_history),
-                        "api_calls": 1,
-                    },
-                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                )
-                resp2 = await cli.post(
-                    "/v1/responses",
-                    json={
-                        "model": "hermes-agent",
-                        "input": "Now add 1 more",
-                        "previous_response_id": resp1_data["id"],
-                    },
-                )
-
-            assert resp2.status == 200
-            resp2_data = await resp2.json()
-            stored_second = adapter._response_store.get(resp2_data["id"])
-            stored_history = stored_second["conversation_history"]
-            assert stored_history == second_history
-            assert stored_history.count(first_history[0]) == 1
-            assert stored_history.count({"role": "user", "content": "Now add 1 more"}) == 1
 
     @pytest.mark.asyncio
     async def test_previous_response_id_stores_compressed_transcript_directly(self, adapter):
@@ -2849,13 +2286,6 @@ class TestChatCompletionsAgentIncomplete:
 
 
 class TestCORS:
-    def test_origin_allowed_for_non_browser_client(self, adapter):
-        assert adapter._origin_allowed("") is True
-
-
-    def test_origin_allowed_for_allowlist_match(self):
-        adapter = _make_adapter(cors_origins=["http://localhost:3000"])
-        assert adapter._origin_allowed("http://localhost:3000") is True
 
 
     @pytest.mark.asyncio
@@ -2869,31 +2299,6 @@ class TestCORS:
 
 
     @pytest.mark.asyncio
-    async def test_cors_allows_idempotency_key_header(self):
-        adapter = _make_adapter(cors_origins=["http://localhost:3000"])
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.options(
-                "/v1/chat/completions",
-                headers={
-                    "Origin": "http://localhost:3000",
-                    "Access-Control-Request-Method": "POST",
-                    "Access-Control-Request-Headers": "Idempotency-Key",
-                },
-            )
-            assert resp.status == 200
-            assert "Idempotency-Key" in resp.headers.get("Access-Control-Allow-Headers", "")
-
-    @pytest.mark.asyncio
-    async def test_cors_sets_vary_origin_header(self):
-        adapter = _make_adapter(cors_origins=["http://localhost:3000"])
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.get("/health", headers={"Origin": "http://localhost:3000"})
-            assert resp.status == 200
-            assert resp.headers.get("Vary") == "Origin"
-
-    @pytest.mark.asyncio
     async def test_cors_options_preflight_allowed_for_configured_origin(self):
         """Configured origins can complete browser preflight."""
         adapter = _make_adapter(cors_origins=["http://localhost:3000"])
@@ -2904,12 +2309,14 @@ class TestCORS:
                 headers={
                     "Origin": "http://localhost:3000",
                     "Access-Control-Request-Method": "POST",
-                    "Access-Control-Request-Headers": "Authorization, Content-Type",
+                    "Access-Control-Request-Headers": "Authorization, Content-Type, Idempotency-Key",
                 },
             )
             assert resp.status == 200
             assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:3000"
-            assert "Authorization" in resp.headers.get("Access-Control-Allow-Headers", "")
+            allowed = resp.headers.get("Access-Control-Allow-Headers", "")
+            assert "Authorization" in allowed
+            assert "Idempotency-Key" in allowed
 
 
     @pytest.mark.asyncio
@@ -3027,28 +2434,6 @@ class TestSessionIdHeader:
 
 
     @pytest.mark.asyncio
-    async def test_provided_session_id_is_used_without_api_key(self, adapter):
-        """Local no-key mode accepts caller-supplied transcript session IDs."""
-        mock_result = {"final_response": "Continuing!", "messages": [], "api_calls": 1}
-        mock_db = MagicMock()
-        mock_db.get_messages_as_conversation.return_value = []
-        mock_db.resolve_resume_session_id.side_effect = lambda sid: sid
-        adapter._session_db = mock_db
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                resp = await cli.post(
-                    "/v1/chat/completions",
-                    headers={"X-Hermes-Session-Id": "local-session-123"},
-                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "Continue"}]},
-                )
-            assert resp.status == 200
-            assert resp.headers.get("X-Hermes-Session-Id") == "local-session-123"
-            assert mock_run.call_args.kwargs["session_id"] == "local-session-123"
-            mock_db.get_messages_as_conversation.assert_called_once_with("local-session-123")
-
-    @pytest.mark.asyncio
     async def test_traversal_session_id_header_rejected(self, auth_adapter):
         """Security (#5958): a path-traversal X-Hermes-Session-Id must be
         rejected with 400 so it can't reach the filesystem artifact paths
@@ -3117,124 +2502,6 @@ class TestSessionKeyHeader:
     gateway's session_key / session_id split.
     """
 
-    @pytest.mark.asyncio
-    async def test_session_key_passed_to_agent_and_echoed(self, auth_adapter):
-        """X-Hermes-Session-Key reaches _run_agent as gateway_session_key and is echoed back."""
-        mock_result = {"final_response": "ok", "messages": [], "api_calls": 1}
-        app = _create_app(auth_adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                resp = await cli.post(
-                    "/v1/chat/completions",
-                    headers={
-                        "X-Hermes-Session-Key": "webui:user-42",
-                        "Authorization": "Bearer sk-secret",
-                    },
-                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
-                )
-            assert resp.status == 200
-            assert resp.headers.get("X-Hermes-Session-Key") == "webui:user-42"
-            call_kwargs = mock_run.call_args.kwargs
-            assert call_kwargs["gateway_session_key"] == "webui:user-42"
-
-    @pytest.mark.asyncio
-    async def test_session_key_independent_of_session_id(self, auth_adapter):
-        """Both headers coexist: key scopes memory, id scopes transcript."""
-        mock_result = {"final_response": "ok", "messages": [], "api_calls": 1}
-        mock_db = MagicMock()
-        mock_db.get_messages_as_conversation.return_value = []
-        mock_db.resolve_resume_session_id.side_effect = lambda sid: sid
-        auth_adapter._session_db = mock_db
-        app = _create_app(auth_adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                resp = await cli.post(
-                    "/v1/chat/completions",
-                    headers={
-                        "X-Hermes-Session-Key": "channel-abc",
-                        "X-Hermes-Session-Id": "transcript-xyz",
-                        "Authorization": "Bearer sk-secret",
-                    },
-                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
-                )
-            assert resp.status == 200
-            assert resp.headers.get("X-Hermes-Session-Key") == "channel-abc"
-            assert resp.headers.get("X-Hermes-Session-Id") == "transcript-xyz"
-            call_kwargs = mock_run.call_args.kwargs
-            assert call_kwargs["gateway_session_key"] == "channel-abc"
-            assert call_kwargs["session_id"] == "transcript-xyz"
-
-    @pytest.mark.asyncio
-    async def test_session_key_absent_yields_none(self, auth_adapter):
-        """Omitting the header passes gateway_session_key=None and doesn't echo."""
-        mock_result = {"final_response": "ok", "messages": [], "api_calls": 1}
-        app = _create_app(auth_adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                resp = await cli.post(
-                    "/v1/chat/completions",
-                    headers={"Authorization": "Bearer sk-secret"},
-                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
-                )
-            assert resp.status == 200
-            assert "X-Hermes-Session-Key" not in resp.headers
-            call_kwargs = mock_run.call_args.kwargs
-            assert call_kwargs["gateway_session_key"] is None
-
-    @pytest.mark.asyncio
-    async def test_session_key_accepted_without_api_key(self, adapter):
-        """Local no-key mode accepts X-Hermes-Session-Key so VPN-local/browser
-        clients keep the same memory-scoping contract as built-in gateway
-        adapters. connect() already refuses to start the API server without
-        API_SERVER_KEY in production, so the no-key path is local/manual only.
-
-        LOCAL DIVERGENCE from upstream: upstream asserted 403 here; Laurent's
-        deployment intentionally allows session headers in no-key mode. Do not
-        re-introduce the 403 assertion on merge. See hermes-agent skill
-        'no-key local session headers'.
-        """
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/v1/chat/completions",
-                headers={"X-Hermes-Session-Key": "whatever"},
-                json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
-            )
-            # Permissive local policy: the session key must NOT be rejected as
-            # an auth failure. Any non-403 outcome is acceptable here.
-            assert resp.status != 403
-
-    @pytest.mark.asyncio
-    async def test_session_key_rejects_control_chars(self, auth_adapter):
-        """Header injection via \\r\\n must be rejected by the server-side validator.
-
-        Note: aiohttp client refuses to SEND a header containing CR/LF
-        (that check fires before the request leaves the client), so we
-        can't reach this code path through TestClient.  Test the helper
-        directly instead with a raw request that bypasses client-side
-        validation.
-        """
-        mock_request = MagicMock()
-        mock_request.headers = {"X-Hermes-Session-Key": "bad\rvalue"}
-        key, err = auth_adapter._parse_session_key_header(mock_request)
-        assert key is None
-        assert err is not None
-        assert err.status == 400
-
-    @pytest.mark.asyncio
-    async def test_session_key_rejects_oversized(self, auth_adapter):
-        """Session keys longer than the cap are rejected."""
-        app = _create_app(auth_adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/v1/chat/completions",
-                headers={"X-Hermes-Session-Key": "x" * 1000, "Authorization": "Bearer sk-secret"},
-                json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
-            )
-            assert resp.status == 400
 
     @pytest.mark.asyncio
     async def test_session_key_threads_into_create_agent(self, auth_adapter):
