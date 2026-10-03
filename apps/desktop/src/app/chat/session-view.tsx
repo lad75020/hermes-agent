@@ -13,13 +13,12 @@ import {
   $currentProvider,
   $currentReasoningEffort,
   $currentReasoningEffortWire,
-  $currentUsage,
+  $currentServiceTier,
   $messages,
   $selectedStoredSessionId,
   $turnStartedAt
 } from '@/store/session'
 import { $sessionStates } from '@/store/session-states'
-import type { UsageStats } from '@/types/hermes'
 
 import { lastVisibleMessageIsUser } from './thread-loading'
 
@@ -60,6 +59,7 @@ export interface SessionView {
   $model: ReadableAtom<string>
   $provider: ReadableAtom<string>
   $fast: ReadableAtom<boolean>
+  $serviceTier?: ReadableAtom<string>
   $reasoningEffort: ReadableAtom<string>
   /** The session's effort is not known yet (a resume in flight, or its agent
    *  still building), so an empty `$reasoningEffort` must not render as the
@@ -67,11 +67,7 @@ export interface SessionView {
   $reasoningEffortPending: ReadableAtom<boolean>
   /** Gateway-reported level the route sends for `$reasoningEffort` ('' = unknown). */
   $reasoningEffortWire: ReadableAtom<string>
-  /** Cumulative input/output token totals for this exact session surface. */
-  $usage: ReadableAtom<UsageStats>
 }
-
-export const EMPTY_SESSION_USAGE: UsageStats = { calls: 0, input: 0, output: 0, total: 0 }
 
 /** The active session's own slice, or `undefined` while it's a draft. */
 const $primaryState = computed([$activeSessionId, $sessionStates], (runtimeId, states) =>
@@ -93,7 +89,6 @@ function primaryField<T>(select: (state: ClientSessionState) => T, $draft: Reada
 }
 
 const $primaryMessages = primaryField<ChatMessage[]>(state => state.messages, $messages)
-const $primaryUsage = computed([$primaryState, $currentUsage], (state, draftUsage) => state?.usage ?? draftUsage)
 
 /**
  * Turn-busy for the workspace pane. A selected stored session that has no
@@ -127,6 +122,7 @@ export const PRIMARY_SESSION_VIEW: SessionView = {
   $busy: $primaryBusy,
   $cwd: primaryField<string>(state => state.cwd, $currentCwd),
   $fast: primaryField<boolean>(state => state.fast, $currentFastMode),
+  $serviceTier: primaryField<string>(state => state.serviceTier, $currentServiceTier),
   $lastVisibleIsUser: computed($primaryMessages, lastVisibleMessageIsUser),
   $messages: $primaryMessages,
   $messagesEmpty: computed($primaryMessages, messages => messages.length === 0),
@@ -137,8 +133,7 @@ export const PRIMARY_SESSION_VIEW: SessionView = {
   $reasoningEffortWire: primaryField<string>(state => state.reasoningEffortWire ?? '', $currentReasoningEffortWire),
   $runtimeId: $activeSessionId,
   $storedId: $selectedStoredSessionId,
-  $turnStartedAt: primaryField<number | null>(state => state.turnStartedAt, $turnStartedAt),
-  $usage: $primaryUsage
+  $turnStartedAt: primaryField<number | null>(state => state.turnStartedAt, $turnStartedAt)
 }
 
 const SessionViewContext = createContext<SessionView>(PRIMARY_SESSION_VIEW)
