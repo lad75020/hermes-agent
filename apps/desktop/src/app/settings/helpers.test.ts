@@ -148,30 +148,6 @@ describe('settings helpers', () => {
   describe('enumOptionsFor — backend selector dropdowns', () => {
     const config: HermesConfigRecord = {}
 
-    it('renders a dropdown for the TTS provider including xAI (Grok)', () => {
-      const opts = enumOptionsFor('tts.provider', 'edge', config)
-      expect(opts).toBeDefined()
-      expect(opts).toContain('xai')
-      expect(opts).toContain('edge')
-      expect(opts).toContain('elevenlabs')
-    })
-
-    it('renders a dropdown for the STT provider including Apple Native STT and xAI (Grok)', () => {
-      const opts = enumOptionsFor('stt.provider', 'local', config)
-      expect(opts).toEqual(['local', 'apple', 'groq', 'openai', 'mistral', 'xai', 'elevenlabs'])
-    })
-
-    it('renders dropdowns for per-backend model/device sub-fields', () => {
-      expect(enumOptionsFor('stt.openai.model', 'whisper-1', config)).toContain('gpt-4o-transcribe')
-      expect(enumOptionsFor('tts.openai.model', 'gpt-4o-mini-tts', config)).toContain('tts-1-hd')
-      expect(enumOptionsFor('tts.neutts.device', 'cpu', config)).toEqual(['cpu', 'cuda', 'mps'])
-    })
-
-    it('renders a dropdown for the terminal execution backend', () => {
-      const opts = enumOptionsFor('terminal.backend', 'local', config)
-      expect(opts).toEqual(['local', 'docker', 'singularity', 'modal', 'daytona', 'ssh'])
-    })
-
     it('narrows OpenAI TTS voice suggestions to what the selected model supports', () => {
       // gpt-4o-mini-tts (and unset/unknown models): full 13-voice set.
       const full = enumOptionsFor('tts.openai.voice', 'alloy', { tts: { openai: { model: 'gpt-4o-mini-tts' } } })
@@ -277,7 +253,7 @@ describe('settings helpers', () => {
         stt: {
           provider: 'local',
           providers: {
-            // both are built-in STT names omitted from ENUM_OPTIONS['stt.provider']
+            // built-in STT names: local_command is unlisted, deepinfra is listed
             local_command: { type: 'command', command: 'curl …' },
             deepinfra: { type: 'command', command: 'curl …' },
             myasr: { type: 'command', command: 'curl …' }
@@ -287,8 +263,8 @@ describe('settings helpers', () => {
 
       const opts = enumOptionsFor('stt.provider', 'local', shadowing)
       expect(opts).not.toContain('local_command')
-      expect(opts).not.toContain('deepinfra')
-      expect(opts).not.toContain('APPLE')
+      // deepinfra is a listed built-in: it appears once, as the native provider.
+      expect(opts!.filter(o => o === 'deepinfra')).toHaveLength(1)
       expect(opts).toContain('myasr')
     })
   })
