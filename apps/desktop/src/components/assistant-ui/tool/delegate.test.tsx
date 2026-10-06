@@ -2,7 +2,7 @@ import { cleanup, render } from '@testing-library/react'
 import { atom } from 'nanostores'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { type SessionView, SessionViewProvider } from '@/app/chat/session-view'
+import { EMPTY_SESSION_USAGE, type SessionView, SessionViewProvider } from '@/app/chat/session-view'
 import { I18nProvider } from '@/i18n/context'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { $activeSessionId } from '@/store/session'
@@ -29,7 +29,8 @@ function view(): SessionView {
     $fast: atom(false),
     $reasoningEffort: atom(''),
     $reasoningEffortPending: atom(false),
-    $reasoningEffortWire: atom('')
+    $reasoningEffortWire: atom(''),
+    $usage: atom(EMPTY_SESSION_USAGE)
   } satisfies SessionView
 }
 
