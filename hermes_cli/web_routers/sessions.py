@@ -126,7 +126,7 @@ _HISTORY_SUMMARY_CONTENT_LIMIT = 8_000
 _HISTORY_SUMMARY_TRUNCATION_SUFFIX = "\n\n[Content truncated in history search.]"
 
 
-def _csv(value: Optional[str]) -> List[str]:
+def _csv(value: Optional[str]) -> list[str]:
     """Split a comma-separated query param into stripped, non-empty items."""
     return [s.strip() for s in (value or "").split(",") if s.strip()]
 

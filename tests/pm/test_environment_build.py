@@ -640,7 +640,7 @@ def test_explicit_environment_installs_locked_members_without_live_selection(loc
 
 def test_explicit_workspace_preserves_seed_and_replays_copied_members(locked_project, tmp_path, monkeypatch):
     from pm.environment import PythonEnvironment
-    import pm.workspace as workspace
+    from pm import workspace
 
     source, uv, env = locked_project
     project = source / "pyproject.toml"
@@ -730,7 +730,7 @@ def test_tool_only_plugin_pyproject_locks_as_virtual_member(locked_project, tmp_
 @pytest.mark.parametrize("failure", ["facts", "missing-cfg", "restart"])
 def test_real_sync_retains_selection_until_commit(locked_project, tmp_path, monkeypatch, failure):
     import importlib
-    import pm.extras as extras
+    from pm import extras
     from pm import paths
     from pm.lock import Facts
     from pm.environments import selected_venv
