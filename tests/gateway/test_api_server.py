@@ -980,24 +980,27 @@ class TestCapabilitiesEndpoint:
 class TestSkillsEndpoint:
     @pytest.mark.asyncio
     async def test_skills_returns_list_envelope(self, adapter):
-        fake_skills = [
-            {"name": "github", "description": "GitHub workflow skill", "category": "github"},
-            {"name": "ascii-art", "description": "ASCII art generation", "category": "creative"},
-        ]
-        with patch(
-            "tools.skills_tool._find_all_skills",
-            return_value=list(fake_skills),
-        ):
-            app = _create_app(adapter)
-            async with TestClient(TestServer(app)) as cli:
-                resp = await cli.get("/v1/skills")
-                assert resp.status == 200
-                data = await resp.json()
-                assert data["object"] == "list"
-                names = sorted(s["name"] for s in data["data"])
-                assert names == ["ascii-art", "github"]
-                for entry in data["data"]:
-                    assert set(entry.keys()) >= {"name", "description", "category"}
+        from hermes_constants import get_hermes_home
+
+        skill_dir = get_hermes_home() / "skills" / "api-discovery-contract"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: api-discovery-contract\ndescription: API discovery contract\n---\n",
+            encoding="utf-8",
+        )
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/v1/skills")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["object"] == "list"
+            assert [s["name"] for s in data["data"]] == sorted(s["name"] for s in data["data"])
+            skill = next(s for s in data["data"] if s["name"] == "api-discovery-contract")
+            assert skill == {
+                "name": "api-discovery-contract",
+                "description": "API discovery contract",
+                "category": None,
+            }
 
 
 class TestToolsetsEndpoint:

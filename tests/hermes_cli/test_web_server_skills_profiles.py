@@ -76,6 +76,7 @@ class TestProfileScopedSkills:
         worker = next(skill for skill in resp.json() if skill["name"] == "worker-skill")
         assert "description" not in worker
         assert worker["enabled"] is True
+        assert all("description" not in skill for skill in resp.json())
 
     def test_description_is_loaded_for_only_the_requested_skill(self, client):
         resp = client.get(
@@ -88,6 +89,16 @@ class TestProfileScopedSkills:
 
     def test_default_list_keeps_descriptions_for_existing_clients(self, client):
         resp = client.get("/api/skills", params={"profile": "worker_alpha"})
+
+        assert resp.status_code == 200
+        worker = next(skill for skill in resp.json() if skill["name"] == "worker-skill")
+        assert worker["description"] == "test skill"
+
+    def test_explicit_description_flag_uses_discovered_metadata(self, client):
+        resp = client.get(
+            "/api/skills",
+            params={"profile": "worker_alpha", "include_descriptions": "true"},
+        )
 
         assert resp.status_code == 200
         worker = next(skill for skill in resp.json() if skill["name"] == "worker-skill")
