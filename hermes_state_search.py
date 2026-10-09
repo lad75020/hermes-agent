@@ -1288,8 +1288,8 @@ class SessionSearchMixin:
         }
 
     def search_messages(
-        self, query: str, source_filter: list[str] = None, exclude_sources: list[str] = None,
-        role_filter: list[str] = None, limit: int = 20, offset: int = 0, sort: str = None,
+        self, query: str, source_filter: list[str] | None = None, exclude_sources: list[str] | None = None,
+        role_filter: list[str] | None = None, limit: int = 20, offset: int = 0, sort: str | None = None,
         include_inactive: bool = False, fields: Optional[Collection[str]] = None,
         after_ts: Optional[int] = None, before_ts: Optional[int] = None,
     ) -> list[dict[str, Any]]:
@@ -1311,8 +1311,8 @@ class SessionSearchMixin:
                             query[: 200])
 
     def _search_messages_impl(
-        self, query: str, source_filter: list[str] = None, exclude_sources: list[str] = None,
-        role_filter: list[str] = None, limit: int = 20, offset: int = 0, sort: str = None,
+        self, query: str, source_filter: list[str] | None = None, exclude_sources: list[str] | None = None,
+        role_filter: list[str] | None = None, limit: int = 20, offset: int = 0, sort: str | None = None,
         include_inactive: bool = False, fields: Optional[Collection[str]] = None,
         after_ts: Optional[int] = None, before_ts: Optional[int] = None,
     ) -> list[dict[str, Any]]:
@@ -1463,8 +1463,8 @@ class SessionSearchMixin:
                                limit_sql="LIMIT ?")
 
     def search_sessions_by_id(
-        self, query: str, limit: int = 20, include_archived: bool = True, source: str = None,
-        sources: list[str] = None, exclude_sources: list[str] = None) -> list[dict[str, Any]]:
+        self, query: str, limit: int = 20, include_archived: bool = True, source: str | None = None,
+        sources: list[str] | None = None, exclude_sources: list[str] | None = None) -> list[dict[str, Any]]:
         """Search surfaced sessions by exact/prefix/substring session id. Also matches
         ``_lineage_root_id`` so an old compression root id resolves to the live continuation."""
         needle = (query or "").strip().lower()
