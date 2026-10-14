@@ -64,6 +64,7 @@ function view(): SessionView {
     $runtimeId: atom(SESSION_ID),
     $storedId: atom(SESSION_ID),
     $turnStartedAt: atom(null),
+    $usage: atom({ calls: 0, input: 0, output: 0, total: 0 }),
     kind: 'primary'
   }
 }

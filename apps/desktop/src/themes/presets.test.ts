@@ -1,16 +1,13 @@
+import { contrastRatio } from '@hermes/shared/color'
 import { describe, expect, it } from 'vitest'
 
-import { contrastRatio } from './color'
 import {
   BUILTIN_THEME_LIST,
   BUILTIN_THEMES,
-  DEFAULT_SKIN_NAME,
   DEFAULT_TYPOGRAPHY,
-  EMOJI_FALLBACK,
   githubContrastTheme,
   githubTheme,
-  nousTheme,
-  nousAltTheme
+  nousTheme
 } from './presets'
 
 // #40364: none of the UI text/mono fonts carry emoji glyphs, so every font

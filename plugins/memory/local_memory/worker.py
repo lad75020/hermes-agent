@@ -80,7 +80,7 @@ class LocalMemoryWorker:
 
 
 def _load_config_file(path: str) -> LocalMemoryConfig:
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, "r", encoding="utf-8-sig") as fh:
         return _coerce(json.load(fh))
 
 

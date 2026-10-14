@@ -70,7 +70,7 @@ def load_config(hermes_home: str) -> LocalMemoryConfig:
     path = config_path_for(hermes_home)
     if path.exists():
         try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
+            loaded = json.loads(path.read_text(encoding="utf-8-sig"))
             if isinstance(loaded, dict):
                 raw.update(loaded)
         except json.JSONDecodeError as exc:
@@ -98,7 +98,7 @@ def save_config(values: Dict[str, Any], hermes_home: str) -> None:
     current: Dict[str, Any] = {}
     if path.exists():
         try:
-            current = json.loads(path.read_text(encoding="utf-8"))
+            current = json.loads(path.read_text(encoding="utf-8-sig"))
         except json.JSONDecodeError:
             current = {}
     current.update({k: v for k, v in values.items() if k in LocalMemoryConfig().__dict__})

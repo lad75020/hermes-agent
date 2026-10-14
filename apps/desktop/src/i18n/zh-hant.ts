@@ -106,7 +106,13 @@ export const zhHantOverrides = {
   artifactPreview: zhHantArtifacts.artifactPreview,
   sidebar: zhHantChrome.sidebar,
   composer: zhHantChat.composer,
-  statusStack: zhHantChat.statusStack,
+  statusStack: {
+    ...zhHantChat.statusStack,
+    coding: {
+      ...zhHantChat.statusStack.coding,
+      tokenTotals: (input, output) => `輸入 ${input} · 輸出 ${output}`
+    }
+  },
   updates: zhHantBoot.updates,
   install: zhHantBoot.install,
   onboarding: zhHantBoot.onboarding,
@@ -144,9 +150,6 @@ export const zhHantOverrides = {
       notNow: '暫不'
     }
   }
-  ,statusStack: { coding: {
-      tokenTotals: (input, output) => `輸入 ${input} · 輸出 ${output}`,
-  } }
 } satisfies TranslationOverrides
 
 export const zhHant = defineLocale(zhHantOverrides)

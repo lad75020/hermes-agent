@@ -1,10 +1,10 @@
+import { contrastRatio, mix } from '@hermes/shared/color'
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { $backendThemes, __resetBackendSkinSync, ingestBackendSkin } from './backend-sync'
-import { contrastRatio, mix } from './color'
 import { skinPref, ThemeProvider, useTheme } from './context'
-import { everforestTheme, midnightTheme, githubContrastTheme } from './presets'
+import { everforestTheme, githubContrastTheme, midnightTheme } from './presets'
 import type { DesktopTheme } from './types'
 import { installUserTheme } from './user-themes'
 
@@ -470,8 +470,7 @@ describe('GitHub Contrast readability settings', () => {
     const strength = (name: string) => Number.parseFloat(cssVar(name)) / 100
 
     const chatSurface = mix(palette.background, mode === 'dark' ? '#0d0d0e' : '#f3f3f3', mode === 'dark' ? 0.26 : 0.08)
-    const effectiveScaffold = (name: string) =>
-      mix(chatSurface, palette.foreground, strength(name) * scaffoldOpacity)
+    const effectiveScaffold = (name: string) => mix(chatSurface, palette.foreground, strength(name) * scaffoldOpacity)
 
     expect(window.document.documentElement.dataset.hermesTheme).toBe('github-contrast')
     expect(window.document.documentElement.dataset.hermesMode).toBe(mode)

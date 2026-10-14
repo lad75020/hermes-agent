@@ -51,7 +51,13 @@ export const arOverrides = {
   artifactPreview: arArtifacts.artifactPreview,
   sidebar: arChrome.sidebar,
   composer: arChat.composer,
-  statusStack: arChat.statusStack,
+  statusStack: {
+    ...arChat.statusStack,
+    coding: {
+      ...arChat.statusStack.coding,
+      tokenTotals: (input, output) => `${input} إدخال · ${output} إخراج`
+    }
+  },
   updates: arBoot.updates,
   install: arBoot.install,
   onboarding: arBoot.onboarding,
@@ -77,9 +83,6 @@ export const arOverrides = {
       notNow: 'ليس الآن'
     }
   }
-  ,statusStack: { coding: {
-      tokenTotals: (input, output) => `${input} إدخال · ${output} إخراج`,
-  } }
 } satisfies TranslationOverrides
 
 export const ar = defineLocale(arOverrides)
