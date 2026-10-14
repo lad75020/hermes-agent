@@ -11,7 +11,6 @@ import logging
 from typing import TYPE_CHECKING
 import asyncio
 import concurrent.futures
-import dataclasses
 import json
 import os
 import re
@@ -101,7 +100,9 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
             if _action == "rewrite":
                 _new_text = _result.get("text")
                 if isinstance(_new_text, str):
-                    event = dataclasses.replace(event, text=_new_text)
+                    # Keep the adapter-owned event: completion and streamed-final state
+                    # must stay visible to the lifecycle hooks after this rewrite.
+                    event.text = _new_text
                 break
             if _action == "allow":
                 break

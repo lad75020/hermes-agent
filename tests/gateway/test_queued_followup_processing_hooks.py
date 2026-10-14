@@ -35,6 +35,7 @@ class HookRecordingAdapter(BasePlatformAdapter):
         super().__init__(PlatformConfig(enabled=True, token="***"), Platform.TELEGRAM)
         self.started: list = []
         self.completed: list = []
+        self.replies: list = []
 
     async def connect(self) -> bool:
         return True
@@ -59,6 +60,7 @@ class HookRecordingAdapter(BasePlatformAdapter):
 
     async def on_processing_complete(self, event, outcome) -> None:
         self.completed.append((getattr(event, "message_id", None), outcome))
+        self.replies.append(event._processing_final_response)
 
 
 class _TwoTurnAgent:
@@ -118,6 +120,11 @@ def _make_runner(adapter):
 
 
 def _install_fake_agent(monkeypatch, tmp_path, agent_cls):
+    import socket
+
+    bootstrap = types.ModuleType("hermes_bootstrap")
+    bootstrap._happy_eyeballs_create_connection = socket.create_connection
+    monkeypatch.setitem(sys.modules, "hermes_bootstrap", bootstrap)
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
@@ -197,6 +204,7 @@ async def test_queued_followup_fires_processing_hooks(monkeypatch, tmp_path):
     # ...and it was acknowledged through the lifecycle hooks.
     assert adapter.started == ["queued-1"]
     assert adapter.completed == [("queued-1", ProcessingOutcome.SUCCESS)]
+    assert adapter.replies == ["done-2"]
 
 
 @pytest.mark.asyncio

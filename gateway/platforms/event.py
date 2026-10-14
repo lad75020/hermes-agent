@@ -106,6 +106,17 @@ class MessageEvent:
     _gateway_accepted: bool = field(default=False, init=False, repr=False, compare=False)
     # Run-owned final presentation snapshot; never deserialized from ingress metadata.
     _notification_reply_muted: Optional[bool] = field(default=None, init=False, repr=False, compare=False)
+    # Authoritative handler reply for completion hooks; stream previews/sends are not turn results.
+    _processing_final_response: Optional[str] = field(default=None, init=False, repr=False, compare=False)
+    _processing_outcome: Optional[ProcessingOutcome] = field(default=None, init=False, repr=False, compare=False)
+
+    def retain_processing_reply(
+        self, reply: str, outcome: ProcessingOutcome = ProcessingOutcome.SUCCESS,
+    ) -> None:
+        """A queued chain must keep this event's reply when later turns replace its result."""
+        if self._processing_final_response is None:
+            self._processing_final_response = reply
+            self._processing_outcome = outcome
 
     def absorb_reply_expected(self, other: "MessageEvent") -> None:
         """One turn now answers *other* too: an addressed message wins, then an unknown one."""

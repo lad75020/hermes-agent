@@ -1,6 +1,6 @@
 """A2A inbound adapter: stdlib http.server (daemon thread) serving the Agent Card, /metrics and
 JSON-RPC (message/send, message/stream SSE, tasks/*, push-config CRUD). Inbound tasks are framed
-(security.wrap_inbound) and routed into the LIVE gateway session; ``send()`` fulfils the per-task
+(security.wrap_inbound) and routed into the LIVE gateway session; processing completion fulfils the per-task
 Future the HTTP handler blocks on. No token configured => binds 127.0.0.1 only."""
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from collections import deque
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -291,10 +290,9 @@ class A2AAdapter(BasePlatformAdapter):
         self._profile_sessions: dict[tuple[str, str, str], str] = {}
         self._profile_session_locks: dict[tuple[str, str, str], threading.Lock] = {}
         self._profile_session_locks_guard = threading.Lock()
-        # Pending reply futures: task_id -> (context_id, Future). _pending_order keeps per-context
-        # FIFO so adapter.send() — which only knows the context — resolves the oldest task.
+        # Pending reply futures: task_id -> (context_id, Future). Completion belongs to the
+        # inbound event's task id, never to a context-wide streaming send.
         self._pending: dict[str, tuple[str, Future]] = {}
-        self._pending_order: dict[str, deque[str]] = {}
         # Request ownership outlives reply Futures and also covers synchronous profile forwards.
         self._active_tasks: set[str] = set()
         self._pending_lock = threading.Lock()
@@ -350,7 +348,6 @@ class A2AAdapter(BasePlatformAdapter):
             for tid in list(self._pending):
                 self._resolve_locked(tid, protocol.STATE_FAILED, "[agent shutting down]")
             self._pending.clear()
-            self._pending_order.clear()
             self._active_tasks.clear()
 
     def _watchdog_loop(self) -> None:
@@ -484,7 +481,6 @@ class A2AAdapter(BasePlatformAdapter):
         with self._pending_lock:
             self._active_tasks.add(task_id)
             self._pending[task_id] = (context_id, fut)
-            self._pending_order.setdefault(context_id, deque()).append(task_id)
         return fut
 
     def _activate_task(self, task_id: str) -> None:
@@ -494,12 +490,7 @@ class A2AAdapter(BasePlatformAdapter):
     def _pop_pending(self, task_id: str) -> None:
         with self._pending_lock:
             self._active_tasks.discard(task_id)
-            entry = self._pending.pop(task_id, None)
-            order = self._pending_order.get(entry[0]) if entry else None
-            if order and task_id in order:
-                order.remove(task_id)
-            if order is not None and not order:
-                self._pending_order.pop(entry[0], None)
+            self._pending.pop(task_id, None)
 
     def _resolve_locked(self, task_id: str, state: str, text: str) -> bool:
         entry = self._pending.get(task_id)
@@ -511,10 +502,6 @@ class A2AAdapter(BasePlatformAdapter):
     def _resolve_task(self, task_id: str, state: str, text: str) -> bool:
         with self._pending_lock:
             return self._resolve_locked(task_id, state, text)
-
-    def _resolve_oldest_for_context(self, context_id: str, state: str, text: str) -> bool:
-        with self._pending_lock:
-            return any(self._resolve_locked(tid, state, text) for tid in self._pending_order.get(context_id, ()))
 
     def _scope_for_agent(self, agent: Optional[dict]) -> tuple[str, str]:
         return tuple(str((agent or self._agents[""]).get(k) or "") for k in ("slug", "tenant"))
@@ -830,13 +817,11 @@ class A2AAdapter(BasePlatformAdapter):
         logger.debug("A2A: push notification sent for task %s", task_id)
 
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None):
-        """Fulfil the oldest pending reply Future for this context (``chat_id`` = A2A context id).
-        Only sends carrying ``metadata['notify']`` (the base adapter's final-reply marker) satisfy
-        the caller; progress/status/preview sends must not."""
-        if not (metadata or {}).get("notify"):
-            logger.debug("A2A: ignoring non-final send for context %s", chat_id)
-        elif not self._resolve_oldest_for_context(chat_id, protocol.STATE_COMPLETED, content or ""):
-            logger.debug("A2A: send() for context %s had no pending waiter", chat_id)  # late chunk / out-of-band
+        """Acknowledge delivery fragments; only processing completion can answer an RPC.
+
+        ``notify`` marks visible sends, including suffix continuations after failed edits.
+        It cannot establish either the full response or the owning task.
+        """
         return SendResult(success=True, message_id=str(int(time.time() * 1000)))
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
@@ -845,19 +830,18 @@ class A2AAdapter(BasePlatformAdapter):
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": f"a2a:{chat_id}", "type": "dm"}
 
+    async def on_processing_start(self, event: MessageEvent) -> None:
+        # Queued turns must participate in the runner's paired lifecycle hooks too.
+        self.tasks.set_state(str(event.message_id or ""), protocol.STATE_WORKING)
+
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
-        """Resolve the task future when processing ends without a reply send (failures,
-        cancellations, empty runs, or a reply the gateway already streamed to the user) so the
-        HTTP thread returns promptly."""
+        """Resolve this inbound task from the authoritative full turn response."""
         task_id = str(getattr(event, "message_id", "") or "")
         if task_id:
-            # A streamed turn never calls send() with notify=True (the gateway suppresses the
-            # normal final send once streaming delivered the body), so the SUCCESS default must
-            # not resolve with "" — that strands every A2A streaming reply as an empty completed
-            # task (#116944). _streamed_final_response is the same stash _final_text_for_post_turn_hooks
-            # reads for /goal and /loop.
-            _streamed = getattr(event, "_streamed_final_response", "")
-            default = (protocol.STATE_COMPLETED, _streamed if isinstance(_streamed, str) else "")
+            reply = getattr(event, "_processing_final_response", None)
+            if reply is None:
+                reply = getattr(event, "_streamed_final_response", "")
+            default = (protocol.STATE_COMPLETED, reply if isinstance(reply, str) else "")
             self._resolve_task(task_id, *{
                 ProcessingOutcome.FAILURE: (protocol.STATE_FAILED, "[agent processing failed]"),
                 ProcessingOutcome.CANCELLED: (protocol.STATE_CANCELED, ""),

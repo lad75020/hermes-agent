@@ -10,8 +10,70 @@ interrupting and steer-demoted messages (#72502, salvage #72503).
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, ProcessingOutcome
+
+
+def retain_processing_reply(event: MessageEvent | None, source, reply: str) -> None:
+    """Keep a queued turn's own reply before a later turn replaces the chain's result."""
+    from gateway.run import _sanitize_gateway_final_response
+
+    if event is not None and event._processing_final_response is None:
+        event.retain_processing_reply(_sanitize_gateway_final_response(source.platform, reply))
+
+
+def shape_turn_reply(result, source, *, history_len=0, display_kind=None, reply_expected=None):
+    """Apply the same text policy before normal delivery and queued completion hooks."""
+    from agent.i18n import t
+    from gateway.response_filters import (
+        is_intentional_silence_agent_result, is_machinery_display_kind, silence_allowed,
+    )
+    from gateway.run import (
+        _is_gateway_hidden_reasoning_incomplete_turn, _normalize_empty_agent_response,
+        _sanitize_gateway_final_response,
+    )
+    from gateway.run_turn import _unexpected_silence_reply
+
+    response = result.get("final_response") or ""
+    if _is_gateway_hidden_reasoning_incomplete_turn(result):
+        response = ""
+    intentional_silence = is_intentional_silence_agent_result(result, response)
+    kind = result.get("queued_terminal_display_kind", display_kind)
+    expected = result.get("queued_terminal_reply_expected", reply_expected)
+    if intentional_silence and not silence_allowed(kind, expected):
+        logging.getLogger("gateway.run").warning(
+            "silence marker rejected on a user turn: platform=%s chat=%s", source.platform, source.chat_id)
+        intentional_silence = False
+        response = _unexpected_silence_reply()
+    elif intentional_silence and not is_machinery_display_kind(kind):
+        logging.getLogger("gateway.run").debug(
+            "silence marker suppressed on an unaddressed turn: platform=%s chat=%s", source.platform, source.chat_id)
+    if response == "(empty)" and not intentional_silence:
+        from agent.turn_explainers import EMPTY_RESPONSE_EXPLANATION
+        model = str(result.get("model") or "").strip() or t("gateway.errors.empty_response_model_label")
+        response = t("gateway.shared.warn_passthrough", error=EMPTY_RESPONSE_EXPLANATION.format(model=model))
+    if not intentional_silence:
+        response = _normalize_empty_agent_response(result, response, history_len=history_len)
+        response = _sanitize_gateway_final_response(source.platform, response)
+    return response, intentional_silence
+
+
+
+def retain_interrupted_reply(event: MessageEvent | None, result) -> None:
+    """An interrupted turn owns a canceled completion before its successor starts."""
+    if event is not None and result.get("interrupted"):
+        event.retain_processing_reply("", ProcessingOutcome.CANCELLED)
+
+
+def retain_followup_reply(event: MessageEvent | None, source, result, *, history_len, display_kind, reply_expected):
+    """Shape terminal replies without overwriting a result retained before recursion."""
+    if event is None or event._processing_final_response is not None:
+        return
+    reply, silent = shape_turn_reply(
+        result, source, history_len=history_len, display_kind=display_kind, reply_expected=reply_expected,
+    )
+    retain_processing_reply(event, source, "" if silent or result.get("_notification_reply_muted") else reply)
 
 
 def _followup_processing_hooks_apply(adapter, event: MessageEvent | None) -> bool:

@@ -609,7 +609,7 @@ def _bare_adapter():
 
 
 class TestReplyCapture:
-    def test_send_waits_for_notify_marked_final_reply(self):
+    def test_send_waits_for_processing_completion(self):
         """Interim/editable sends must not satisfy the blocked A2A RPC future."""
         adapter = _bare_adapter()
         fut = adapter._add_pending("task-final", "ctx-final")
@@ -629,6 +629,10 @@ class TestReplyCapture:
                 metadata={"notify": True},
             )
             assert final.success is True
+            assert not fut.done()
+            from gateway.platforms.event import ProcessingOutcome
+            await adapter.on_processing_complete(SimpleNamespace(
+                message_id="task-final", _processing_final_response="FINAL_PROOF_PAYLOAD"), ProcessingOutcome.SUCCESS)
             assert fut.result(timeout=0) == (protocol.STATE_COMPLETED, "FINAL_PROOF_PAYLOAD")
 
         try:
@@ -636,18 +640,23 @@ class TestReplyCapture:
         finally:
             adapter._pop_pending("task-final")
 
-    def test_concurrent_same_context_tasks_resolve_fifo(self):
-        """Two in-flight tasks sharing a context must not cross-talk: replies
-        resolve the oldest outstanding task first."""
+    def test_concurrent_same_context_tasks_resolve_by_event(self):
+        """Two in-flight tasks sharing a context must not cross-talk."""
         adapter = _bare_adapter()
         fut1 = adapter._add_pending("task-1", "ctx-shared")
         fut2 = adapter._add_pending("task-2", "ctx-shared")
 
         async def run():
+            from gateway.platforms.event import ProcessingOutcome
             await adapter.send("ctx-shared", "reply one", metadata={"notify": True})
+            assert not fut1.done() and not fut2.done()
+            await adapter.on_processing_complete(SimpleNamespace(
+                message_id="task-1", _processing_final_response="reply one"), ProcessingOutcome.SUCCESS)
             assert fut1.done() and not fut2.done()
             assert fut1.result(timeout=0)[1] == "reply one"
             await adapter.send("ctx-shared", "reply two", metadata={"notify": True})
+            await adapter.on_processing_complete(SimpleNamespace(
+                message_id="task-2", _processing_final_response="reply two"), ProcessingOutcome.SUCCESS)
             assert fut2.result(timeout=0)[1] == "reply two"
 
         try:
@@ -679,7 +688,7 @@ class TestReplyCapture:
 
         adapter = _bare_adapter()
         fut = adapter._add_pending("task-ok", "ctx-ok")
-        event = SimpleNamespace(message_id="task-ok")
+        event = SimpleNamespace(message_id="task-ok", _processing_final_response="real reply")
 
         async def run():
             await adapter.send("ctx-ok", "real reply", metadata={"notify": True})
@@ -887,6 +896,9 @@ def _make_live_adapter(monkeypatch, reply_fn=None):
             reply = reply_fn(event)
         if reply is not None:
             await adapter.send(event.source.chat_id, reply, metadata={"notify": True})
+            from gateway.platforms.event import ProcessingOutcome
+            event._processing_final_response = reply
+            await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
 
     adapter.handle_message = fake_handle_message  # type: ignore
     adapter._message_handler = object()  # non-None so dispatch proceeds

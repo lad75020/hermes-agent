@@ -48,6 +48,9 @@ def _make_live_adapter(monkeypatch, reply_fn=None):
         reply = "ECHO: " + event.text if reply_fn is None else reply_fn(event)
         if reply is not None:
             await adapter.send(event.source.chat_id, reply, metadata={"notify": True})
+            from gateway.platforms.event import ProcessingOutcome
+            event._processing_final_response = reply
+            await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
 
     adapter.handle_message = fake_handle_message  # type: ignore
     adapter._message_handler = object()

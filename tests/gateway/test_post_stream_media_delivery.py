@@ -12,6 +12,7 @@ and can strip the path from the visible reply, so auto-attach is intentional
 there. This file pins the asymmetry.
 """
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import unquote
@@ -44,6 +45,7 @@ def _fake_runner(thread_meta):
     return SimpleNamespace(
         _thread_metadata_for_source=lambda source, anchor=None: thread_meta,
         _reply_anchor_for_event=lambda event: None,
+        _media_delivery_scope_for_source=lambda source: nullcontext(),
     )
 
 

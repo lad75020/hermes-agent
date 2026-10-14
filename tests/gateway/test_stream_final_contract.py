@@ -18,6 +18,9 @@ Three invariants:
 """
 
 import asyncio
+import socket
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -222,6 +225,13 @@ class TestFinalAdoptionGuards:
 
 
 class TestQueuedLaneReconcile:
+    @pytest.fixture(autouse=True)
+    def isolate_bootstrap(self, monkeypatch):
+        # These delivery tests need no environment activation from the installed payload.
+        bootstrap = types.ModuleType("hermes_bootstrap")
+        bootstrap._happy_eyeballs_create_connection = socket.create_connection
+        monkeypatch.setitem(sys.modules, "hermes_bootstrap", bootstrap)
+
     @pytest.mark.asyncio
     async def test_queued_first_response_edits_in_place(self):
         from gateway.run import GatewayRunner

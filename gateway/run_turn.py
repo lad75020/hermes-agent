@@ -26,7 +26,7 @@ from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome
 from gateway.platforms.event import MessageEvent
 from gateway.response_filters import (
-    display_kind_for_event, is_machinery_display_kind, reply_expected_metadata, silence_allowed,
+    display_kind_for_event, reply_expected_metadata,
 )
 from gateway.warning_notifications import diagnostic_metadata, diagnostic_turn_muted, diagnostic_wake_muted
 from gateway.session import (
@@ -1509,42 +1509,13 @@ class GatewayTurnMixin:
         logging, resume-pending clear, empty-response normalization, and identity-guarded
         post-compression session_id propagation. Returns
         ``(response, _intentional_silence, agent_messages)``."""
-        from gateway.run import (
-            _is_gateway_hidden_reasoning_incomplete_turn, _normalize_empty_agent_response,
-            _sanitize_gateway_final_response, _should_clear_resume_pending_after_turn,
+        from gateway.run import _should_clear_resume_pending_after_turn
+        from gateway.run_turn_followup_ack import shape_turn_reply
+
+        response, _intentional_silence = shape_turn_reply(
+            agent_result, source, history_len=len(history),
+            display_kind=persist_user_display_kind, reply_expected=reply_expected,
         )
-        response = agent_result.get("final_response") or ""
-        # Hidden-reasoning-only retry exhaustion: the loop's sentinel text doubles as final_response
-        # and would be delivered verbatim (peer agents would ingest it as a completed turn).
-        if _is_gateway_hidden_reasoning_incomplete_turn(agent_result):
-            response = ""
-        _intentional_silence = self._is_intentional_silence(agent_result, response)
-        # A queued (/queue) chain's TERMINAL turn owns the silence verdict, not the event that
-        # opened the chain: an internal follow-up, or a message not addressed to the bot, may go
-        # silent; any other human one must not.
-        _silence_kind = agent_result.get("queued_terminal_display_kind", persist_user_display_kind)
-        _silence_reply_expected = agent_result.get("queued_terminal_reply_expected", reply_expected)
-        if _intentional_silence and not silence_allowed(_silence_kind, _silence_reply_expected):
-            logger.warning(
-                "silence marker rejected on a user turn: platform=%s chat=%s",
-                _platform_name, source.chat_id or "unknown",
-            )
-            _intentional_silence = False
-            response = _unexpected_silence_reply()
-        elif _intentional_silence and not is_machinery_display_kind(_silence_kind):
-            logger.debug(
-                "silence marker suppressed on an unaddressed turn: platform=%s chat=%s",
-                _platform_name, source.chat_id or "unknown",
-            )
-
-        # "(empty)" = the model produced no visible content after exhausting all retries. One
-        # text with the CLI explainer and the desktop (agent/turn_explainers.py) so the user
-        # reads the same words on every surface.
-        if response == "(empty)" and not _intentional_silence:
-            from agent.turn_explainers import EMPTY_RESPONSE_EXPLANATION
-
-            _model = str(agent_result.get("model") or "").strip() or t("gateway.errors.empty_response_model_label")
-            response = t("gateway.shared.warn_passthrough", error=EMPTY_RESPONSE_EXPLANATION.format(model=_model))
         agent_messages = agent_result.get("messages", [])
         logger.info(
             "response ready: platform=%s chat=%s session=%s time=%.1fs api_calls=%d response=%d chars",
@@ -1560,12 +1531,6 @@ class GatewayTurnMixin:
                 await self.async_session_store.clear_resume_pending(session_key)
             except Exception as _e:
                 logger.debug("clear_resume_pending failed for %s: %s", session_key, _e)
-
-        # Normalize empty responses: surface errors, partial failures, and work-without-text.
-        # Fix for #18765.
-        if not _intentional_silence:
-            response = _normalize_empty_agent_response(agent_result, response, history_len=len(history))
-            response = _sanitize_gateway_final_response(source.platform, response)
 
         # The agent thread already updated the contextvar; propagate to SessionEntry + _save() only
         # if the binding still points at the session this run was launched against.
@@ -2195,6 +2160,7 @@ class GatewayTurnMixin:
                 # human turn may be followed by an internal startup-resume on the next process.
                 await self._persist_prompt_pins(session_key, _run_start_session_id)
             agent_result = await self._run_agent(
+                inbound_event=event,
                 message=message_text, context_prompt=prepared.context_prompt, history=history, source=_turn_source,
                 session_id=_run_start_session_id, session_key=session_key,
                 run_generation=run_generation, event_message_id=self._reply_anchor_for_event(event),
@@ -3737,7 +3703,9 @@ class GatewayTurnMixin:
         self, turn_ctx: TurnContext, adapter: Any, response: Any, result: Any, stream_task: Any,
     ) -> None:
         """Deliver the first response before a queued follow-up runs, unless streaming already did."""
+        from gateway.run_turn_followup_ack import retain_processing_reply
         if turn_ctx.mute_notification_reply:
+            retain_processing_reply(turn_ctx.inbound_event, turn_ctx.source, "")
             return
         session_key = turn_ctx.session_key
         _sc = turn_ctx.stream_consumer_holder[0]
@@ -3748,26 +3716,18 @@ class GatewayTurnMixin:
                 logger.debug("Stream consumer wait before queued message failed: %s", e)
         # Delivery uses the finalized task result (empty/failure normalization), not raw ``result``.
         _delivery_result = response if isinstance(response, dict) else (result or {})
-        first_response = _delivery_result.get("final_response", "")
+        from gateway.run_turn_followup_ack import shape_turn_reply
+        first_response, silent = shape_turn_reply(
+            _delivery_result, turn_ctx.source, history_len=len(turn_ctx.history),
+            display_kind=turn_ctx.persist_user_display_kind, reply_expected=turn_ctx.reply_expected,
+        )
+        if silent:
+            first_response = ""
         _already_streamed = self._run_agent_stream_confirmed_final_delivery(
             _sc, first_response, previewed=bool(_delivery_result.get("response_previewed")),
         )
-        # Same silence predicate as the normal path, else this branch leaks the literal marker.
-        if self._is_intentional_silence(_delivery_result, first_response):
-            if silence_allowed(turn_ctx.persist_user_display_kind, turn_ctx.reply_expected):
-                logger.info(
-                    "Queued follow-up for session %s: suppressing intentional silence marker before continuing.",
-                    session_key or "?",
-                )
-                first_response = ""
-            else:
-                logger.warning(
-                    "Queued follow-up for session %s: replacing a human-turn silence marker.",
-                    session_key or "?",
-                )
-                first_response = _unexpected_silence_reply()
-                _already_streamed = False
         # Failed turns deliver their text but never their attachments (completed-turn parity).
+        retain_processing_reply(turn_ctx.inbound_event, turn_ctx.source, first_response)
         _deliver_media = not _delivery_result.get("failed")
         if first_response:
             logger.info(
@@ -3843,6 +3803,8 @@ class GatewayTurnMixin:
             return turn_ctx.result_holder[0] or {"final_response": response, "messages": history}
 
         # Interrupted: discard the response ("Operation interrupted." is noise).
+        from gateway.run_turn_followup_ack import retain_interrupted_reply
+        retain_interrupted_reply(turn_ctx.inbound_event, result)
         if not result.get("interrupted"):
             await self._run_agent_deliver_first_response(turn_ctx, adapter, response, result, stream_task)
 
@@ -3912,21 +3874,9 @@ class GatewayTurnMixin:
             with suppress(Exception):
                 await _clear_adapter.send_typing(source.chat_id, metadata=_status_thread_metadata)
 
-        # Re-baseline the cached agent's message_count before recursing, else the coherence guard
-        # rebuilds on OUR OWN flushed rows (the outer handler re-baselines only after the chain).
-        # Re-baseline the cached agent's message_count snapshot before recursing into the in-band queued
-        # (/queue) follow-up turn. The first turn has completed and flushed its own user + assistant rows to
-        # the SessionDB, so the cross-process coherence guard (#45966) — which this recursive _run_agent
-        # call re-enters — would otherwise see the grown on-disk count against the stale build-time snapshot
-        # and rebuild the agent on THIS process's OWN writes, destroying the prompt-cache prefix #46237 was
-        # merged to preserve. The existing re-baseline in _handle_message_with_agent only runs after the
-        # whole _run_agent chain unwinds — too late for the in-band follow-up. Use the same (session_key,
-        # session_id) the recursive call runs under so the snapshot matches exactly what the follow-up's
-        # guard will consult. Fail-safe in helper.
-        # Acknowledge the follow-up the way an idle-session message is: this in-band drain is the only
-        # place a queued/interrupting message ever runs, so base.py's hook site is never entered for it.
-        # Resolve the adapter from the follow-up's OWN source — a multiplexed gateway can route it to a
-        # different profile's adapter, and only that instance holds the per-message reaction state.
+        # Re-baseline before recursing: our own flushed rows would otherwise trigger the coherence
+        # guard to rebuild the cached agent and destroy its prompt-cache prefix (#45966, #46237).
+        # In-band drains bypass base.py's hooks; acknowledge through the follow-up's owning adapter.
         from gateway.run_turn_followup_ack import _followup_cancel_outcome, _run_followup_processing_hook
         _hook_adapter = self._intake_adapter_for(next_source) if pending_event is not None else None
         await _run_followup_processing_hook(_hook_adapter, pending_event, "on_processing_start")
@@ -3936,6 +3886,7 @@ class GatewayTurnMixin:
             await self._refresh_agent_cache_message_count(session_key, session_id)
 
             followup_result = await self._run_agent(
+                inbound_event=pending_event,
                 message=next_message, context_prompt=turn_ctx.context_prompt, history=updated_history,
                 source=next_source, session_id=session_id, session_key=next_session_key,
                 run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
@@ -3955,8 +3906,15 @@ class GatewayTurnMixin:
             await _run_followup_processing_hook(
                 _hook_adapter, pending_event, "on_processing_complete", ProcessingOutcome.FAILURE)
             raise
+        from gateway.run_turn_followup_ack import retain_followup_reply
+        with self._profile_scope_for_source(next_source):
+            retain_followup_reply(
+                pending_event, next_source, followup_result, history_len=len(updated_history),
+                display_kind=next_display_kind, reply_expected=next_reply_expected,
+            )
         await _run_followup_processing_hook(
-            _hook_adapter, pending_event, "on_processing_complete", ProcessingOutcome.SUCCESS)
+            _hook_adapter, pending_event, "on_processing_complete",
+            (pending_event._processing_outcome if pending_event is not None else None) or ProcessingOutcome.SUCCESS)
         merged = _preserve_queued_followup_history_offset(result, followup_result)
         # The TERMINAL turn of the chain owns the ledger identity for the outer final send, which
         # the adapter brackets against the event that OPENED the chain. Without this the terminal
@@ -4274,6 +4232,7 @@ class GatewayTurnMixin:
         reply_expected: Optional[bool] = None,
         scheduled_heartbeat: bool = False,
         title_user_message: Optional[str] = None,
+        inbound_event: Optional[MessageEvent] = None,
     ) -> dict[str, Any]:
         """Run the agent; returns the full run_conversation result dict.
 
@@ -4305,6 +4264,7 @@ class GatewayTurnMixin:
             run_generation=run_generation, context_prompt=context_prompt, history=history,
             session_id=session_id, _interrupt_depth=_interrupt_depth,
             event_message_id=event_message_id, inbound_message_id=inbound_message_id,
+            inbound_event=inbound_event,
             channel_prompt=channel_prompt, moa_config=moa_config,
             title_user_message=title_user_message,
             persist_user_message=persist_user_message,

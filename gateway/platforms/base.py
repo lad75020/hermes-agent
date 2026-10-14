@@ -4595,6 +4595,7 @@ class BasePlatformAdapter(ABC):
                 logger.info("[%s] Suppressing stale response for interrupted session %s", self.name,
                             session_key)
                 response = None
+            event.retain_processing_reply(response or getattr(event, "_streamed_final_response", "") or "")
             if not response:
                 logger.debug("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
             else:
@@ -4620,15 +4621,9 @@ class BasePlatformAdapter(ABC):
                 if not _tts_paths and _tts_requested_path is not None:
                     with contextlib.suppress(OSError):
                         os.remove(_tts_requested_path)
-                # Suspend the typing refresh before the first delivery attempt, not just in
-                # the turn's finally (#117300): if the final send stalls (platform accepted it
-                # but the HTTP ack never returns), control never reaches the finally, and
-                # _keep_typing keeps refreshing sendChatAction forever while the agent is
-                # already idle and the user can read the answer. Reuse the existing
-                # _typing_paused mechanism: _keep_typing skips paused chats each tick and
-                # _stop_typing_refresh's finally discards it, so it cannot leak into the next
-                # turn. No new await on the delivery path (a fire-and-forget stop task was
-                # measured to have no effect).
+                # Pause typing before delivery: a stalled HTTP ack may never reach finally
+                # (#117300). _keep_typing honours _typing_paused until _stop_typing_refresh
+                # clears it, so this needs no await and cannot leak into the next turn.
                 if text_content or extracted.images or extracted.media_files or extracted.local_files \
                         or _tts_paths or _tts_caption_delivered:
                     self.pause_typing_for_chat(event.source.chat_id)
@@ -4648,7 +4643,7 @@ class BasePlatformAdapter(ABC):
                 event=event) or "")
             await self._run_processing_hook(
                 "on_processing_complete", event,
-                ProcessingOutcome.SUCCESS if processing_ok else ProcessingOutcome.FAILURE)
+                (event._processing_outcome or ProcessingOutcome.SUCCESS) if processing_ok else ProcessingOutcome.FAILURE)
             # Force-flush an unfired debounce timer so this task hands off to a fresh drain task.
             # Clear the Event BEFORE the stop-typing await so concurrent inbound sees a live guard.
             await self._flush_text_debounce_now(session_key)
