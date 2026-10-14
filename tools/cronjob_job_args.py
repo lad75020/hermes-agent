@@ -509,7 +509,6 @@ def _format_job(job: dict[str, Any]) -> dict[str, Any]:
         "state": effective_job_state(job),
         "paused_at": job.get("paused_at"),
         "paused_reason": job.get("paused_reason"),
-        "no_fallback": bool(job.get("no_fallback")),
     }
     for key in _FORMAT_JOB_OPTIONAL_KEYS:
         if job.get(key):

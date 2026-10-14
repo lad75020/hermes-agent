@@ -802,7 +802,7 @@ def maybe_auto_title(
 
 _RESPONSE_TITLE_PREFIX = "Provide a title of less than 50 characters for the following text : "
 
-def _clean_title(title: str, *, max_chars: int = 80) -> Optional[str]:
+def _clean_response_title(title: str, *, max_chars: int = 80) -> Optional[str]:
     """Normalize LLM title output and enforce a hard character limit."""
     title = ((title or "").strip().splitlines() or [""])[0].strip()
     title = title.strip('"\'')
@@ -847,7 +847,7 @@ def generate_title_from_response_text(
             main_runtime=main_runtime,
         )
         # "less than 50 characters" => cap at 49 characters.
-        return _clean_title(response.choices[0].message.content or "", max_chars=49)
+        return _clean_response_title(response.choices[0].message.content or "", max_chars=49)
     except Exception as e:
         logger.warning("Response title generation failed: %s", e)
         logger.debug("Response title generation traceback", exc_info=True)

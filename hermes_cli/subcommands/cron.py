@@ -48,8 +48,6 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         help="Skip the LLM entirely — run --script on schedule and deliver "
             "its stdout directly. Empty stdout = silent. Classic watchdog "
             "pattern (memory alerts, disk alerts, CI pings).")
-    _flag(cron_create, "--no-fallback", dest="no_fallback", default=False,
-        help="Use only this job's primary provider/model; never use the global fallback chain.")
     cron_create.add_argument("--monitor-script", dest="monitor_script",
         help="Monitor mode: path to a cheap source script under "
             "~/.hermes/scripts/ that runs each tick BEFORE the agent. "
@@ -131,12 +129,6 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "existing script on the job).")
     cron_edit.add_argument("--agent", dest="no_agent", action="store_const", const=False,
         help="Disable no-agent mode on this job (reverts to LLM-driven execution).")
-    cron_edit.add_argument(
-        "--no-fallback", dest="no_fallback", action="store_const", const=True, default=None,
-        help="Disable provider/model fallback for this job.")
-    cron_edit.add_argument(
-        "--allow-fallback", dest="no_fallback", action="store_const", const=False,
-        help="Allow this job to use the global provider/model fallback chain.")
     cron_edit.add_argument(
         "--continuity", dest="continuity", action="store_const", const=True, default=None,
         help="Turn on run-to-run continuity: each run sees the job's own "
