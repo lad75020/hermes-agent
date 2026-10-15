@@ -1,0 +1,19 @@
+[Unit]
+Description=Hermes browser application
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/Volumes/WDBlack4TB/.hermes/hermes-agent/apps/webapp
+ExecStart=/usr/bin/node /Volumes/WDBlack4TB/.hermes/hermes-agent/apps/webapp/server.mjs
+Environment=WEBAPP_HOST=127.0.0.1
+Environment=WEBAPP_PORT=8080
+Environment=WEBAPP_BACKEND=http://127.0.0.1:9119
+Environment=WEBAPP_PUBLIC_ORIGIN=http://hermes-webapp.localhost:8080
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

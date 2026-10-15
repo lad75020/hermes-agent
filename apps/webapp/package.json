@@ -1,0 +1,13 @@
+{
+  "name": "hermes-browser-webapp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "vite build --config vite.config.ts --configLoader runner",
+    "start": "node server.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test tests/*.test.mjs && vitest run --config vitest.config.ts --configLoader runner",
+    "smoke": "node scripts/smoke.mjs"
+  }
+}

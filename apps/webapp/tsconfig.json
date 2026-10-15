@@ -1,0 +1,15 @@
+{
+  "extends": "../desktop/tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["../desktop/src/*"],
+      "@hermes/plugin-sdk": ["../desktop/src/sdk/index.ts"],
+      "@hermes/shared/billing": ["../shared/src/billing-types.ts"],
+      "@hermes/shared/*": ["../shared/src/*"],
+      "@hermes/shared": ["../shared/src/index.ts"]
+    },
+    "incremental": false
+  },
+  "include": ["src", "../desktop/src/vite-env.d.ts", "../desktop/src/global.d.ts"],
+  "exclude": ["dist", "tests"]
+}

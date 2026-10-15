@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.hermes.webapp</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/laurent/.nvm/versions/node/v22.22.3/bin/node</string>
+    <string>/Volumes/WDBlack4TB/.hermes/hermes-agent/apps/webapp/server.mjs</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Volumes/WDBlack4TB/.hermes/hermes-agent/apps/webapp</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>WEBAPP_HOST</key><string>127.0.0.1</string>
+    <key>WEBAPP_PORT</key><string>8080</string>
+    <key>WEBAPP_BACKEND</key><string>http://127.0.0.1:9119</string>
+    <key>WEBAPP_PUBLIC_ORIGIN</key><string>http://hermes-webapp.localhost:8080</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Volumes/WDBlack4TB/.hermes/hermes-agent/apps/webapp/.scratch/service.log</string>
+  <key>StandardErrorPath</key><string>/Volumes/WDBlack4TB/.hermes/hermes-agent/apps/webapp/.scratch/service-error.log</string>
+</dict></plist>

@@ -1,0 +1,5 @@
+.webapp-login { max-width: 36rem; margin: 12vh auto; padding: 2rem; font: 16px/1.6 system-ui; }
+.webapp-login button, .webapp-login a { display: inline-block; margin: 1rem 1rem 0 0; padding: .5rem 1rem; cursor: pointer; }
+#webapp-controls { position: fixed; bottom: 1.8rem; right: .8rem; z-index: 2147483647; background: var(--background, Canvas); color: var(--foreground, CanvasText); border: 1px solid var(--border, GrayText); border-radius: .4rem; padding: .4rem .7rem; max-width: 27rem; font: 12px/1.5 system-ui; }
+#webapp-controls summary, #webapp-controls button { cursor: pointer; }
+webview { display: none !important; }
