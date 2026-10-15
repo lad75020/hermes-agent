@@ -17,6 +17,7 @@ from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
 from agent.i18n import t
+from gateway.platforms.api_server_request_cancel import APIRequestCancellationMixin
 
 try:
     from aiohttp import web
@@ -725,7 +726,7 @@ def _parse_conversation_history(raw_history: Any) -> tuple:
     return conversation_history, None
 
 
-class OpenAICompatRoutesMixin:
+class OpenAICompatRoutesMixin(APIRequestCancellationMixin):
     """/v1/chat/completions and /v1/responses handlers + SSE writers."""
 
     def _select_request_route(
@@ -771,6 +772,253 @@ class OpenAICompatRoutesMixin:
             self._set_run_status(completion_id, status)
             self._release_run_owner_if_forgotten(completion_id)
         return _approval_notify, _on_done
+
+    def _parse_profile_header(
+        self, request: "web.Request"
+    ) -> tuple[str, Optional["web.Response"]]:
+        """Extract and validate X-Hermes-Profile, defaulting to the base profile."""
+        from gateway.platforms.api_server import _openai_error
+        raw = request.headers.get("X-Hermes-Profile", "").strip() or "default"
+        if re.search(r'[\r\n\x00]', raw):
+            return "default", web.json_response(
+                {"error": {"message": "Invalid profile", "type": "invalid_request_error"}},
+                status=400,
+            )
+
+        try:
+            from hermes_cli.profiles import normalize_profile_name, validate_profile_name, profile_exists
+            profile = normalize_profile_name(raw)
+            validate_profile_name(profile)
+            if not profile_exists(profile):
+                return "default", web.json_response(
+                    _openai_error(f"Unknown Hermes profile: {raw}", code="profile_not_found"),
+                    status=404,
+                )
+            return profile, None
+        except ValueError as e:
+            return "default", web.json_response(
+                _openai_error(str(e), code="invalid_profile"),
+                status=400,
+            )
+        except Exception as e:
+            logger.warning("Failed to resolve Hermes profile %r: %s", raw, e, exc_info=True)
+            return "default", web.json_response(
+                _openai_error("Unable to resolve Hermes profile", err_type="server_error"),
+                status=500,
+            )
+
+    def _maybe_auto_title_api_session(
+        self,
+        session_id: Optional[str],
+        assistant_response: str,
+        conversation_history: Optional[list[dict[str, Any]]] = None,
+    ) -> None:
+        """Name an API-created session from its first assistant response.
+
+        Runs in a fire-and-forget background thread via title_generator so the
+        API response path is never delayed.  The title is stored in the
+        existing SessionDB ``title`` column; no schema changes are needed.
+        """
+        if not session_id or not assistant_response:
+            return
+        try:
+            from agent.title_generator import maybe_auto_title_from_response
+            maybe_auto_title_from_response(
+                self._ensure_session_db(),
+                session_id,
+                assistant_response,
+                conversation_history or [],
+            )
+        except Exception:
+            logger.debug("Failed to schedule API session auto-title", exc_info=True)
+
+    @staticmethod
+    def _profile_reasoning_supported(model: Optional[str], provider: Optional[str]) -> bool:
+        """Return whether a profile's selected model appears to support reasoning.
+
+        The primary signal is models.dev metadata.  Some provider catalogs lag
+        behind newly released reasoning models, so keep a conservative name
+        heuristic as a fallback for clients that need to decide whether to show
+        a reasoning-effort control before sending a request.
+        """
+        raw_model = (model or "").strip()
+        if not raw_model:
+            return False
+
+        try:
+            from agent.models_dev import get_model_capabilities
+            caps = get_model_capabilities((provider or "").strip(), raw_model)
+            if caps is not None and bool(getattr(caps, "supports_reasoning", False)):
+                return True
+        except Exception as exc:
+            logger.debug(
+                "Unable to resolve reasoning capabilities for profile model %s/%s: %s",
+                provider,
+                model,
+                exc,
+                exc_info=True,
+            )
+
+        value = raw_model.lower()
+        exact = {
+            "o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini",
+            "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5.1", "gpt-5.1-codex",
+            "gpt-5.5", "gpt-5.5-pro",
+        }
+        if value in exact:
+            return True
+        prefixes = (
+            "openai/o", "openai/gpt-5", "gpt-5",
+            "anthropic/claude-3.7", "anthropic/claude-sonnet-4", "anthropic/claude-opus-4", "anthropic/claude-haiku-4",
+            "google/gemini-2.5", "google/gemini-3", "gemini-2.5", "gemini-3",
+            "x-ai/grok-3", "x-ai/grok-4", "grok-3", "grok-4",
+            "deepseek/deepseek-r1", "deepseek/deepseek-v3.1", "deepseek/deepseek-v4",
+            "qwen/qwq", "qwen/qwen3", "qwen/qwen-plus", "qwen/qwen-max",
+            "moonshotai/kimi", "z-ai/glm-4.5", "z-ai/glm-5",
+            "minimax/minimax-m2", "mistralai/mistral-medium",
+            "nvidia/nemotron", "arcee-ai/trinity", "perceptron/",
+        )
+        if any(value.startswith(prefix) for prefix in prefixes):
+            return True
+        markers = (
+            "-thinking", ":thinking", "thinking",
+            "reasoning", "deepseek-r1", "qwq", "qwen3", "gemini-2.5", "gemini-3",
+            "claude-3.7", "claude-sonnet-4", "claude-opus-4", "grok-3", "grok-4",
+        )
+        provider_value = (provider or "").lower()
+        return any(marker in value for marker in markers) or (
+            "openai" in provider_value and value.startswith("o")
+        )
+
+    @classmethod
+    def _profile_supported_parameters(cls, model: Optional[str], provider: Optional[str]) -> list[str]:
+        """Build OpenAI/OpenRouter-style supported parameter hints for a profile."""
+        params: list[str] = []
+        if cls._profile_reasoning_supported(model, provider):
+            params.extend(["reasoning", "reasoning_effort"])
+        # Preserve insertion order while removing duplicates.
+        return list(dict.fromkeys(params))
+
+    async def _handle_profiles(self, request: "web.Request") -> "web.Response":
+        """GET /v1/profiles — return Hermes profiles available to X-Hermes-Profile."""
+        from gateway.platforms.api_server import _openai_error
+        auth_err = self._check_auth(request)
+        if auth_err is not None:
+            return auth_err
+
+        try:
+            from hermes_cli.profiles import list_profiles
+            profiles = list_profiles()
+        except Exception as e:
+            logger.error("Error listing Hermes profiles: %s", e, exc_info=True)
+            return web.json_response(
+                _openai_error(f"Unable to list Hermes profiles: {e}", err_type="server_error"),
+                status=500,
+            )
+
+        data = []
+        for profile in profiles:
+            supported_parameters = self._profile_supported_parameters(profile.model, profile.provider)
+            supports_reasoning = any(
+                parameter in {"reasoning", "reasoning_effort"}
+                for parameter in supported_parameters
+            )
+            data.append({
+                "id": profile.name,
+                "object": "hermes.profile",
+                "name": profile.name,
+                "is_default": profile.is_default,
+                "model": profile.model,
+                "provider": profile.provider,
+                "gateway_running": profile.gateway_running,
+                "skill_count": profile.skill_count,
+                "supported_parameters": supported_parameters,
+                "supports_reasoning": supports_reasoning,
+                "reasoning": {
+                    "supported": supports_reasoning,
+                    "effort_levels": ["low", "medium", "high"] if supports_reasoning else [],
+                },
+            })
+
+        return web.json_response({
+            "object": "list",
+            "data": data,
+        })
+
+    @staticmethod
+    def _normalize_approval_choice(choice: Any) -> str:
+        normalized = str(choice or "").strip().lower()
+        aliases = {"approve": "once", "allow": "once", "yes": "once", "no": "deny"}
+        return aliases.get(normalized, normalized)
+
+    async def _handle_approvals(self, request: "web.Request") -> "web.Response":
+        """GET /v1/approvals — list pending approval requests in this API process."""
+        from gateway.platforms.api_server import _openai_error, _coerce_request_bool
+        auth_err = self._check_auth(request)
+        if auth_err is not None:
+            return auth_err
+        try:
+            from tools.approval import snapshot_gateway_approvals
+
+            approvals = snapshot_gateway_approvals()
+        except Exception as exc:
+            logger.exception("[api_server] approval listing failed")
+            return web.json_response(_openai_error(str(exc), err_type="server_error"), status=500)
+        return web.json_response({
+            "object": "hermes.approval_list",
+            "approvals": approvals,
+            "count": len(approvals),
+        })
+
+    async def _handle_approval_resolve(self, request: "web.Request") -> "web.Response":
+        """POST /v1/approvals/resolve — resolve FIFO approval by session_key."""
+        from gateway.platforms.api_server import _openai_error, _coerce_request_bool
+        auth_err = self._check_auth(request)
+        if auth_err is not None:
+            return auth_err
+        try:
+            body = await request.json()
+        except ValueError:
+            return web.json_response(_openai_error("Invalid JSON"), status=400)
+
+        session_key = str(body.get("session_key") or request.match_info.get("session_key") or "").strip()
+        if not session_key:
+            return web.json_response(_openai_error("session_key is required"), status=400)
+        choice = self._normalize_approval_choice(body.get("choice"))
+        if choice not in {"once", "session", "always", "deny"}:
+            return web.json_response(
+                _openai_error(
+                    "choice must be one of: once, session, always, deny",
+                    code="invalid_approval_choice",
+                ),
+                status=400,
+            )
+        resolve_all = (
+            _coerce_request_bool(body.get("all"), default=False)
+            or _coerce_request_bool(body.get("resolve_all"), default=False)
+        )
+        try:
+            from tools.approval import resolve_gateway_approval
+
+            resolved = resolve_gateway_approval(session_key, choice, resolve_all=resolve_all)
+        except Exception as exc:
+            logger.exception("[api_server] approval resolution failed for session %s", session_key)
+            return web.json_response(_openai_error(str(exc)), status=500)
+        if resolved <= 0:
+            return web.json_response(
+                _openai_error(
+                    f"No pending approval for session: {session_key}",
+                    code="approval_not_pending",
+                ),
+                status=404,
+            )
+        return web.json_response({
+            "object": "hermes.approval_response",
+            "session_key": session_key,
+            "choice": choice,
+            "resolve_all": resolve_all,
+            "resolved": resolved,
+        })
 
     def _spawn_stream_agent(self, stream_q, *, on_done=None, run_agent=None, **run_kwargs) -> tuple:
         """Start ``_run_agent`` for an SSE writer -> ``(agent_task, agent_ref)``. ``agent_ref[0]``
