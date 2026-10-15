@@ -35,6 +35,7 @@ export const arOverrides = {
   notifications: arDiagnostics.notifications,
   remoteDisplayBanner: arBoot.remoteDisplayBanner,
   butterbar: arBoot.butterbar,
+  promptNotices: arBoot.promptNotices,
   titlebar: arChrome.titlebar,
   keybinds: arChrome.keybinds,
   language: arSettings.language,
@@ -50,14 +51,16 @@ export const arOverrides = {
   artifactCard: arArtifacts.artifactCard,
   artifactPreview: arArtifacts.artifactPreview,
   sidebar: arChrome.sidebar,
-  composer: arChat.composer,
-  statusStack: {
-    ...arChat.statusStack,
-    coding: {
-      ...arChat.statusStack.coding,
-      tokenTotals: (input, output) => `${input} إدخال · ${output} إخراج`
-    }
+  composer: {
+    ...arChat.composer,
+    redirect: 'إعادة توجيه التشغيل الحالي',
+    queueLostNote: 'فُقد الدور أثناء إعادة التشغيل',
+    restoreImageDraft: 'استعادة مسودة الصورة',
+    queueCancelFailed: 'تعذّر إزالة الدور المنتظر',
+    queueLostDiscard: 'تجاهل',
+    queueLostDiscardTip: 'أعادت البوابة التشغيل أثناء هذا الدور ولا يمكن إكماله. تجاهله لتستمر الأدوار المنتظرة خلفه.'
   },
+  statusStack: arChat.statusStack,
   updates: arBoot.updates,
   install: arBoot.install,
   onboarding: arBoot.onboarding,
