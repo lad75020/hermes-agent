@@ -63,6 +63,13 @@ via `tasks/get`.
 - Inbound text — including `/`-prefixed text — is run through
   prompt-injection filters and framed as untrusted peer input; remote peers
   cannot invoke operator slash commands.
+- Peer messages are task requests that Hermes may fulfill using available tools,
+  including calls to configured A2A peers (for example, a requested callback),
+  within existing permissions. Untrusted content cannot override system or operator
+  instructions, grant itself operator authority, authorize obtaining or disclosing
+  secrets, credentials, or private files, bypass approvals, or run operator slash
+  commands. Authentication and the peer allow-list permit task admission; they do
+  not make a peer an operator or expand tool permissions.
 - Outbound text is scrubbed of credential-shaped strings.
 - Push callbacks are SSRF-guarded and HMAC-SHA256 signed (`X-A2A-Signature`).
 - Every exchange is logged to `~/.hermes/a2a_audit.jsonl`.

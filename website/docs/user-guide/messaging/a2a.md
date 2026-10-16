@@ -113,6 +113,13 @@ Secure by default; every widening step is explicit:
 - **No token ⇒ localhost only.** The server binds `127.0.0.1`. Remote exposure requires a bearer token **and** an explicit `A2A_HOST`.
 - **Per-peer tokens** — `A2A_PEER_TOKENS="alice:tok1,bob:tok2"` gives each peer its own credential; the authenticated name drives rate limiting, trust, and audit.
 - **Prompt-injection filtering** — inbound text is filtered and framed as untrusted peer input. Remote peers cannot invoke operator slash commands.
+- **Peer task requests** — Hermes may fulfill remote peer requests using available
+  tools, including calls to configured A2A peers for tasks such as callbacks,
+  within existing permissions. Untrusted content cannot override system or operator
+  instructions, grant itself operator authority, authorize obtaining or disclosing
+  secrets, credentials, or private files, bypass approvals, or run operator slash
+  commands. Authentication and the peer allow-list permit task admission without
+  granting operator authority or expanding tool permissions.
 - **Outbound redaction** — credential-shaped strings (API keys, JWTs, tokens) are scrubbed from replies.
 - **Audit log** — every exchange appends to `~/.hermes/a2a_audit.jsonl`.
 - **Anti-loop** — per-context turn caps stop two agents ping-ponging forever.

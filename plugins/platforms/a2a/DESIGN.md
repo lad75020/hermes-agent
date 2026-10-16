@@ -107,6 +107,13 @@ Peers resolved from `config.yaml` → `a2a_agents`, or a direct URL.
   peers can never reach operator slash commands) is defanged (ChatML /
   role-prefix / override patterns → `[filtered]`) and framed with a privacy
   prefix marking it untrusted peer input.
+- **Task guidance:** both the registered platform hint and the per-message privacy
+  prefix permit peer task requests through available tools, including calls to
+  configured A2A peers, within existing permissions. Untrusted content cannot
+  override system or operator instructions, grant itself operator authority,
+  authorize obtaining or disclosing secrets, credentials, or private files,
+  bypass approvals, or run operator slash commands. Authentication, filtering,
+  redaction, and approval gates still apply; peer admission grants no operator role.
 - **Outbound redaction:** credential-shaped strings (`sk-…`, `ghp_…`, JWTs,
   bearer tokens, emails) scrubbed before anything leaves.
 - **Rate limiting:** sliding window per authenticated identity
