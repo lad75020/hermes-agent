@@ -1080,7 +1080,7 @@ export interface ConnectionTargetEnvField {
   default: string
   prompt?: string | null
 }
-export type CatalogTier = 'official' | 'community'
+export type CatalogTier = 'official' | 'verified' | 'community'
 /** The catalog's security scan of the pinned commit; read-only on the card. */
 export interface CatalogScan {
   status: CatalogScanStatus
@@ -4595,6 +4595,7 @@ export interface CanonicalSessionInfo {
   api_mode?: string | null
   tool_count?: number | null
   credential_hint?: string | null
+  config_warning?: string | null
   [key: string]: unknown
 }
 export interface SessionStatsParams {
@@ -4625,6 +4626,20 @@ export interface SessionStats {
   model: string
   provider: string
   fallback_model?: string | null
+}
+export interface RollbackSessionDiffParams {
+  session_id: string
+  profile?: string | null
+}
+/** ``gateway/session_tui_ops.py::_session_diff``: ``CheckpointManager.session_diff`` under the session's frozen checkpoint policy (``enabled: false`` when that policy does not checkpoint). ``diff`` is bounded to fit one frame; ``diff_lines`` counts the whole body. */
+export interface RollbackSessionDiffResult {
+  enabled: boolean
+  success?: boolean
+  stat?: string
+  diff?: string
+  diff_lines?: number
+  empty?: boolean
+  error?: string | null
 }
 export interface SessionAutomationParams {
   session_id: string
@@ -4868,6 +4883,7 @@ export interface CanonicalCreateParams {
   cwd_explicit?: boolean | null
   run_budget?: number | null
   verbose?: boolean
+  client_env?: Record<string, string> | null
 }
 export interface CanonicalSnapshot {
   session_id: string
@@ -4945,6 +4961,7 @@ export interface CanonicalSnapshotInfo {
   api_mode?: string | null
   tool_count?: number | null
   credential_hint?: string | null
+  config_warning?: string | null
 }
 export interface CanonicalResumeParams {
   profile?: string | null
@@ -5173,12 +5190,14 @@ export interface CanonicalBotDeliverParams {
   author?: Record<string, unknown> | null
   notification_category?: string | null
 }
+/** A delivery's receipt. It names its admission, unless ``refused``: the FIFO refused the delivery before anything was committed (``gateway/session_bot.py``), a terminal ``failed`` receipt with no admission that the relay settles as the sender's answer. */
 export interface CanonicalBotDeliverResult {
   status: string
   delivery_id: string
   profile_home: string
   session_id: string
-  admission_id: string
+  admission_id?: string | null
+  refused?: true | null
   message: string
   reply?: string | null
   retry_admission_id?: string | null
@@ -5642,7 +5661,7 @@ export interface TodoUpdatedPayload {
   todos: unknown[]
   revision: number
 }
-/** ``agent/credits_tracker.py::AgentNotice`` via notice_callback, and ``server._await_agent_ready``'s slow-build notice. ``level``: info | warn | error | success; ``kind``: sticky | ttl | agent. */
+/** ``agent/credits_tracker.py::AgentNotice`` via notice_callback, and ``server._await_agent_ready``'s slow-build notice. ``level``: info | warn | error | success; ``kind``: sticky | ttl | agent. ``detail``: the full text behind a short ``text`` (the low-disk auto-prune question): Desktop shows it in the toast's expandable body, the Ink TUI prints it into the transcript. */
 export interface NotificationShowPayload {
   text: string
   level: string
@@ -5650,6 +5669,7 @@ export interface NotificationShowPayload {
   ttl_ms?: number | null
   key?: string | null
   id?: string | null
+  detail?: string | null
 }
 export interface NotificationClearPayload {
   key: string
@@ -6671,6 +6691,8 @@ export interface CanonicalRpcMethods {
   /** Acknowledge a turn lost across an owner restart; the FIFO behind it resumes. Never requeues the lost input. */
   'prompt.resolve_unknown': { params: PromptResolveUnknownParams; result: AdmissionStatus }
   'prompt.submit': { params: CanonicalSubmitParams; result: AdmissionStatus }
+  /** The classic CLI's /diff session: everything changed since the session's earliest retained checkpoint, as data for its terminal renderer. */
+  'rollback.session_diff': { params: RollbackSessionDiffParams; result: RollbackSessionDiffResult }
   /** Owner identity and the canonical capabilities a client may rely on. */
   'runtime.describe': { params: RuntimeDescribeParams; result: RuntimeDescribeResult }
   /** The classic CLI's /goal, /subgoal, /loop, /heartbeat manager calls (state writes, the goal judge, quality gates), run by the owner on the session's row. */
@@ -6726,6 +6748,7 @@ export const CANONICAL_RPC_METHODS = [
   'prompt.receipt',
   'prompt.resolve_unknown',
   'prompt.submit',
+  'rollback.session_diff',
   'runtime.describe',
   'session.automation',
   'session.create',
