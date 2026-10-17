@@ -666,6 +666,14 @@ hermes gateway status                # Check status
 tail -f ~/.hermes/logs/gateway.log   # View logs
 ```
 
+launchd's bootstrap stdout/stderr go to `~/Library/Logs/Hermes/gateway.log` and
+`gateway.error.log`, under the real account home. Other service labels use a
+subdirectory named after their label to keep installations and profiles separate.
+These local paths let launchd open its log files before spawning the gateway even
+when `HERMES_HOME` is on an external volume. Gateway runtime output, including
+timestamped stderr, still goes to `HERMES_HOME/logs/gateway.log` and `gateway.error.log`.
+Plist refreshes regenerate these paths on install, start and restart.
+
 The generated plist lives at `~/Library/LaunchAgents/ai.hermes.gateway.plist`. It includes three environment variables:
 
 - **PATH** — your full shell PATH at install time, with the venv `bin/` and `node_modules/.bin` prepended. This ensures user-installed tools (Node.js, ffmpeg, etc.) are available to gateway subprocesses like the WhatsApp bridge.

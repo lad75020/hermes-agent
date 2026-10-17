@@ -350,6 +350,13 @@ def _launchd_degrade_or_raise(exc: subprocess.CalledProcessError, what: str) -> 
     _launchd_fallback_to_detached(f"{what} exit {exc.returncode}")
 
 
+def _launchd_bootstrap_log_dir() -> Path:
+    """Account-local stdio for launchd, using the same home and identity as its LaunchAgent."""
+    log_dir = _gw().get_launchd_plist_path().parent.parent / "Logs" / "Hermes"
+    label = _gw().get_launchd_label()
+    return log_dir if label == "ai.hermes.gateway" else log_dir / label
+
+
 def generate_launchd_plist() -> str:
     from html import escape
     # Stable cwd anchor — never the volatile source checkout (same rot risk as systemd's WorkingDirectory).
@@ -358,6 +365,10 @@ def generate_launchd_plist() -> str:
     log_dir = _gw().get_hermes_home() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     label = _gw().get_launchd_label()
+    # launchd opens these BEFORE spawning osascript; an external HERMES_HOME may be inaccessible
+    # to launchd even when its child can open the runtime logs through the wrapper below.
+    bootstrap_log_dir = _launchd_bootstrap_log_dir()
+    bootstrap_log_dir.mkdir(parents=True, exist_ok=True)
 
     # launchd's default PATH misses Homebrew, nvm, cargo…; prepend venv/bin + node dirs (as in the
     # systemd unit) so node stays resolvable even if the shell PATH changes, then the shell PATH.
@@ -450,10 +461,10 @@ def generate_launchd_plist() -> str:
     <integer>60</integer>
 {nofile_block}
     <key>StandardOutPath</key>
-    <string>{stdout_log}</string>
+    <string>{escape(str(bootstrap_log_dir / "gateway.log"))}</string>
     
     <key>StandardErrorPath</key>
-    <string>{stderr_log}</string>
+    <string>{escape(str(bootstrap_log_dir / "gateway.error.log"))}</string>
 </dict>
 </plist>
 """

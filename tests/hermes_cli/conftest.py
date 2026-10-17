@@ -5,6 +5,16 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_launchd_bootstrap_logs(tmp_path, monkeypatch):
+    """Plist generation creates account-local log dirs; never write into the real account."""
+    from hermes_cli import gateway_launchd
+
+    original = gateway_launchd._launchd_bootstrap_log_dir
+    monkeypatch.setattr(gateway_launchd, "_launchd_bootstrap_log_dir", lambda: tmp_path / "launchd-logs")
+    return original
+
+
 @pytest.fixture
 def all_assignees_spawnable(monkeypatch):
     """Pretend every assignee maps to a real Hermes profile.
