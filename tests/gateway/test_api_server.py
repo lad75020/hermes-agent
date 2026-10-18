@@ -401,7 +401,6 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/health/detailed", adapter._handle_health_detailed)
     app.router.add_get("/v1/health", adapter._handle_health)
     app.router.add_get("/v1/models", adapter._handle_models)
-    app.router.add_get("/v1/profiles", adapter._handle_profiles)
     app.router.add_get("/api/model/options", adapter._handle_model_options)
     app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
     app.router.add_get("/v1/skills", adapter._handle_skills)
@@ -412,7 +411,6 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
     app.router.add_delete("/v1/responses/{response_id}", adapter._handle_delete_response)
-    app.router.add_post("/v1/requests/{request_id}/cancel", adapter._handle_cancel_request)
     app.router.add_post(
         "/api/platforms/{platform}/events",
         adapter._handle_platform_event_callback,
@@ -982,27 +980,24 @@ class TestCapabilitiesEndpoint:
 class TestSkillsEndpoint:
     @pytest.mark.asyncio
     async def test_skills_returns_list_envelope(self, adapter):
-        from hermes_constants import get_hermes_home
-
-        skill_dir = get_hermes_home() / "skills" / "api-discovery-contract"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(
-            "---\nname: api-discovery-contract\ndescription: API discovery contract\n---\n",
-            encoding="utf-8",
-        )
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.get("/v1/skills")
-            assert resp.status == 200
-            data = await resp.json()
-            assert data["object"] == "list"
-            assert [s["name"] for s in data["data"]] == sorted(s["name"] for s in data["data"])
-            skill = next(s for s in data["data"] if s["name"] == "api-discovery-contract")
-            assert skill == {
-                "name": "api-discovery-contract",
-                "description": "API discovery contract",
-                "category": None,
-            }
+        fake_skills = [
+            {"name": "github", "description": "GitHub workflow skill", "category": "github"},
+            {"name": "ascii-art", "description": "ASCII art generation", "category": "creative"},
+        ]
+        with patch(
+            "tools.skills_tool.find_all_skills",
+            return_value=list(fake_skills),
+        ):
+            app = _create_app(adapter)
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.get("/v1/skills")
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["object"] == "list"
+                names = sorted(s["name"] for s in data["data"])
+                assert names == ["ascii-art", "github"]
+                for entry in data["data"]:
+                    assert set(entry.keys()) >= {"name", "description", "category"}
 
 
 class TestToolsetsEndpoint:

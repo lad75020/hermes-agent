@@ -70,7 +70,6 @@ _STATIC_FEATURE_FLAGS = {
     "session_resources": True, "model_options": True, "session_chat": True,
     "session_chat_streaming": True, "session_fork": True, "session_model_lock": True,
     "reasoning_streaming": True,
-    "chat_completions_tool_output_events": True, "chat_completions_reasoning_summary_events": True,
     "admin_config_rw": False, "jobs_admin": False, "memory_write_api": False,
     "skills_api": True, "audio_api": False, "realtime_voice": False,
     "session_continuity_header": "X-Hermes-Session-Id",
@@ -79,13 +78,9 @@ _STATIC_FEATURE_FLAGS = {
 # feature is advertised only while that "features" flag is truthy on this listener.
 _CAPABILITY_ENDPOINTS = (
     ("health", ("GET", "/health")), ("health_detailed", ("GET", "/health/detailed")),
-    ("profiles", ("GET", "/v1/profiles")),
-    ("approvals", ("GET", "/v1/approvals")),
-    ("approval_resolve", ("POST", "/v1/approvals/resolve")),
     ("models", ("GET", "/v1/models")), ("model_options", ("GET", "/api/model/options")),
     ("chat_completions", ("POST", "/v1/chat/completions")),
     ("responses", ("POST", "/v1/responses")), ("runs", ("POST", "/v1/runs")),
-    ("request_cancel", ("POST", "/v1/requests/{request_id}/cancel")),
     ("run_status", ("GET", "/v1/runs/{run_id}")),
     ("run_events", ("GET", "/v1/runs/{run_id}/events")),
     ("run_approval", ("POST", "/v1/runs/{run_id}/approval")),
@@ -700,7 +695,7 @@ def check_api_server_requirements() -> bool:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key, X-Hermes-Session-Id, X-Hermes-Request-Id, X-Hermes-Session-Key, X-Hermes-Profile"}
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key, X-Hermes-Session-Id"}
 _SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
@@ -1155,8 +1150,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self._response_stores: dict[str, ResponseStore] = {}
         self._response_store_lock = threading.Lock()
         _api_runs._initialize_run_state(self, store_factory=RunIdempotencyStore)
-        self._active_api_agent_refs: dict[tuple[str, str], list] = {}
-        self._active_api_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._session_db: Optional[Any] = None  # explicit override (tests/manual wiring)
         self._session_dbs: dict[str, Any] = {}  # per-profile-home SessionDB cache
         self._session_db_cache_lock = threading.Lock()
@@ -1583,12 +1576,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         off and the prefix names this gateway's own profile), the served profile name, or
         ``_PROFILE_REJECTED`` (-> 404). Fail closed: a foreign prefix must never be ignored."""
         profile = (request.match_info.get("profile") or "").strip()
-        header_profile = request.headers.get("X-Hermes-Profile", "").strip()
-        if header_profile:
-            selected, error = self._parse_profile_header(request)
-            if error is not None or (profile and profile != selected):
-                return _PROFILE_REJECTED
-            profile = selected
         if not profile:
             return None
         cfg = getattr(self.gateway_runner, "config", None)
@@ -1663,11 +1650,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("GET", "/health/detailed", self._handle_health_detailed),
             ("GET", "/v1/health", self._handle_health),
             ("GET", "/v1/models", self._handle_models),
-            ("GET", "/v1/profiles", self._handle_profiles),
-            ("GET", "/v1/approvals", self._handle_approvals),
-            ("POST", "/v1/approvals/resolve", self._handle_approval_resolve),
-            ("POST", "/v1/approvals/{session_key}/resolve", self._handle_approval_resolve),
-            ("POST", "/v1/requests/{request_id}/cancel", self._handle_cancel_request),
             ("GET", "/api/model/options", self._handle_model_options),
             ("GET", "/v1/capabilities", self._handle_capabilities),
             # Browser-control (gated on browser.extension_control.enabled + API key): POST
@@ -1773,10 +1755,17 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _parse_session_key_header(
         self, request: web.Request) -> tuple[Optional[str], Optional[web.Response]]:
         """Validate ``X-Hermes-Session-Key`` (per-channel memory scope) -> ``(key_or_None, None)``
-        or ``(None, error)``. Configured API keys are checked by the request auth gate."""
+        or ``(None, error)``. Requires API-key auth so a client can't guess another scope."""
         raw = request.headers.get("X-Hermes-Session-Key", "").strip()
         if not raw:
             return None, None
+        if not self._api_key:
+            logger.warning(
+                "X-Hermes-Session-Key rejected: no API key configured. "
+                "Set API_SERVER_KEY to enable long-term memory scoping.")
+            return None, _error_response(
+                "X-Hermes-Session-Key requires API key authentication. "
+                "Configure API_SERVER_KEY to enable this feature.", 403)
         # Control characters could enable header injection on the echo path.
         if re.search(r'[\r\n\x00]', raw):
             return None, _invalid_request("Invalid session key")
@@ -2886,8 +2875,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         """GET /v1/skills — deterministic JSON listing of installed skills (name, description,
         category), the same set ``/skills list`` shows."""
         try:
-            from tools.skills_tool import _find_all_skills, _sort_skills
-            skills = _sort_skills(_find_all_skills(skip_disabled=False))
+            from tools.skills_tool import find_all_skills, sort_skills
+            skills = sort_skills(
+                find_all_skills(
+                    skip_disabled=False, include_editorial=True
+                )
+            )
         except Exception:
             logger.exception("GET /v1/skills failed")
             return _error_response("Failed to enumerate skills", 500, err_type="server_error")
@@ -4172,7 +4165,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         session_history_delivery: str = "", turn_author: Optional[dict[str, Any]] = None,
         relay_metadata: Optional[dict[str, Any]] = None, notification_category: str = "result",
         resume_unanswered_turn: bool = False, approval_notify_callback=None,
-        approval_session_key: Optional[str] = None) -> tuple:
+        approval_session_key: Optional[str] = None, walked_from: Optional[str] = None) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``approval_notify_callback`` (with ``approval_session_key``) routes dangerous-command
         approval requests to the caller's stream, keyed like ``/v1/runs`` approvals (#51871).
@@ -4194,7 +4187,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 stream_delta_callback=stream_delta_callback, tool_progress_callback=tool_progress_callback,
                 tool_start_callback=tool_start_callback, tool_complete_callback=tool_complete_callback,
                 interim_assistant_callback=interim_assistant_callback, reasoning_callback=reasoning_callback,
-                status_callback=status_callback,
+                status_callback=status_callback, walked_from=walked_from,
                 agent_ref=agent_ref, active_run_id=active_run_id, gateway_session_key=gateway_session_key,
                 requested_model=requested_model, requested_provider=requested_provider, model_options=model_options,
                 route=route, session_model=session_model, requested_runtime=requested_runtime,
@@ -4288,10 +4281,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     result, usage = self._finish_turn_result(
                         agent, result, session_id, route=route, requested_runtime=requested_runtime,
                         route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
-                    if isinstance(result, dict) and not muted:
-                        self._maybe_auto_title_api_session(
-                            result.get("session_id", session_id), result.get("final_response") or "",
-                            result.get("messages") or conversation_history)
                     if muted and isinstance(result, dict):
                         # Project presentation only after finishing the source outcome. Keep
                         # the agent's result, transcript, failure flags and usage intact.
