@@ -8,7 +8,7 @@ Use the existing repository-root npm dependencies. Do not run `npm install` in t
 
 ```sh
 mkdir -p apps/webapp/.scratch
-export TMPDIR="$PWD/apps/webapp/.scratch"
+export TMPDIR=/Volumes/WDBlack4TB/.hermes/cache/scratch
 npm --prefix apps/webapp run build
 WEBAPP_BACKEND=http://127.0.0.1:9119 \
 WEBAPP_PUBLIC_ORIGIN=http://hermes-webapp.localhost:8080 \
@@ -88,6 +88,8 @@ For remote access, put an HTTPS reverse proxy in front of the loopback web servi
 5. The proxy forwards browser cookies/authorization as presented and preserves upstream errors. It never adds credentials or changes an authentication rejection into success. A fixed origin prevents a client-selected open proxy. Host and Origin mismatches are refused, including WebSocket upgrades; WebSocket upgrades without Origin are refused too. Auth callback navigations remain possible.
 6. Only files whose real paths remain inside `dist/` are served. Dot-segment, encoded traversal and symlink escapes are refused. No SPA fallback returns source files. `/auth/native`, native API doors, `native_dial` and internal-credential query parameters are rejected. Existing authenticated backend filesystem APIs retain their backend policy; no unauthenticated filesystem route is added.
 
+Named and primary profile requests keep distinct scope: an omitted bridge profile restores the remembered selection, while explicit `null` or an empty name selects `default`. Registry-scoped calls use the current Desktop resolver, reject foreign connection IDs, and mint a fresh public ticket on each dial. Registry reads return independent snapshots.
+
 The renderer's `window.hermesDesktop` name remains a compatibility seam, populated by `src/adapter.ts` with explicit browser implementations. There is no generic IPC emulation or catch-all capability proxy. Browser-only shell copy is currently English; the reused renderer retains all its existing locale catalogs.
 
 ## Capability matrix
@@ -99,27 +101,30 @@ The renderer's `window.hermesDesktop` name remains a compatibility seam, populat
 | Profiles and backend model/config/settings | Original UI with explicit profile routing; profile/default choice stored per browser origin. |
 | Themes, layout, keyboard shortcuts within the page | Original browser-compatible renderer behavior/local storage. Browser/OS-reserved shortcuts remain owned by the browser. |
 | Backend files/git | Existing authenticated remote-mode APIs and their backend filesystem rules. No local browser disk paths or native IPC. |
-| Attachments | Existing remote upload flow where supported by the renderer; native path-based picking/paste-saving is unavailable. Browser clipboard requires the browser's normal permissions and a secure context. |
-| Artifact iframes | Original sandboxed iframe primitive; no Electron guest privileges. |
+| Attachments | Backend file references and the remote file picker use authenticated, profile-scoped filesystem APIs. Browser-host file drops, image/clipboard staging, native attachment reads and large-paste staging require Desktop and report an explicit limitation. Text clipboard access requires normal browser permissions and a secure context. |
+| File and artifact previews | Original file preview (text/source, images, PDF and backend edits) and artifact components. Artifact HTML keeps `sandbox="allow-scripts"`; no same-origin, popup or Electron guest privileges. Backend HTML files use source view. |
 | Embedded Electron browser/annotation/guest automation | Replaced with an explicit unavailable panel and user-initiated safe HTTP(S) external-tab link. |
 | Gateway configuration, SSH tunnels, Cloud discovery, native token/keychain storage | Gateway settings replaced with a browser explanation; source fixed by operator. |
 | Native terminal processes, OS file dialogs/reveal, app/session popout windows | Unavailable. Backend agent tools may still execute according to backend policy. |
-| Native notifications, microphone/voice capture, global hotkeys, HUD, pet overlays, screenshots, transparency, power controls | Unavailable or absent; browser controls show the limitation. No permission is silently granted. |
+| Voice | Microphone capture is explicitly unavailable. Read-aloud uses the existing authenticated backend relay and public-ticket streams with the speaking session's profile. Browser direct-provider configuration is disabled, so this build does not request voice provider keys. Actual audio playback and multi-tab ambient-cue deduplication are not certified by the test harness. |
+| Native text export (`/save`), notifications, global hotkeys, HUD, pet overlays, screenshots, transparency, power controls | Unavailable or absent; browser controls show the limitation. No permission or successful native operation is fabricated. |
 | Runtime Desktop plugins loaded from disk | Disabled by browser loader overlay; bundled renderer plugins still use their existing registration path. |
 | Electron install/update/uninstall, tray, OS process lifecycle | Unavailable; update/restart the independently deployed services through their operator. |
 
 ## Verification
 
 ```sh
-export TMPDIR="$PWD/apps/webapp/.scratch"
+export TMPDIR=/Volumes/WDBlack4TB/.hermes/cache/scratch
 npm --prefix apps/webapp run typecheck
 npm --prefix apps/webapp run build
 npm --prefix apps/webapp test
 npm --prefix apps/webapp run smoke
 ```
 
-`test` runs Node boundary/proxy tests, real Hermes ASGI integration, browser adapter tests and a DOM runtime mount of the actual renderer. Node proxy tests use mocked network streams and **do not prove a live TCP proxy deployment**. ASGI integration uses Hermes' bundled BasicAuthProvider, cookie gate, ticket routes, real dispatcher and isolated SQLite session data. The test harness substitutes only the platform-default home (to keep profile roots isolated) and package provisioning/bootstrap (to avoid touching a live install/update lock). No auth/REST/RPC handlers are mocked and no model prompt is sent. DOM tests emulate browser geometry/canvas limitations; they do not prove browser rendering.
+Vitest uses its thread pool to transfer transforms in memory rather than creating fork-cache files under `TMPDIR`. The browser overlays are also mapped in `tsconfig.json`, and implemented adapter members are checked against the current native bridge types.
 
-`smoke` requires installed Playwright and Chrome (`WEBAPP_BROWSER=msedge` chooses Edge; `WEBAPP_PYTHON` selects an existing Python interpreter with the Hermes dependencies). It loads the actual production bundle through intercepted browser requests and bridges HTTP/WebSocket traffic to the real in-process ASGI test harness, with the same limited bootstrap/home substitutions. It needs no TCP listener, production credentials or paid model turn. It requires an open renderer WebSocket, `gateway.ready`, a successful RPC reply, and disappearance of `CONNECTING`; a sidebar title alone is insufficient. It asserts computed flex layout, viewport coverage, theme variables, and composer geometry. It writes `.scratch/browser-smoke.png`, `.scratch/browser-settings.png`, `.scratch/browser-smoke.txt`, `.scratch/browser-diagnostics.json` (loaded stylesheets, computed styles, and RPC diagnostics) and `.scratch/smoke-backend.log`. Inspect the screenshots before accepting the visual result. It is distinct from a live two-service smoke. For deployment acceptance also run the two services, sign in at the actual URL, inspect history, switch profile, edit a reversible setting, and confirm a WebSocket reconnect.
+`test` runs Node boundary/proxy tests, real Hermes ASGI integration, browser adapter tests actual file/artifact component tests, voice/plugin routing checks, and a DOM runtime mount of the actual renderer. Node proxy tests use mocked network streams and **do not prove a live TCP proxy deployment**. ASGI integration uses Hermes' bundled BasicAuthProvider, cookie gate, ticket routes, real dispatcher and isolated SQLite session data. The test harness substitutes only the platform-default home (to keep profile roots isolated) and package provisioning/bootstrap (to avoid touching a live install/update lock). No auth/REST/RPC handlers are mocked and no model prompt is sent. DOM tests emulate browser geometry/canvas limitations; they do not prove browser rendering.
 
-The implementation-session results and environment blockers are recorded in `VERIFICATION.md`.
+`smoke` requires installed Playwright and Chrome (`WEBAPP_BROWSER=msedge` chooses Edge; `WEBAPP_PYTHON` selects an existing Python interpreter with the Hermes dependencies). It loads the actual production bundle through intercepted browser requests and bridges HTTP/WebSocket traffic to the real in-process ASGI test harness, with the same limited bootstrap/home substitutions. It needs no TCP listener, production credentials or paid model turn. It requires an open renderer WebSocket, `gateway.ready`, a successful RPC reply, and disappearance of `CONNECTING`; a sidebar title alone is insufficient. It asserts computed flex layout, viewport coverage, theme variables, and composer geometry. It also opens Capabilities with native idle callbacks removed to exercise the browser scheduling fallback. It writes `.scratch/browser-capabilities.png`, `.scratch/browser-smoke.png`, `.scratch/browser-settings.png`, `.scratch/browser-smoke.txt`, `.scratch/browser-diagnostics.json` (loaded stylesheets, computed styles, and RPC diagnostics) and `.scratch/smoke-backend.log`. Inspect the screenshots before accepting the visual result. It is distinct from a live two-service smoke. For deployment acceptance also run the two services, sign in at the actual URL, inspect history, switch profile, edit a reversible setting, and confirm a WebSocket reconnect.
+
+The checked-out revision, actual command outputs and environment blockers are recorded in `VERIFICATION.md`. The configured `TMPDIR` must be writable for Playwright to launch; this does not affect production service configuration.

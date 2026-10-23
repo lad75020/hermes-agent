@@ -9,8 +9,10 @@ export interface ApiRequest {
 }
 export function apiUrl(request: ApiRequest, origin: string): URL {
   if (!request.path.startsWith('/api/') || /[\\\x00-\x20]/.test(request.path)) throw new Error('Only same-origin /api/ requests are supported')
+  const pathname = request.path.split(/[?#]/, 1)[0]
+  if (request.path.includes('#') || pathname.split('/').some(part => part === '.' || part === '..')) throw new Error('Invalid API path')
   const url = new URL(request.path, origin)
-  if (url.origin !== origin || !url.pathname.startsWith('/api/') || /%2e|%2f|%5c/i.test(request.path) || /^\/api\/(native|internal)/.test(url.pathname) || url.searchParams.has('native_dial') || url.searchParams.has('internal')) throw new Error('Invalid API path')
+  if (url.origin !== origin || !url.pathname.startsWith('/api/') || /%2e|%2f|%5c/i.test(pathname) || /^\/api\/(native|internal)/.test(url.pathname) || url.searchParams.has('native_dial') || url.searchParams.has('internal')) throw new Error('Invalid API path')
   if (request.connectionId && request.connectionId !== 'browser') throw new Error('This browser has one operator-configured backend')
   if (request.profile != null) url.searchParams.set('profile', request.profile || 'default')
   return url

@@ -7,7 +7,7 @@ export async function asgiClient(name = 'integration') {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
   fs.mkdirSync(path.join(root, '.scratch'), { recursive: true })
   const child = spawn(process.env.WEBAPP_PYTHON || path.resolve(root, '../../venv/bin/python'), [path.join(root, 'scripts/backend-harness.py')], {
-    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', HERMES_HOME: path.join(root, `.scratch/${name}-home`), HERMES_RUNTIME_DIR: path.join(root, `.scratch/${name}-runtime`), TMPDIR: path.join(root, '.scratch') }, stdio: ['pipe', 'pipe', fs.openSync(path.join(root, `.scratch/${name}-backend.log`), 'w')]
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', HERMES_HOME: path.join(root, `.scratch/${name}-home`), HERMES_RUNTIME_DIR: path.join(root, `.scratch/${name}-runtime`), TMPDIR: process.env.TMPDIR || path.join(root, '.scratch') }, stdio: ['pipe', 'pipe', fs.openSync(path.join(root, `.scratch/${name}-backend.log`), 'w')]
   })
   let serial = 0, readyResolve, readyReject
   const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject })

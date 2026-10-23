@@ -1,5 +1,6 @@
 import { chromium } from 'playwright'
 import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import readline from 'node:readline'
@@ -9,11 +10,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const repo = path.resolve(root, '../..')
 const origin = 'http://hermes-webapp.localhost:8080'
 await fs.mkdir(path.join(root, '.scratch/smoke-home'), { recursive: true })
-const child = spawn(process.env.WEBAPP_PYTHON || path.join(repo, 'venv/bin/python'), [path.join(root, 'scripts/backend-harness.py')], {
-  cwd: repo, env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', HERMES_HOME: path.join(root, '.scratch/smoke-home'), HERMES_RUNTIME_DIR: path.join(root, '.scratch/smoke-runtime'), TMPDIR: path.join(root, '.scratch') }, stdio: ['pipe', 'pipe', 'pipe']
-})
 const backendLog = await fs.open(path.join(root, '.scratch/smoke-backend.log'), 'w')
-child.stderr.on('data', data => void backendLog.write(data))
+const child = spawn(process.env.WEBAPP_PYTHON || path.join(repo, 'venv/bin/python'), [path.join(root, 'scripts/backend-harness.py')], {
+  cwd: repo, env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', HERMES_HOME: path.join(root, '.scratch/smoke-home'), HERMES_RUNTIME_DIR: path.join(root, '.scratch/smoke-runtime'), TMPDIR: process.env.TMPDIR || path.join(root, '.scratch') }, stdio: ['pipe', 'pipe', backendLog.fd]
+})
 let serial = 0
 const pending = new Map(), socketRoutes = new Map(), socketFrames = new Map()
 const observedSockets = []
@@ -44,7 +44,10 @@ function call(request) {
 }
 let browser
 try {
-  await Promise.race([ready, new Promise((_, reject) => setTimeout(() => reject(new Error('Backend harness startup timeout')), 45000))])
+  let startupTimer
+  try {
+    await Promise.race([ready, new Promise((_, reject) => { startupTimer = setTimeout(() => reject(new Error('Backend harness startup timeout')), 45000) })])
+  } finally { clearTimeout(startupTimer) }
   const unauth = await call({ path: '/api/auth/me' }); assert.equal(unauth.status, 401)
   const unauthFs = await call({ path: '/api/fs/read?path=/etc/passwd' }); assert.equal(unauthFs.status, 401)
   const unauthTicket = await call({ path: '/api/auth/ws-ticket', method: 'POST' }); assert.equal(unauthTicket.status, 401)
@@ -53,6 +56,9 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce' })
   // Observe the renderer's own socket, without adding a production diagnostics API.
   await page.addInitScript(() => {
+    // Exercise the browser fallback even in Chromium (Safari may lack this pair).
+    delete window.requestIdleCallback
+    delete window.cancelIdleCallback
     const NativeSocket = window.WebSocket
     window.__webappSmokeSockets = []
     window.WebSocket = class extends NativeSocket {
@@ -170,9 +176,26 @@ try {
   await page.getByText('Appearance', { exact: true }).first().waitFor({ timeout: 15000 })
   await page.screenshot({ path: path.join(root, '.scratch/browser-settings.png'), fullPage: true })
   assert.deepEqual(errors, [])
+  await page.evaluate(() => { location.hash = '#/capabilities' })
+  await page.getByRole('button', { name: /^Skills/ }).first().waitFor({ timeout: 15000 })
+  await page.waitForTimeout(250)
+  assert.equal(await page.evaluate(() => typeof window.requestIdleCallback), 'function')
+  await page.screenshot({ path: path.join(root, '.scratch/browser-capabilities.png'), fullPage: true })
+  assert.deepEqual(errors, [])
+  console.log('CAPABILITIES: Skills tab mounted without native idle callback APIs; no page exceptions')
+  await page.evaluate(() => { location.hash = '#/settings?tab=config:model&page=delegation' })
+  await page.getByText('Subagent defaults', { exact: true }).waitFor({ timeout: 15000 })
+  await page.getByRole('radiogroup', { name: 'Routing', exact: true }).waitFor({ timeout: 15000 })
+  await page.screenshot({ path: path.join(root, '.scratch/browser-delegation.png'), fullPage: true })
+  assert.deepEqual(errors, [])
+  console.log('DELEGATION: updated subagent routing settings mounted; no page exceptions')
 } finally {
   await browser?.close()
+  for (const request of pending.values()) clearTimeout(request.timer)
+  pending.clear()
   child.stdin.end(JSON.stringify({ id: ++serial, op: 'stop' }) + '\n')
+  const exited = child.exitCode === null ? once(child, 'exit') : Promise.resolve()
   child.kill('SIGTERM')
+  await exited
   await backendLog.close()
 }

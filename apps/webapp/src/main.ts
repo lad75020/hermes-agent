@@ -1,5 +1,8 @@
 import { createBrowserAdapter } from './adapter'
+import { installBrowserScheduling } from './browser-scheduling'
 import './webapp.css'
+
+installBrowserScheduling()
 
 function authPanel(message: string) {
   const root = document.getElementById('root')!

@@ -30,6 +30,7 @@ export default defineConfig({
       if (resolved === path.join(desktop, 'src/app/chat/right-rail/preview-pane')) return path.join(root, 'src/preview-pane.tsx')
       if (resolved === path.join(desktop, 'src/contrib/runtime-loader')) return path.join(root, 'src/runtime-loader.ts')
       if (resolved === path.join(desktop, 'src/app/settings/gateway-settings')) return path.join(root, 'src/gateway-settings.tsx')
+      if (resolved === path.join(desktop, 'src/lib/voice-client-direct')) return path.join(root, 'src/voice-client-direct.ts')
       if (resolved === path.join(desktop, 'src/store/keep-awake')) return path.join(root, 'src/keep-awake.ts')
     },
     generateBundle() {
@@ -43,10 +44,10 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: '@/debug/dev-only', replacement: path.join(root, 'src/noop.ts') },
-      { find: '@/lib/gateway-ws-url', replacement: path.join(root, 'src/gateway-ws-url.ts') },
       { find: '@/app/chat/right-rail/preview-pane', replacement: path.join(root, 'src/preview-pane.tsx') },
       { find: '@/contrib/runtime-loader', replacement: path.join(root, 'src/runtime-loader.ts') },
       { find: '@/app/settings/gateway-settings', replacement: path.join(root, 'src/gateway-settings.tsx') },
+      { find: '@/lib/voice-client-direct', replacement: path.join(root, 'src/voice-client-direct.ts') },
       { find: '@/store/keep-awake', replacement: path.join(root, 'src/keep-awake.ts') },
       { find: '@hermes/plugin-sdk', replacement: path.join(desktop, 'src/sdk/index.ts') },
       { find: '@', replacement: path.join(desktop, 'src') },

@@ -51,3 +51,29 @@ test('real Hermes ASGI auth, public tickets, RPC, profiles and settings (no list
     assert.equal((await backend.call({ path: '/api/auth/me' })).status, 401)
   } finally { await backend.close() }
 })
+
+test('one authenticated backend keeps primary and secondary profile settings separate', { timeout: 90000 }, async () => {
+  const { mkdir, writeFile } = await import('node:fs/promises')
+  const home = new URL('../.scratch/profile-scope-home/', import.meta.url)
+  await mkdir(new URL('profiles/research/', home), { recursive: true })
+  // Isolated non-secret settings fixtures; avoid profile-create's OS alias installation.
+  await writeFile(new URL('config.yaml', home), 'model:\n  default: webapp-smoke-model\n  provider: openai\nagent:\n  max_turns: 5\nonboarding:\n  run: false\n')
+  await writeFile(new URL('profiles/research/config.yaml', home), 'model:\n  default: webapp-smoke-model\n  provider: openai\nagent:\n  max_turns: 9\n')
+  const backend = await asgiClient('profile-scope')
+  try {
+    await backend.call({ path: '/auth/password-login', method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ provider: 'basic', username: 'webapp-test', password: 'isolated-browser-smoke-only' }) })
+    const get = async profile => {
+      const result = await backend.call({ path: `/api/config?profile=${profile}` })
+      assert.equal(result.status, 200, result.body)
+      return JSON.parse(result.body)
+    }
+    assert.equal((await get('default')).agent.max_turns, 5)
+    const secondary = await get('research')
+    assert.equal(secondary.agent.max_turns, 9)
+    const saved = await backend.call({ path: '/api/config?profile=research', method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ config: { ...secondary, agent: { ...secondary.agent, max_turns: 11 } } }) })
+    assert.equal(saved.status, 200, saved.body)
+    assert.equal((await get('research')).agent.max_turns, 11)
+    assert.equal((await get('default')).agent.max_turns, 5)
+    assert.equal((await backend.call({ path: '/api/config?profile=nonexistent' })).status, 404)
+  } finally { await backend.close() }
+})
