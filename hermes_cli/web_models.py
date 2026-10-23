@@ -535,6 +535,20 @@ class TerminalBackendSelect(BaseModel):
     backend: str
     profile: Optional[str] = None
 
+class DelegationBackendSelect(BaseModel):
+    backend: str
+    profile: Optional[str] = None
+
+class DelegationModelMapUpdate(BaseModel):
+    options: list[dict[str, Any]]
+    default: Optional[str] = None
+    profile: Optional[str] = None
+
+class DelegationProfileRoutesUpdate(BaseModel):
+    profiles: list[dict[str, Any]]
+    default: Optional[str] = None
+    profile: Optional[str] = None
+
 class RawConfigUpdate(BaseModel):
     yaml_text: str
     profile: Optional[str] = None
