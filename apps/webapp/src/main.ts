@@ -18,8 +18,9 @@ function authPanel(message: string) {
 function controls() {
   const bar = document.createElement('details'); bar.id = 'webapp-controls'
   const label = document.createElement('summary'); label.textContent = 'Browser controls'
-  const capabilities = document.createElement('p'); capabilities.textContent = 'Chat, sessions, profiles and backend settings use Hermes APIs. Native windows, SSH management, embedded browser, OS integration and runtime plugins are unavailable.'
+  const capabilities = document.createElement('p'); capabilities.textContent = 'Chat, sessions, profiles and backend settings use Hermes APIs. Native windows, SSH management, embedded browser and OS integration are unavailable. Trusted browser plugins require owner hash approval and explicit enablement in Capabilities → Plugins; changes require renewed approval.'
   const logout = document.createElement('button'); logout.textContent = 'Sign out'; logout.onclick = async () => {
+    window.dispatchEvent(new Event('hermes-browser-logout'))
     await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' }); location.assign('/login?next=%2F')
   }
   const status = document.createElement('p'); status.role = 'status'

@@ -64,7 +64,7 @@ An active Hermes update/install lock must be resolved by its owner before normal
 | `WEBAPP_BACKEND` | `http://127.0.0.1:9119` | Hermes dashboard/serve HTTP(S) origin, not the OpenAI-compatible API server (normally port 8642). Credentials, paths, fragments and query strings are refused. |
 | `WEBAPP_PUBLIC_ORIGIN` | HTTP origin derived from host/port | Exact browser origin, required for non-loopback binding. Host and Origin validation uses this value. |
 
-The production service uses only Node standard-library HTTP(S), streams and filesystem APIs. Copy `server.mjs` and `dist/` together to run independently of the source checkout. Rebuild to pick up renderer changes. Keep the deployed frontend and backend compatible; source reuse follows the checked-out Desktop revision rather than maintaining a fork.
+The production service uses Node standard-library transport/filesystem APIs plus the vendored Acorn parser (license in `vendor/acorn-LICENSE`). Copy `server.mjs`, `plugin-host.mjs`, `src/plugin-module.mjs`, `vendor/`, `scripts/browser-plugin-owner.mjs` and `dist/` together (the candidate `payload/` already has this layout). No runtime npm install is required. Rebuild to pick up renderer changes. Keep the deployed frontend and backend compatible; source reuse follows the checked-out Desktop revision rather than maintaining a fork.
 
 `services/dev.hermes.webapp.plist` is a macOS LaunchAgent template for this workspace. Check the absolute Node executable (`command -v node`), paths and environment first; build and create `.scratch` before installing. To install deliberately:
 
@@ -108,7 +108,7 @@ The renderer's `window.hermesDesktop` name remains a compatibility seam, populat
 | Native terminal processes, OS file dialogs/reveal, app/session popout windows | Unavailable. Backend agent tools may still execute according to backend policy. |
 | Voice | Microphone capture is explicitly unavailable. Read-aloud uses the existing authenticated backend relay and public-ticket streams with the speaking session's profile. Browser direct-provider configuration is disabled, so this build does not request voice provider keys. Actual audio playback and multi-tab ambient-cue deduplication are not certified by the test harness. |
 | Native text export (`/save`), notifications, global hotkeys, HUD, pet overlays, screenshots, transparency, power controls | Unavailable or absent; browser controls show the limitation. No permission or successful native operation is fabricated. |
-| Runtime Desktop plugins loaded from disk | Disabled by browser loader overlay; bundled renderer plugins still use their existing registration path. |
+| Runtime Desktop plugins | Opt-in trusted browser host: controlled roots, owner-reviewed exact bundle hash, then explicit enablement in Capabilities → Plugins. See `BROWSER-PLUGINS.md`; no native disk evaluator or automatic production opt-in. |
 | Electron install/update/uninstall, tray, OS process lifecycle | Unavailable; update/restart the independently deployed services through their operator. |
 
 ## Verification

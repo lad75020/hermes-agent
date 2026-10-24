@@ -21,6 +21,12 @@ if not home.is_relative_to(APP / '.scratch'):
 home.mkdir(parents=True, exist_ok=True)
 if not (home / 'config.yaml').exists():
     (home / 'config.yaml').write_text('model:\n  default: webapp-smoke-model\n  provider: openai\nonboarding:\n  run: false\ntelemetry:\n  shared_metrics:\n    enabled: false\n')
+# Fixture-only consent, never operator or production profile configuration.
+if os.environ.get('WEBAPP_TEST_PLUGIN_ENDPOINT') == '1':
+    import yaml
+    fixture_config = yaml.safe_load((home / 'config.yaml').read_text()) or {}
+    fixture_config.setdefault('plugins', {})['enabled'] = ['browser-fixture']
+    (home / 'config.yaml').write_text(yaml.safe_dump(fixture_config))
 # A home nested below the operator's default root is deliberately recognized as
 # part of that root by Hermes. Relocate the platform-default root too, so every
 # profile lookup in this TEST process remains inside the isolated fixture.
@@ -59,6 +65,16 @@ web_server.app.state.bound_host = '127.0.0.1'
 web_server.app.state.bound_port = 8642
 web_server.app.state.trusted_public_hosts = frozenset({'hermes-webapp.localhost'})
 client = TestClient(web_server.app, base_url='http://hermes-webapp.localhost:8080', follow_redirects=False)
+# Opt-in synthetic endpoint for browser ctx.rest transport verification only.
+# Cookie/session and profile middleware remain the actual ASGI stack. This does
+# not certify installation/admission of a backend plugin package.
+if os.environ.get('WEBAPP_TEST_PLUGIN_ENDPOINT') == '1':
+    from fastapi import Request
+    @web_server.app.get('/api/plugins/browser-fixture/echo')
+    async def browser_plugin_fixture_echo(request: Request):
+        return {'profile': request.query_params.get('profile') or 'default', 'fixture': True}
+    # The real app's final '/' static mount otherwise shadows test-added routes.
+    web_server.app.router.routes.insert(0, web_server.app.router.routes.pop())
 lock = threading.Lock()
 sockets = {}
 

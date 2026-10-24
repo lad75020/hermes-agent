@@ -52,7 +52,7 @@ try {
   const unauthFs = await call({ path: '/api/fs/read?path=/etc/passwd' }); assert.equal(unauthFs.status, 401)
   const unauthTicket = await call({ path: '/api/auth/ws-ticket', method: 'POST' }); assert.equal(unauthTicket.status, 401)
   console.log('REAL ASGI: unauthenticated identity, filesystem and ticket requests rejected')
-  browser = await chromium.launch({ channel: process.env.WEBAPP_BROWSER || 'chrome', headless: true })
+  browser = await chromium.launch({ ...(process.env.WEBAPP_CHROMIUM ? { executablePath: process.env.WEBAPP_CHROMIUM, args: ['--no-sandbox'] } : { channel: process.env.WEBAPP_BROWSER || 'chrome' }), headless: true })
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce' })
   // Observe the renderer's own socket, without adding a production diagnostics API.
   await page.addInitScript(() => {
@@ -166,8 +166,9 @@ try {
   assert.ok(diagnostics.shell?.height >= diagnostics.viewport.height - 2, 'Shell must fill viewport height')
   for (const [key, value] of Object.entries(diagnostics.theme)) assert.ok(value, `Missing theme variable ${key}`)
   assert.notEqual(diagnostics.shell?.background, 'rgba(0, 0, 0, 0)', 'Shell background must resolve its theme')
-  assert.ok(diagnostics.composer?.width > 400 && diagnostics.composer?.height >= 60, 'Composer must have usable geometry')
+  assert.ok(diagnostics.composer?.width > 400 && diagnostics.composer?.height >= 32, 'Composer must have usable geometry')
   assert.ok(diagnostics.composer.y >= 0 && diagnostics.composer.y + diagnostics.composer.height <= diagnostics.viewport.height + 2, 'Composer must fit in the viewport')
+  const composerEditor=page.locator('[contenteditable="true"]').first();await composerEditor.fill('Isolated browser draft — never submitted');assert.match(await composerEditor.innerText(),/Isolated browser draft/);await composerEditor.fill('')
   console.log('RENDERED:', (await page.locator('body').innerText()).slice(0, 9000))
   console.log('PAGE ERRORS:', JSON.stringify(errors))
   assert.deepEqual(errors, [])

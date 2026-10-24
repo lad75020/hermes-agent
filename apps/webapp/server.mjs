@@ -3,6 +3,7 @@ import https from 'node:https'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { loadConfig, servePlugins } from './plugin-host.mjs'
 
 const root = path.dirname(fileURLToPath(import.meta.url))
 const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2', '.wasm': 'application/wasm', '.mp3': 'audio/mpeg', '.webp': 'image/webp', '.ico': 'image/x-icon' }
@@ -82,6 +83,7 @@ export function createService(config, { dist = path.join(root, 'dist'), devOrigi
     if (!allowedRequest(req, config)) return reject(res, 403, 'Host or Origin rejected')
     const p = safePath(req.url)
     if (!p) return reject(res, 400, 'Invalid path')
+    if (p === '/api/browser-plugins' || p.startsWith('/api/browser-plugins/')) return servePlugins(req, res, config, p)
     if (isProxyPath(p)) return proxy(req, res, config.backend, transport)
     if (devOrigin) return proxy(req, res, new URL(devOrigin), http)
     if (!['GET', 'HEAD'].includes(req.method)) return reject(res, 405, 'Method not allowed')
@@ -99,7 +101,7 @@ export function createService(config, { dist = path.join(root, 'dist'), devOrigi
   })
   server.on('upgrade', (req, socket, head) => {
     const p = safePath(req.url)
-    if (!allowedRequest(req, config) || !req.headers.origin || !p || (!p.startsWith('/api/') && !(devOrigin && p === '/'))) {
+    if (!allowedRequest(req, config) || !req.headers.origin || !p || p === '/api/browser-plugins' || p?.startsWith('/api/browser-plugins/') || (!p.startsWith('/api/') && !(devOrigin && p === '/'))) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return
     }
     proxy(req, socket, p.startsWith('/api/') ? config.backend : new URL(devOrigin), p.startsWith('/api/') ? transport : http, head)
@@ -109,5 +111,6 @@ export function createService(config, { dist = path.join(root, 'dist'), devOrigi
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const config = configuration()
+  if (process.env.WEBAPP_PLUGIN_CONFIG) config.plugins = await loadConfig(process.env.WEBAPP_PLUGIN_CONFIG)
   createService(config).listen(config.port, config.host, () => console.log(`Hermes Webapp: ${config.publicOrigin.origin} → ${config.backend.origin}`))
 }
