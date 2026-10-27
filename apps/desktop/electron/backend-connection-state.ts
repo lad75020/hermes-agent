@@ -14,6 +14,13 @@ interface PendingBackendStop<TProcess> {
   failed: boolean
 }
 
+export class BackendConnectionSupersededError extends Error {
+  constructor() {
+    super('Hermes backend start was superseded by a newer connection attempt.')
+    this.name = 'BackendConnectionSupersededError'
+  }
+}
+
 export interface BackendConnectionState<TProcess, TConnection> {
   startAttempt(): BackendConnectionAttempt<TConnection>
   setPromise(attempt: BackendConnectionAttempt<TConnection>, promise: Promise<TConnection>): boolean
@@ -91,7 +98,7 @@ export function createBackendConnectionState<TProcess, TConnection>(): BackendCo
 
     assertCurrentAttempt(attempt: BackendConnectionAttempt<TConnection>): void {
       if (attempt.generation !== generation) {
-        throw new Error('Hermes backend start was superseded by a newer connection attempt.')
+        throw new BackendConnectionSupersededError()
       }
     },
 

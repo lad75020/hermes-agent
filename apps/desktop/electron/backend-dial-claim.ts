@@ -1,3 +1,20 @@
+import { BackendConnectionSupersededError } from './backend-connection-state'
+
+// A reset can retire the primary while a renderer still holds its dial claim.
+// Re-resolve the SAME scope, joining the replacement if one exists. Keep this
+// bounded so repeated resets still end at the caller's recovery surface.
+async function dialCurrentBackend<T>(dial: () => Promise<T> | T): Promise<T> {
+  for (let retry = 0; ; retry += 1) {
+    try {
+      return await dial()
+    } catch (error) {
+      if (!(error instanceof BackendConnectionSupersededError) || retry >= 2) {
+        throw error
+      }
+    }
+  }
+}
+
 /**
  * backend-dial-claim.ts
  *
@@ -32,16 +49,9 @@ export class BackendDialClaims {
       return existing
     }
 
-    // Start the dial eagerly so the first caller's spawn is already in flight
-    // when a concurrent caller arrives; a synchronously-throwing dial is
-    // converted into a rejection of THIS claim so it cannot bypass the seam.
-    let pending: Promise<T>
-
-    try {
-      pending = Promise.resolve(dial())
-    } catch (error) {
-      pending = Promise.reject(error)
-    }
+    // The claim spans supersession retries, so all waiters reconcile together
+    // without starting competing dials. Real failures still reject the claim.
+    const pending = dialCurrentBackend(dial)
 
     const release = () => {
       if (this.#inflightByKey.get(key) === pending) {

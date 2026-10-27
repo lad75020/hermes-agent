@@ -438,27 +438,28 @@ hermes config set compression.codex_gpt55_autoraise_notice false
 
 ### Codex large-context `-900k` picker variants (opt-in)
 
-The ChatGPT Codex backend *advertises* a 272K window for the gpt-5.4, gpt-5.6
-(Sol/Terra/Luna) and GPT-6 (Sol/Terra/Luna) families, but actually accepts ~911K input tokens
-for ChatGPT-subscription accounts (live-verified Aug 2026). Hermes keeps the
-**advertised 272K as the default** for the base slugs — a bigger window means
-more tokens per request and much faster subscription-usage burn, so the large
-window is strictly opt-in.
+The ChatGPT Codex backend can advertise a smaller default window than its
+maximum for eligible models. Hermes keeps the **advertised default for base
+slugs** — a bigger window means more tokens per request and much faster
+subscription-usage burn, so the large window is strictly opt-in.
 
 To use the large window, pick the explicit `-900k` variant in `/model` (e.g.
 `gpt-6.1-sol-900k`, `gpt-6-sol-900k`, `gpt-6-luna-900k`, `gpt-5.6-sol-900k`,
 `gpt-5.6-terra-900k`, `gpt-5.6-luna-900k`, `gpt-5.4-900k`). These are Hermes-side aliases: the suffix is stripped before
 the model id is sent to the backend, and pricing/usage accounting treats them
 as the base model. Slugs that genuinely enforce 272K (gpt-5.5, gpt-5.4-mini)
-have no `-900k` variant. When the authenticated Codex catalog publishes a
-`max_context_window` below 900K for the base slug (e.g. 872K), the `-900k`
-variant resolves to that live maximum instead; 900K remains the offline
-fallback and a published maximum above 900K does not raise it.
+have no `-900k` variant. When the same authenticated route's Codex catalog
+publishes a valid positive `max_context_window` for the base slug, the `-900k`
+variant resolves to the smaller of that maximum and its verified 900K ceiling,
+regardless of the advertised default. For example, a 500K default and 872K
+maximum resolve to 872K for the alias and 500K for the base. Without a valid
+maximum, only the known-stale 272K advertisement (including the offline table
+fallback) may use 900K; other advertised defaults are preserved.
 
-Compaction thresholds follow the window: base slugs (272K) get the **85%
+Compaction thresholds follow the window: base slugs still at 272K get the **85%
 autoraise** described above, while `-900k` variants keep your global
-`compression.threshold` (default 50%, ~450K) — the autoraise exists to stop
-wasting a small window, which a 900K window doesn't need.
+`compression.threshold` (default 50%) — the autoraise exists to stop
+wasting a small window, which the larger window doesn't need.
 
 ### Codex app-server thread compaction
 

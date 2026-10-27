@@ -1,8 +1,125 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { BackendConnectionSupersededError, createBackendConnectionState } from './backend-connection-state'
 import { BackendDialClaims } from './backend-dial-claim'
 import { backendScopeKey, parseBackendScopeKey } from './connection-registry'
 import { resolveDesktopConnectionRequest } from './desktop-profile'
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: Error) => void
+
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done
+    reject = fail
+  })
+
+  return { promise, resolve, reject }
+}
+
+describe('backend dials across a bootstrap reset', () => {
+  it.each(['default', 'research'])('reconciles an obsolete claim with the current %s primary', async profile => {
+    const claims = new BackendDialClaims()
+    const state = createBackendConnectionState<never, { profile: string; baseUrl: string }>()
+    const oldReady = deferred<{ profile: string; baseUrl: string }>()
+    const oldAttempt = state.startAttempt()
+
+    const oldConnection = oldReady.promise.then(connection => {
+      state.assertCurrentAttempt(oldAttempt)
+
+      return connection
+    })
+
+    state.setPromise(oldAttempt, oldConnection)
+    const dial = vi.fn(() => state.getPromise()!)
+    const primaryScope = backendScopeKey(null, profile)
+    const beforeReset = claims.run(primaryScope, dial)
+
+    state.invalidate()
+    const currentAttempt = state.startAttempt()
+    const ready = { profile, baseUrl: 'http://127.0.0.1:53151' }
+    const currentConnection = Promise.resolve(ready)
+    state.setPromise(currentAttempt, currentConnection)
+
+    // A reloaded renderer joins the pre-reset claim while an independent
+    // fleet route recovers. That secondary must not stand in for the primary.
+    const afterReset = claims.run(primaryScope, dial)
+    const fleetReady = { profile, baseUrl: 'https://fleet.example.com' }
+    const fleetDial = vi.fn(async () => fleetReady)
+    const fleet = claims.run(backendScopeKey('fleet-gateway', profile), fleetDial)
+    expect(await fleet).toBe(fleetReady)
+    oldReady.resolve({ profile, baseUrl: 'http://127.0.0.1:53150' })
+
+    expect(await Promise.all([beforeReset, afterReset])).toEqual([ready, ready])
+    expect(dial).toHaveBeenCalledTimes(2)
+    expect(fleetDial).toHaveBeenCalledTimes(1)
+    expect(state.getPromise()).toBe(currentConnection)
+    expect(state.getProcess()).toBeNull()
+    expect(claims.inFlight(primaryScope)).toBe(false)
+  })
+
+  it('reports the replacement failure to every waiter instead of the obsolete attempt error', async () => {
+    const claims = new BackendDialClaims()
+    const state = createBackendConnectionState<never, string>()
+    const oldReady = deferred<string>()
+    const oldAttempt = state.startAttempt()
+
+    const oldConnection = oldReady.promise.then(connection => {
+      state.assertCurrentAttempt(oldAttempt)
+
+      return connection
+    })
+
+    state.setPromise(oldAttempt, oldConnection)
+    const dial = vi.fn(() => state.getPromise()!)
+    const first = claims.run('research', dial)
+
+    state.invalidate()
+    const replacement = deferred<string>()
+    state.setPromise(state.startAttempt(), replacement.promise)
+    const second = claims.run('research', dial)
+    const failure = Object.assign(new Error('Gateway sign-in required'), { statusCode: 401 })
+    const results = Promise.allSettled([first, second])
+    oldReady.resolve('obsolete')
+    replacement.reject(failure)
+
+    expect(await results).toEqual([
+      { status: 'rejected', reason: failure },
+      { status: 'rejected', reason: failure }
+    ])
+    expect(dial).toHaveBeenCalledTimes(2)
+    expect(state.getPromise()).toBe(replacement.promise)
+    expect(claims.inFlight('research')).toBe(false)
+  })
+
+  it('bounds repeated supersessions and releases the claim for explicit recovery', async () => {
+    const claims = new BackendDialClaims()
+    const state = createBackendConnectionState()
+
+    const dial = vi.fn(() => {
+      const attempt = state.startAttempt()
+      state.invalidate()
+      state.assertCurrentAttempt(attempt)
+    })
+
+    await expect(claims.run('research', dial)).rejects.toBeInstanceOf(BackendConnectionSupersededError)
+    expect(dial).toHaveBeenCalledTimes(3)
+    expect(claims.inFlight('research')).toBe(false)
+    await expect(claims.run('research', () => 'recovered')).resolves.toBe('recovered')
+  })
+
+  it('does not retry an ordinary error with the same message as a supersession', async () => {
+    const claims = new BackendDialClaims()
+    const failure = new Error(new BackendConnectionSupersededError().message)
+
+    const dial = vi.fn(() => {
+      throw failure
+    })
+
+    await expect(claims.run('research', dial)).rejects.toBe(failure)
+    expect(dial).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('BackendDialClaims (#90812)', () => {
   it('coalesces two concurrent dials for the same (connectionId, profile) onto ONE backend spawn', async () => {

@@ -1665,10 +1665,11 @@ _CODEX_OAUTH_CONTEXT_FALLBACK: dict[str, int] = {
     "gpt-5.6-sol": 272_000, "gpt-5.6-terra": 272_000, "gpt-5.6-luna": 272_000, "gpt-daybreak-blue-latest": 272_000,
     "gpt-5.5": 272_000, "gpt-5.4": 272_000, "gpt-5.2": 272_000, "gpt-5": 272_000,
 }
-# Codex OAuth advertises 272K for these families but ACCEPTS ~900K+ (verified live; gpt-5.5 and
+# Codex OAuth historically advertised 272K for these families but ACCEPTS ~900K+ (verified live; gpt-5.5 and
 # gpt-5.4-mini genuinely reject >272K). 900K keeps ≥11K margin. OPT-IN ONLY via explicit ``-900k``
 # picker variants (a 900K default burned subscription usage); the suffix is stripped before the wire.
-# The bump fires ONLY when the resolved value is exactly the stale 272,000. ``gpt-5.6`` and the gpt-6
+# A published catalog maximum bounds the opt-in window regardless of the advertised default; without
+# one, ONLY the known-stale 272,000 may use the verified fallback. ``gpt-5.6`` and the gpt-6
 # tiers are FAMILY PREFIXES so dated snapshots (``gpt-6-sol-2026-09-22``) inherit the bump (``-pro`` slugs
 # aren't routable on Codex); ``gpt-5.4`` is EXACT because gpt-5.4-mini enforces 272K. The gpt-6 tiers
 # carry the 5.6 verdict forward: they replace Sol/Terra/Luna on the same Codex route, and the live
@@ -1684,7 +1685,7 @@ _CODEX_OAUTH_VERIFIED_ABOVE_ADVERTISED_EXACT: dict[str, int] = {
     # EXACT, not a prefix: the dotted slug is its own line and ``-pro`` is not routable.
     "gpt-6.1-sol": 900_000,
 }
-_CODEX_OAUTH_STALE_ADVERTISED_CTX = 272_000  # the only advertised value the bump may override
+_CODEX_OAUTH_STALE_ADVERTISED_CTX = 272_000  # the only default overridable without a catalog maximum
 CODEX_CONTEXT_VARIANT_SUFFIX = "-900k"  # picker-only opt-in suffix; never sent on the wire
 # The ONLY bases eligible for ``-900k``: routable, live-verified. No family prefixing (it would synthesize
 # dead ``-pro`` variants); dated snapshots of the 5.6 / gpt-6 tier bases are allowed. gpt-daybreak-blue-latest is a verified Sol alias.
@@ -1870,7 +1871,7 @@ def _fetch_codex_oauth_context_lengths_with_source(access_token: str, base_url: 
         slug, ctx, max_ctx = (item.get("slug"), item.get("context_window"), item.get("max_context_window")) if isinstance(item, dict) else (None, None, None)
         if isinstance(slug, str) and isinstance(ctx, int) and ctx > 0:
             result[slug.strip()] = ctx
-            if isinstance(max_ctx, int) and max_ctx > 0:
+            if type(max_ctx) is int and max_ctx > 0:
                 max_result[slug.strip()] = max_ctx
     if not result:
         _remember_no_codex_catalog(cache_key)
@@ -1900,15 +1901,14 @@ def _resolve_codex_oauth_context_length_with_source(model: str, access_token: st
     if not model_bare:
         return None, ""
     def _apply_verified_bump(ctx: int, source: str, catalog_max: Optional[int] = None) -> tuple[int, str]:
-        """Lift an EXACT stale 272K advertisement to the verified cap for opted-in ``-900k`` variants only,
-        never above the catalog's own ``max_context_window`` when it publishes one (#105443)."""
+        """Use the verified/catalog cap for eligible ``-900k`` variants; without a published maximum,
+        only the known-stale 272K advertisement may use the verified fallback."""
         bumped = _verified_codex_ctx_for_slug(model_bare)
-        if bumped is not None and ctx == _CODEX_OAUTH_STALE_ADVERTISED_CTX:
+        if bumped is not None and (catalog_max is not None or ctx == _CODEX_OAUTH_STALE_ADVERTISED_CTX):
             bumped = min(bumped, catalog_max) if catalog_max else bumped
-            logger.debug("Codex OAuth context for %s: advertised %d raised to live-verified %d", model_bare, ctx, bumped)
+            logger.debug("Codex OAuth context for %s: advertised %d resolved to verified/catalog cap %d", model_bare, ctx, bumped)
             return bumped, source
         return ctx, source
-    # The Codex catalog only knows the base slug (no -900k, no vendor/).
     # ``-900k`` variants are Hermes picker aliases — the Codex catalog only knows the base slug, so resolve
     # against the stripped id. Also drop any ``vendor/`` namespace (``openai/gpt-5.6-sol-900k``): the
     # main-agent path normalizes it away before reaching here, but display/auxiliary callers pass it through
