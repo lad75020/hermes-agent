@@ -1,10 +1,10 @@
-import { contrastRatio, mix } from '@hermes/shared/color'
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { $backendThemes, __resetBackendSkinSync, ingestBackendSkin } from './backend-sync'
+import { readableInk } from './color'
 import { skinPref, ThemeProvider, useTheme } from './context'
-import { everforestTheme, githubContrastTheme, midnightTheme } from './presets'
+import { everforestTheme, midnightTheme } from './presets'
 import type { DesktopTheme } from './types'
 import { installUserTheme } from './user-themes'
 
@@ -415,7 +415,7 @@ function ThemeProbe({ onReady }: { onReady: (ctx: ReturnType<typeof useTheme>) =
   return null
 }
 
-describe('GitHub Contrast readability settings', () => {
+describe('ThemeProvider boot-failure palette', () => {
   beforeEach(() => {
     window.localStorage.clear()
     __resetBackendSkinSync()
@@ -423,66 +423,50 @@ describe('GitHub Contrast readability settings', () => {
 
   afterEach(cleanup)
 
-  it('restores default readability values when switching back to GitHub', () => {
-    let current!: ReturnType<typeof useTheme>
-
-    function Probe() {
-      current = useTheme()
-
-      return null
+  it.each([true, false])('persists the resolved colours with explicit midground tokens: %s', explicit => {
+    const colors = {
+      ...midnightTheme.colors,
+      foreground: '#123456',
+      ring: '#eeeeee',
+      midground: explicit ? '#234567' : undefined,
+      midgroundForeground: explicit ? '#fedcba' : undefined
     }
 
-    window.localStorage.setItem('hermes-desktop-theme-v2', 'github-contrast')
-    window.localStorage.setItem('hermes-desktop-mode-v1', 'light')
-
+    installUserTheme({ ...midnightTheme, name: 'boot-palette', colors, darkColors: colors })
+    let ctx: ReturnType<typeof useTheme>
     render(
       <ThemeProvider>
-        <Probe />
+        <ThemeProbe onReady={value => (ctx = value)} />
       </ThemeProvider>
     )
 
-    expect(cssVar('--conversation-scaffold-opacity')).toBe('0.9')
+    act(() => ctx!.setTheme('boot-palette'))
 
-    act(() => current.setTheme('github'))
-
-    expect(window.document.documentElement.dataset.hermesTheme).toBe('github')
-    expect(cssVar('--theme-text-primary-strength')).toBe('94%')
-    expect(cssVar('--theme-text-secondary-strength')).toBe('74%')
-    expect(cssVar('--theme-text-tertiary-strength')).toBe('54%')
-    expect(cssVar('--theme-text-quaternary-strength')).toBe('36%')
-    expect(cssVar('--theme-scaffold-text-strength')).toBe('64%')
-    expect(cssVar('--theme-scaffold-meta-strength')).toBe('44%')
-    expect(cssVar('--conversation-scaffold-opacity')).toBe('0.67')
+    const midground = colors.midground ?? colors.ring
+    const snapshot = JSON.parse(window.localStorage.getItem('hermes-boot-palette')!)
+    expect(snapshot).toEqual({
+      background: window.localStorage.getItem('hermes-boot-background'),
+      foreground: colors.foreground,
+      accent: midground,
+      accentForeground: colors.midgroundForeground ?? readableInk(midground)
+    })
+    expect(snapshot.accentForeground).toBe(cssVar('--dt-midground-foreground'))
   })
 
-  it.each(['light', 'dark'] as const)('applies AA transcript scaffolding in %s mode', mode => {
-    window.localStorage.setItem('hermes-desktop-theme-v2', 'github-contrast')
-    window.localStorage.setItem('hermes-desktop-mode-v1', mode)
-
+  it('stores no snapshot for a theme whose accent is a var() the notice could not resolve', () => {
+    window.localStorage.setItem('hermes-boot-palette', '{"stale":true}')
+    const colors = { ...midnightTheme.colors, midground: 'var(--theme-primary)', midgroundForeground: '#161616' }
+    installUserTheme({ ...midnightTheme, name: 'boot-palette-var', colors, darkColors: colors })
+    let ctx: ReturnType<typeof useTheme>
     render(
       <ThemeProvider>
-        <div />
+        <ThemeProbe onReady={value => (ctx = value)} />
       </ThemeProvider>
     )
 
-    const palette = mode === 'dark' ? githubContrastTheme.darkColors! : githubContrastTheme.colors
-    const scaffoldOpacity = Number(cssVar('--conversation-scaffold-opacity'))
-    const strength = (name: string) => Number.parseFloat(cssVar(name)) / 100
+    act(() => ctx!.setTheme('boot-palette-var'))
 
-    const chatSurface = mix(palette.background, mode === 'dark' ? '#0d0d0e' : '#f3f3f3', mode === 'dark' ? 0.26 : 0.08)
-    const effectiveScaffold = (name: string) => mix(chatSurface, palette.foreground, strength(name) * scaffoldOpacity)
-
-    expect(window.document.documentElement.dataset.hermesTheme).toBe('github-contrast')
-    expect(window.document.documentElement.dataset.hermesMode).toBe(mode)
-    expect(cssVar('--theme-background-seed')).toBe(palette.background)
-    expect(cssVar('--theme-text-primary-strength')).toBe('100%')
-    expect(cssVar('--theme-text-secondary-strength')).toBe('90%')
-    expect(cssVar('--theme-text-tertiary-strength')).toBe('78%')
-    expect(cssVar('--theme-text-quaternary-strength')).toBe('66%')
-    expect(cssVar('--theme-scaffold-text-strength')).toBe('90%')
-    expect(cssVar('--theme-scaffold-meta-strength')).toBe('78%')
-    expect(scaffoldOpacity).toBe(0.9)
-    expect(contrastRatio(effectiveScaffold('--theme-scaffold-text-strength'), chatSurface)).toBeGreaterThanOrEqual(4.5)
-    expect(contrastRatio(effectiveScaffold('--theme-scaffold-meta-strength'), chatSurface)).toBeGreaterThanOrEqual(4.5)
+    expect(window.localStorage.getItem('hermes-boot-palette')).toBeNull()
+    expect(window.localStorage.getItem('hermes-boot-background')).not.toBeNull()
   })
 })
