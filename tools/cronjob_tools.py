@@ -725,11 +725,13 @@ def _action_create(a: dict[str, Any]) -> str:
             # [] is an explicit zero-tool allowlist, not a clear back to the unrestricted default (#82010).
             enabled_toolsets=a["enabled_toolsets"] if a["enabled_toolsets"] is not None else None,
             workdir=_normalize_optional_job_value(a["workdir"]),
-            no_agent=_no_agent, no_fallback=bool(a["no_fallback"]), attach_to_session=a["attach_to_session"],
+            no_agent=_no_agent, attach_to_session=a["attach_to_session"],
             monitor_script=_normalize_optional_job_value(a["monitor_script"]),
             monitor_url=_normalize_optional_job_value(a["monitor_url"]),
             # CLI-only lane: absent from CRONJOB_SCHEMA and the model dispatch (models don't pick models).
             reasoning_effort=a["reasoning_effort"], interpreter=a["interpreter"],
+            timezone=_normalize_optional_job_value(a["timezone"]),
+            grace_minutes=a["grace_minutes"],
             pinned=bool(a["pinned"]),
             failure_deliver=_resolve_cron_context_deliver(_normalize_deliver_param(a["failure_deliver"])),
             **({"paused": a["paused"], "paused_reason": a["paused_reason"]}
@@ -945,8 +947,6 @@ def _update_run_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[str
     if a["workdir"] is not None:
         # Empty string clears; otherwise update_job() validates/normalizes.
         updates["workdir"] = _normalize_optional_job_value(a["workdir"]) or None
-    if a["no_fallback"] is not None:
-        updates["no_fallback"] = bool(a["no_fallback"])
     if a["no_agent"] is not None:
         # Flipping to True needs a script on the job or in this same update.
         target_no_agent = bool(a["no_agent"])
@@ -961,6 +961,18 @@ def _update_run_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[str
         repeat_state = dict(job.get("repeat") or {})
         repeat_state["times"] = normalize_repeat_value(a["repeat"])
         updates["repeat"] = repeat_state
+    if a["timezone"] is not None:
+        # '' clears the pin (the job inherits the profile timezone); update_job validates the key.
+        updates["timezone"] = _normalize_optional_job_value(a["timezone"]) or ""
+    if a["grace_minutes"] is not None:
+        # '' / null clears the override; 0 is a real value ("never catch up") and passes through.
+        updates["grace_minutes"] = (
+            None if isinstance(a["grace_minutes"], str) and not a["grace_minutes"].strip()
+            else a["grace_minutes"])
+        if _pick(updates, job, "grace_minutes") is not None:
+            kind = (_pick(updates, job, "schedule") or {}).get("kind")
+            if kind != "cron":
+                return "grace_minutes only applies to cron schedules."
     if a["schedule"] is not None:
         parsed_schedule = parse_schedule(a["schedule"])
         updates["schedule"] = parsed_schedule
@@ -1040,7 +1052,6 @@ def cronjob(
     enabled_toolsets: Optional[list[str]] = None,
     workdir: Optional[str] = None,
     no_agent: Optional[bool] = None,
-    no_fallback: Optional[bool] = None,
     attach_to_session: Optional[bool] = None,
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
@@ -1051,7 +1062,9 @@ def cronjob(
     paused: bool = False,
     paused_reason: Optional[str] = None,
     pinned: Optional[bool] = None,
-    interpreter: Optional[str] = None) -> str:
+    interpreter: Optional[str] = None,
+    timezone: Optional[str] = None,
+    grace_minutes: Optional[int | str] = None) -> str:
     """Unified cron job management tool."""
     a = dict(locals())
     del a["task_id"]  # unused but kept for handler signature compatibility
@@ -1150,7 +1163,6 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
                 "type": "string",
                 "description": "Optional change-detector that gates the agent: an http(s) URL (fetched each tick) or a script path (same rules as `script`, run each tick) — cheap, no LLM. Output identical to the previous tick skips the agent run entirely; changed output wakes the agent with a diff injected into the prompt. First tick always runs (baseline). Output must be deterministic (no timestamps) or every tick looks changed. Incompatible with no_agent. On update, '' clears."
             },
-            "no_fallback": {"type": "boolean", "description": "Disable provider/model fallback for this job."},
             "no_agent": {
                 "type": "boolean",
                 "default": False,
@@ -1173,6 +1185,10 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
             "workdir": {
                 "type": "string",
                 "description": "Optional absolute existing path to run the job from: injects that directory's AGENTS.md/context files and anchors terminal/file tools there. On update, '' clears."
+            },
+            "timezone": {
+                "type": "string",
+                "description": "Optional IANA zone (e.g. 'America/New_York') the cron expression is read in, instead of the profile's. On update, '' clears."
             },
             "attach_to_session": {
                 "type": "boolean",
@@ -1205,8 +1221,8 @@ def check_cronjob_requirements() -> bool:
 # different model. Programmatic callers of cronjob() itself retain the parameters.
 _HANDLER_FORWARDED_ARGS = (
     "job_id", "prompt", "schedule", "name", "repeat", "deliver", "failure_deliver", "skill", "skills", "reason",
-    "script", "context_from", "continuity", "enabled_toolsets", "workdir", "no_agent", "no_fallback", "attach_to_session",
-    "paused_reason", "pinned")
+    "script", "context_from", "continuity", "enabled_toolsets", "workdir", "no_agent", "attach_to_session",
+    "paused_reason", "pinned", "timezone", "grace_minutes")
 
 
 def _cronjob_handler(args, **kw):
