@@ -68,6 +68,7 @@
     "test:runtime-plugin-production": "npm run build && node --test scripts/runtime-plugin-production.smoke.mjs",
     "test:desktop:platforms": "vitest run --project electron",
     "test:find-in-page-native": "electron electron/find-in-page-native-fixture",
+    "test:preview-activity-native": "electron electron/preview-activity-native-fixture",
     "test": "vitest run",
     "preview": "node scripts/assert-root-install.mjs && vite preview --host 127.0.0.1 --port 4174",
     "check:test:ui": "npm run test:ui",
