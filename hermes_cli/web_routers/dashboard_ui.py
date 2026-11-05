@@ -21,7 +21,8 @@ from hermes_cli.web_server_dashboard import (
 )
 from hermes_cli.web_server_memory import _normalize_memory_provider_name, _require_memory_provider_ready
 from hermes_cli.web_models import (
-    FontSetBody, ThemeSetBody, _AgentPluginInstallBody, _PluginProvidersPutBody, _PluginVisibilityBody,
+    FontSetBody, ThemeSetBody, _AgentPluginInstallBody, _PluginAutoUpdateBody, _PluginProvidersPutBody,
+    _PluginVisibilityBody,
 )
 
 _log = logging.getLogger("hermes_cli.web_server")
@@ -232,52 +233,57 @@ async def _named_plugin_action(request: Request, name: str, action: Callable[[st
         action(_validate_plugin_name(name)), fallback_error, rescan=rescan, client_decides=client_decides))
 
 
-def _plugin_name_from_route(
-    name: Optional[str] = None,
-    namespace: Optional[str] = None,
-    plugin: Optional[str] = None,
-) -> str:
-    """Build a plugin registry key from dashboard route parameters.
+@router.post("/api/dashboard/agent-plugins/update-all")
+async def post_agent_plugins_update_all(request: Request):
+    """Update every plugin with an update, unattended: a widened pin or a git update's caution scan comes back
+    ``needs_review`` (nothing changed) for the plugin's own Update action to walk."""
+    _require_token(request)
+    from hermes_cli.plugins_auto_update import update_all_unattended
 
-    Starlette/FastAPI's path converter is reliable at the end of a route, but
-    a route like ``/{name:path}/enable`` can be shadowed by sibling catch-all
-    routes when ``name`` itself contains a slash (for example
-    ``observability/langfuse``), producing HTTP 405.  The explicit
-    ``/{namespace}/{plugin}/...`` routes below cover the category-style plugin
-    keys used by Hermes while preserving the original single-segment route.
-    """
-    if namespace is not None and plugin is not None:
-        return f"{namespace}/{plugin}"
-    return name or ""
+    def _run() -> dict:
+        outcome = update_all_unattended()
+        if any(r["status"] == "updated" for r in outcome["results"]):
+            _get_dashboard_plugins(force_rescan=True)
+        _invalidate_plugins_hub_cache()
+        return outcome
+
+    return await _plugin_mutation(_run)
+
+
+@router.get("/api/dashboard/plugins/auto-update")
+async def get_plugins_auto_update(request: Request):
+    _require_token(request)
+    from hermes_cli.plugins_auto_update import auto_update_state
+    return await _plugin_mutation(auto_update_state)
+
+
+@router.put("/api/dashboard/plugins/auto-update")
+async def put_plugins_auto_update(request: Request, body: _PluginAutoUpdateBody):
+    _require_token(request)
+    from hermes_cli.plugins_auto_update import set_auto_update
+    from hermes_cli.plugins_cmd import PluginOperationError
+    try:
+        return await _plugin_mutation(lambda: set_auto_update(body.enabled))
+    except PluginOperationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 @router.post("/api/dashboard/agent-plugins/{name:path}/enable")
-@router.post("/api/dashboard/agent-plugins/{namespace}/{plugin}/enable")
-async def post_agent_plugin_enable(
-    request: Request, name: Optional[str] = None, namespace: Optional[str] = None, plugin: Optional[str] = None,
-):
-    name = _plugin_name_from_route(name, namespace, plugin)
+async def post_agent_plugin_enable(request: Request, name: str):
     from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
     return await _named_plugin_action(request, name, lambda n: dashboard_set_agent_plugin_enabled(n, enabled=True),
                                       "Enable failed.", rescan=False)
 
 
 @router.post("/api/dashboard/agent-plugins/{name:path}/disable")
-@router.post("/api/dashboard/agent-plugins/{namespace}/{plugin}/disable")
-async def post_agent_plugin_disable(
-    request: Request, name: Optional[str] = None, namespace: Optional[str] = None, plugin: Optional[str] = None,
-):
-    name = _plugin_name_from_route(name, namespace, plugin)
+async def post_agent_plugin_disable(request: Request, name: str):
     from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
     return await _named_plugin_action(request, name, lambda n: dashboard_set_agent_plugin_enabled(n, enabled=False),
                                       "Disable failed.", rescan=False)
 
 
 @router.post("/api/dashboard/agent-plugins/{name:path}/update")
-@router.post("/api/dashboard/agent-plugins/{namespace}/{plugin}/update")
-async def post_agent_plugin_update(
-    request: Request, name: Optional[str] = None, namespace: Optional[str] = None, plugin: Optional[str] = None,
-):
-    name = _plugin_name_from_route(name, namespace, plugin)
+async def post_agent_plugin_update(request: Request, name: str):
     from hermes_cli.plugins_cmd import dashboard_update_user_plugin
     # Body is optional: ``{"accept_capabilities": true}`` applies a re-pin the user confirmed after a
     # ``consent_required`` answer; ``{"force": true}`` applies an update whose scan returned caution
