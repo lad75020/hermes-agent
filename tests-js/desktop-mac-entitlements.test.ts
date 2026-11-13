@@ -41,7 +41,6 @@ const BOOTSTRAP_ENTITLEMENTS = path.join(BOOTSTRAP_TAURI_DIR, 'entitlements.plis
 const BOOTSTRAP_INFO_PLIST = path.join(BOOTSTRAP_TAURI_DIR, 'Info.plist')
 
 const DEVICE_PREFIX = 'com.apple.security.device.'
-const APPLE_EVENTS_ENTITLEMENT = 'com.apple.security.automation.apple-events'
 
 function loadEntitlements(plistPath: string): Record<string, unknown> {
   assert.ok(fs.existsSync(plistPath), `missing entitlements file: ${plistPath}`)
@@ -66,13 +65,24 @@ test('inherit plist grants microphone (regression #37718)', () => {
   )
 })
 
-test('main plist grants Apple Events automation for Xcode MCP', () => {
+test('both plists grant Apple Events automation', () => {
   const main = loadEntitlements(MAIN_PLIST)
-  assert.equal(
-    main[APPLE_EVENTS_ENTITLEMENT],
-    true,
-    'entitlements.mac.plist must grant Apple Events automation so macOS can authorize Hermes to use Xcode MCP.'
-  )
+  const inherit = loadEntitlements(INHERIT_PLIST)
+
+  for (const [name, data] of [
+    ['entitlements.mac.plist', main],
+    ['entitlements.mac.inherit.plist', inherit],
+  ] as const) {
+    assert.equal(
+      data['com.apple.security.automation.apple-events'],
+      true,
+      `${name} must grant \`com.apple.security.automation.apple-events\`; ` +
+        'without it the hardened runtime denies sending Apple Events, so ' +
+        'AppleScript/osascript automation of other apps (e.g. Apple Notes, ' +
+        'which has no framework API) fails silently with no TCC prompt — ' +
+        'even when NSAppleEventsUsageDescription is present in Info.plist.'
+    )
+  }
 })
 
 test('every device.* entitlement on the main app is also inherited', () => {
