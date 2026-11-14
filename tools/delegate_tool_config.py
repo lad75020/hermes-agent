@@ -494,6 +494,12 @@ def _resolver_kept_endpoint(named: dict, configured_url: str) -> bool:
         return (url or "").rstrip("/").removesuffix("/v1")
     return sans_version(named["base_url"]) == sans_version(expected)
 
+
+def _is_auto_model(model: Any) -> bool:
+    """`auto` is a parent-model inheritance sentinel, not a provider model id."""
+    return isinstance(model, str) and model.strip().casefold() == "auto"
+
+
 def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     """Child credential bundle from the ``delegation`` config section. Three branches: ``base_url`` set → direct
     endpoint (``api_key`` None means inherit the parent's key, so providers keyed outside OPENAI_API_KEY work; a
@@ -503,6 +509,9 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     with a user-facing message."""
     values = {k: str(cfg.get(k) or "").strip() or None for k in ("model", "provider", "base_url", "api_key")}
     values["api_mode"] = str(cfg.get("api_mode") or "").strip().lower() or None
+    inherit_parent_model = _is_auto_model(values["model"])
+    if inherit_parent_model:
+        values["model"] = None
     explicit_request_overrides = cfg.get("request_overrides") if isinstance(cfg.get("request_overrides"), dict) else None
     is_native_sdk_provider = (values["provider"] or "").strip().lower() in _NATIVE_SDK_PROVIDERS
 
@@ -519,6 +528,10 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
                 )
             if values["api_mode"]:
                 named["api_mode"] = values["api_mode"]
+            elif inherit_parent_model:
+                named["api_mode"] = None
+            if inherit_parent_model:
+                named["model"] = None
             return named
         return _direct_endpoint_credentials(values, explicit_request_overrides)
     if not values["provider"]:
@@ -527,7 +540,12 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             values["model"], None, None, None, None,
             _merge_request_overrides(getattr(parent_agent, "request_overrides", None), explicit_request_overrides),
         )
-    return _runtime_provider_credentials(values, explicit_request_overrides)
+    resolved = _runtime_provider_credentials(values, explicit_request_overrides)
+    if inherit_parent_model:
+        resolved["model"] = None
+        if not values["api_mode"]:
+            resolved["api_mode"] = None
+    return resolved
 
 def _load_config() -> dict:
     """The ``delegation`` config section (read-only — do NOT mutate). Prefers the shared ``load_config_readonly()``
@@ -613,6 +631,8 @@ def _resolve_child_runtime(
     or is Nous Portal (dual-wire); a pinned ``delegation.command`` must exist on PATH or the spawn fails loudly;
     ``override_provider`` clears the parent's ACP transport, fallback chain and OpenRouter routing filters so the
     pinned provider is actually honoured."""
+    if _is_auto_model(model):
+        model = None
     effective_model = model or parent_agent.model
     # provider/base_url are one bundle: all from the override, or all from the parent. Per-field fallback built
     # children like an override provider pointed at the PARENT's endpoint (e.g. one provider's credentials on the
