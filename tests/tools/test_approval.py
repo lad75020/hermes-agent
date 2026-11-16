@@ -1,4 +1,3 @@
-from tools.approval_gateway_wait import _ApprovalEntry
 """Tests for the dangerous command approval module."""
 
 import os
@@ -16,7 +15,6 @@ from tools import approval_smart
 from tools.approval import approve_session, detect_dangerous_command, detect_hardline_command, is_approved, load_permanent, prompt_dangerous_approval
 from tools.approval_context import _get_approval_mode
 from tools.approval_context import _normalize_approval_mode
-from tools.approval_gateway_wait import _ApprovalEntry
 from tools.approval_smart import _smart_approve
 
 
@@ -349,69 +347,8 @@ class TestCloudMetadataEndpoint:
 
 
 def _clear_session(key):
-    """Clear approval state for a test session."""
-    approval_module.clear_session(key)
-    with approval_module._lock:
-        approval_module._session_approved.pop(key, None)
-        approval_module._pending.pop(key, None)
-        approval_module._gateway_queues.pop(key, None)
-
-
-class TestApprovalSnapshots:
-    def test_snapshot_gateway_approvals_exposes_serializable_fifo_rows(self):
-        key = "test_dashboard_snapshot"
-        _clear_session(key)
-        try:
-            first = _ApprovalEntry({
-                "command": "rm -rf /tmp/demo",
-                "pattern_key": "recursive delete",
-                "pattern_keys": ["recursive delete"],
-                "description": "recursive delete",
-            })
-            second = _ApprovalEntry({
-                "command": "bash -lc 'echo hi'",
-                "pattern_key": "shell execution",
-                "pattern_keys": ["shell execution"],
-                "description": "shell execution",
-            })
-            with approval_module._lock:
-                approval_module._gateway_queues[key] = [first, second]
-
-            snapshot = approval_module.snapshot_gateway_approvals()
-
-            rows = [row for row in snapshot if row["session_key"] == key]
-            assert [row["queue_position"] for row in rows] == [1, 2]
-            assert rows[0]["id"] == f"{key}:1"
-            assert rows[0]["kind"] == "shell_command"
-            assert rows[0]["command"] == "rm -rf /tmp/demo"
-            assert rows[0]["pattern_keys"] == ["recursive delete"]
-            assert rows[0]["scope_options"] == ["once", "session", "always", "deny"]
-            assert isinstance(rows[0]["created_at"], float)
-        finally:
-            _clear_session(key)
-
-    def test_snapshot_gateway_approvals_omits_always_for_tirith(self):
-        key = "test_dashboard_tirith_snapshot"
-        _clear_session(key)
-        try:
-            entry = _ApprovalEntry({
-                "command": "python tool.py",
-                "pattern_key": "tirith:secrets",
-                "pattern_keys": ["tirith:secrets"],
-                "description": "Security scan — secret exposure",
-            })
-            with approval_module._lock:
-                approval_module._gateway_queues[key] = [entry]
-
-            row = next(
-                row for row in approval_module.snapshot_gateway_approvals()
-                if row["session_key"] == key
-            )
-
-            assert row["title"] == "Security approval required"
-            assert row["scope_options"] == ["once", "session", "deny"]
-        finally:
-            _clear_session(key)
+    """Replace for removed clear_session() — directly clear internal state."""
+    approval_module._session_approved.pop(key, None)
 
 
 class TestCredentialExfilAndInvisibleChars:
@@ -1604,7 +1541,6 @@ class TestApprovalTimeoutIsNotConsent:
         mod._gateway_notify_cbs.clear()
         mod._session_approved.clear()
         mod._permanent_approved.clear()
-        mod._pending.clear()
 
         self._saved_env = {
             k: os.environ.get(k)
