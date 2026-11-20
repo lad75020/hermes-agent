@@ -1,6 +1,6 @@
 /**
  * Regression coverage for an attached image in a durable session. The gateway
- * persists the turn, the builder exits, and desktop renders it from SessionDB
+ * persists the turn, the builder exits, and desktop renders it from the session store
  * for the first time — the "quit and relaunch" case, where the transcript used
  * to come back as vision-enrichment prose instead of a thumbnail.
  *
@@ -164,7 +164,9 @@ test.describe('attached image resume', () => {
     fixture = null
   })
 
-  test('renders a persisted attachment as a thumbnail on first open and after a cold reload', async ({}, testInfo) => {
+  test('renders a persisted attachment as a thumbnail on first open and after a cold reload', async () => {
+    const testInfo = test.info()
+
     // Seeding through the real gateway plus two full app boots does not fit the
     // default per-test budget on a cold runner.
     test.slow()
