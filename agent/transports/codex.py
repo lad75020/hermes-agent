@@ -385,9 +385,10 @@ def _is_openai_api_origin(base_url: Any) -> bool:
 
 def _is_official_openai_responses_route(model: Any, base_url: Any) -> bool:
     """Strict Astra/GPT-6.2 API contract, plus GPT-6.2 on official Codex and residency hosts."""
+    from agent.model_metadata import strip_codex_context_variant_suffix
     from utils import base_url_hostname
 
-    bare = str(model or "").strip().lower().rsplit("/", 1)[-1]
+    bare = strip_codex_context_variant_suffix(str(model or "")).lower().rsplit("/", 1)[-1]
     if bare in GPT62_MODEL_IDS:
         return (_is_openai_api_origin(base_url) or is_official_codex_base_url(str(base_url or ""))
                 or base_url_hostname(str(base_url or "")) in {"us.api.openai.com", "eu.api.openai.com"})

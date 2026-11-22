@@ -74,7 +74,7 @@ def _add_forward_compat_models(model_ids: list[str]) -> list[str]:
 def _add_context_variants(model_ids: list[str]) -> list[str]:
     """Insert ``<slug>-900k`` large-context picker variants after eligible base slugs.
 
-    Base slugs keep the cheaper advertised 272K limit; the variant opts into the large window.
+    Base slugs keep their advertised default; GPT-6.2 Sol's alias is capped at 872K by its catalog.
     The suffix is Hermes-side only — stripped before the id hits the wire (agent/transports/codex.py,
     agent/auxiliary_client.py).
     """
@@ -99,10 +99,11 @@ def _finalize_codex_models(model_ids: list[str]) -> list[str]:
 
 def codex_model_requires_account_discovery(model: str) -> bool:
     """Whether a Codex model is only advertised after account discovery."""
+    from agent.model_metadata import strip_codex_context_variant_suffix
     from agent.reasoning_effort import GPT62_MODEL_IDS, is_astra_model
     from hermes_cli.model_normalize import normalize_model_for_provider
 
-    return is_astra_model(model) or normalize_model_for_provider(model, "openai-codex") in GPT62_MODEL_IDS
+    return is_astra_model(model) or normalize_model_for_provider(strip_codex_context_variant_suffix(model), "openai-codex") in GPT62_MODEL_IDS
 
 
 def codex_catalog_credential_identity() -> str:

@@ -1660,15 +1660,11 @@ _CODEX_OAUTH_CONTEXT_FALLBACK: dict[str, int] = {
     "gpt-5.6-sol": 272_000, "gpt-5.6-terra": 272_000, "gpt-5.6-luna": 272_000, "gpt-daybreak-blue-latest": 272_000,
     "gpt-5.5": 272_000, "gpt-5.4": 272_000, "gpt-5.2": 272_000, "gpt-5": 272_000,
 }
-# Codex OAuth historically advertised 272K for these families but ACCEPTS ~900K+ (verified live; gpt-5.5 and
-# gpt-5.4-mini genuinely reject >272K). 900K keeps ≥11K margin. OPT-IN ONLY via explicit ``-900k``
-# picker variants (a 900K default burned subscription usage); the suffix is stripped before the wire.
-# A published catalog maximum bounds the opt-in window regardless of the advertised default; without
-# one, ONLY the known-stale 272,000 may use the verified fallback. ``gpt-5.6`` and the gpt-6
-# tiers are FAMILY PREFIXES so dated snapshots (``gpt-6-sol-2026-09-22``) inherit the bump (``-pro`` slugs
-# aren't routable on Codex); ``gpt-5.4`` is EXACT because gpt-5.4-mini enforces 272K. The gpt-6 tiers
-# carry the 5.6 verdict forward: they replace Sol/Terra/Luna on the same Codex route, and the live
-# catalog's ``max_context_window`` still caps the bump (#105443) if it publishes a lower ceiling.
+# Legacy Codex families accept ~900K+ despite advertising 272K (live-verified; gpt-5.5 and
+# gpt-5.4-mini enforce 272K). 900K leaves ≥11K margin. Explicit ``-900k`` opt-in only: raising
+# the default burned subscription usage. A published maximum caps the bump (#105443); without
+# one, only the known-stale 272K may use it. Prefixes carry the 5.6 verdict to replacement gpt-6
+# tiers and dated snapshots; eligibility below excludes unroutable ``-pro`` and mini slugs.
 _CODEX_OAUTH_VERIFIED_ABOVE_ADVERTISED_PREFIXES: dict[str, int] = {
     "gpt-5.6": 900_000, "gpt-6-sol": 900_000, "gpt-6-luna": 900_000,
 }
@@ -1681,11 +1677,12 @@ _CODEX_OAUTH_VERIFIED_ABOVE_ADVERTISED_EXACT: dict[str, int] = {
     "gpt-6.1-sol": 900_000,
 }
 _CODEX_OAUTH_STALE_ADVERTISED_CTX = 272_000  # the only default overridable without a catalog maximum
+# Catalog-validated only, not long-input acceptance-tested: expansion REQUIRES a published maximum.
+_CODEX_OAUTH_CATALOG_ONLY_VARIANT_CAPS = {"gpt-6.2-sol": 872_000}
 CODEX_CONTEXT_VARIANT_SUFFIX = "-900k"  # picker-only opt-in suffix; never sent on the wire
-# The ONLY bases eligible for ``-900k``: routable, live-verified. No family prefixing (it would synthesize
-# dead ``-pro`` variants); dated snapshots of the 5.6 / gpt-6 tier bases are allowed. gpt-daybreak-blue-latest is a verified Sol alias.
+# Exact eligibility includes catalog-only opt-ins; only legacy tier bases allow dated snapshots.
 _CODEX_900K_SNAPSHOT_BASES = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-sol", "gpt-6-luna")
-_CODEX_900K_ELIGIBLE_BASES = frozenset({*_CODEX_900K_SNAPSHOT_BASES, "gpt-5.4", "gpt-daybreak-blue-latest", "gpt-6-astra", "gpt-6.1-sol"})
+_CODEX_900K_ELIGIBLE_BASES = frozenset({*_CODEX_900K_SNAPSHOT_BASES, *_CODEX_OAUTH_CATALOG_ONLY_VARIANT_CAPS, "gpt-5.4", "gpt-daybreak-blue-latest", "gpt-6-astra", "gpt-6.1-sol"})
 _CODEX_900K_SNAPSHOT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -1892,6 +1889,17 @@ def _cached_codex_catalog_max(access_token: str, base_url: str, slug: str) -> Op
     return published.get(_codex_catalog_key(published, slug))
 
 
+def _codex_variant_context_length(model: str, ctx: int, catalog_max: Optional[int] = None) -> int:
+    """Apply opt-in caps; catalog-only models cannot expand on legacy acceptance evidence."""
+    catalog_only_cap = _CODEX_OAUTH_CATALOG_ONLY_VARIANT_CAPS.get(_codex_variant_base(model))
+    if catalog_only_cap is not None:
+        return min(catalog_only_cap, catalog_max if catalog_max is not None else ctx)
+    bumped = _verified_codex_ctx_for_slug(model)
+    if bumped is not None and (catalog_max is not None or ctx == _CODEX_OAUTH_STALE_ADVERTISED_CTX):
+        return min(bumped, catalog_max) if catalog_max is not None else bumped
+    return ctx
+
+
 def _resolve_codex_oauth_context_length_with_source(model: str, access_token: str = "", base_url: str = "") -> tuple[Optional[int], str]:
     """``(context_length, source)`` for a Codex OAuth slug. source: "live" (fresh authenticated probe —
     the only one eligible for persistent writes), "memory" (same-token in-process hit), "fallback"
@@ -1899,15 +1907,6 @@ def _resolve_codex_oauth_context_length_with_source(model: str, access_token: st
     model_bare = _strip_provider_prefix(model).strip()
     if not model_bare:
         return None, ""
-    def _apply_verified_bump(ctx: int, source: str, catalog_max: Optional[int] = None) -> tuple[int, str]:
-        """Use the verified/catalog cap for eligible ``-900k`` variants; without a published maximum,
-        only the known-stale 272K advertisement may use the verified fallback."""
-        bumped = _verified_codex_ctx_for_slug(model_bare)
-        if bumped is not None and (catalog_max is not None or ctx == _CODEX_OAUTH_STALE_ADVERTISED_CTX):
-            bumped = min(bumped, catalog_max) if catalog_max else bumped
-            logger.debug("Codex OAuth context for %s: advertised %d resolved to verified/catalog cap %d", model_bare, ctx, bumped)
-            return bumped, source
-        return ctx, source
     # ``-900k`` variants are Hermes picker aliases — the Codex catalog only knows the base slug, so resolve
     # against the stripped id. Also drop any ``vendor/`` namespace (``openai/gpt-5.6-sol-900k``): the
     # main-agent path normalizes it away before reaching here, but display/auxiliary callers pass it through
@@ -1920,9 +1919,9 @@ def _resolve_codex_oauth_context_length_with_source(model: str, access_token: st
         catalog_max = _cached_codex_catalog_max(access_token, base_url, lookup_bare)
         slug = _codex_catalog_key(live, lookup_bare)
         if slug is not None:
-            return _apply_verified_bump(live[slug], "live" if fresh_probe else "memory", catalog_max)
+            return _codex_variant_context_length(model_bare, live[slug], catalog_max), "live" if fresh_probe else "memory"
     hit = _longest_key_match(_CODEX_OAUTH_CONTEXT_FALLBACK, lookup_bare.lower())
-    return _apply_verified_bump(hit[1], "fallback", catalog_max) if hit else (None, "")
+    return (_codex_variant_context_length(model_bare, hit[1], catalog_max), "fallback") if hit else (None, "")
 
 
 def _resolve_nous_context_length(model: str, base_url: str = "", api_key: str = "") -> tuple[Optional[int], str]:
@@ -2087,13 +2086,10 @@ def _resolve_custom_codex_route_context_length(model: str, base_url: str, api_ke
     not know take the ordinary endpoint probes."""
     ctx, _source = _resolve_codex_oauth_context_length_with_source(model)
     if ctx and api_key and is_codex_context_variant(model):
-        # The -900k bump is an account-level assumption; a gateway whose own catalog publishes a
-        # Codex-shaped max_context_window caps it, as the native provider's live catalog does.
+        # Ask only the credential's own route; catalog-only variants need its maximum to expand.
         _fetch_codex_oauth_context_lengths_with_source(api_key, base_url)
         cap = _cached_codex_catalog_max(api_key, base_url, _bare_codex_slug(strip_codex_context_variant_suffix(model)))
-        if cap and cap < ctx:
-            logger.info("Route catalog at %s caps %r at max_context_window %s", base_url, model, f"{cap:,}")
-            ctx = cap
+        ctx = _codex_variant_context_length(model, ctx, cap)
     if ctx:
         logger.info("Using Codex OAuth context length %s for model %r (codex_responses route at %s)", f"{ctx:,}", model, base_url)
         return ctx

@@ -462,11 +462,23 @@ the model id is sent to the backend, and pricing/usage accounting treats them
 as the base model. Slugs that genuinely enforce 272K (gpt-5.5, gpt-5.4-mini)
 have no `-900k` variant. When the same authenticated route's Codex catalog
 publishes a valid positive `max_context_window` for the base slug, the `-900k`
-variant resolves to the smaller of that maximum and its verified 900K ceiling,
+legacy variant resolves to the smaller of that maximum and its verified 900K ceiling,
 regardless of the advertised default. For example, a 500K default and 872K
 maximum resolve to 872K for the alias and 500K for the base. Without a valid
 maximum, only the known-stale 272K advertisement (including the offline table
 fallback) may use 900K; other advertised defaults are preserved.
+
+`gpt-6.2-sol-900k` retains the existing selector convention but has a strict
+**872,000-token ceiling**, including when the catalog maximum is missing or
+invalid. It appears only from an account-discovered `gpt-6.2-sol` base and
+expands only when that account and endpoint's catalog publishes a positive
+integer `max_context_window`: the result is the smaller of that maximum and
+872,000. Without a valid maximum it keeps the advertised default, capped at
+872,000 (offline fallback: 500,000); the legacy 272K-to-900K fallback does not
+apply. The base keeps its advertised default (currently 500,000), and direct
+API base-model limits are unchanged. This opt-in is **catalog-validated only**;
+no long-input inference acceptance test has been performed. GPT-6.2 Astra,
+pro variants and GPT-6.2 dated snapshots do not gain this opt-in.
 
 Compaction thresholds follow the window: base slugs still at 272K get the **85%
 autoraise** described above, while `-900k` variants keep your global

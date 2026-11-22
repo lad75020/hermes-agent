@@ -35,7 +35,7 @@ def test_first_party_model_routes_keep_capabilities_and_reasoning(monkeypatch, m
     monkeypatch.setattr("hermes_cli.codex_models._fetch_models_from_api", lambda *a, **k: [model])
     assert model in get_codex_model_ids(access_token="test-token")
     assert not is_astra_model(model)  # GPT-6 Astra's preview entitlement gate must not hide 6.2.
-    assert not has_codex_context_variant(model)  # No unverified 900K opt-in.
+    assert has_codex_context_variant(model) is (model == "gpt-6.2-sol")
     assert _resolve_codex_oauth_context_length_with_source(model) == (codex_window, "fallback")
     info = models_dev.get_model_info("openai", model)
     assert info is not None
@@ -114,7 +114,7 @@ def test_new_contract_does_not_capture_predecessors_or_invent_variants():
     from hermes_cli.models import model_supports_ultrafast, resolve_fast_mode_overrides
 
     assert "none" in codex_supported_efforts("gpt-6-sol")
-    for model in ("gpt-6.2-astra-pro", "gpt-6.2-sol-mini", "gpt-6.2-sol-900k", "gpt-6.20-sol"):
+    for model in ("gpt-6.2-astra-pro", "gpt-6.2-sol-mini", "gpt-6.2-astra-900k", "gpt-6.20-sol"):
         assert codex_supported_efforts(model) == CODEX_LEGACY_EFFORTS
         assert not model_supports_ultrafast(model)
     for model in ("gpt-6.2-astra", "gpt-6.2-sol"):
